@@ -70,6 +70,17 @@ impl RemotePanel {
         }
     }
 
+    pub fn selected_profile(&self) -> Option<(&Profile, Option<String>)> {
+        let profile = self.store.profiles.get(self.selected)?;
+        let key = format!("{}:{}", profile.host.trim(), profile.port);
+        Some((profile, self.store.known_hosts.get(&key).cloned()))
+    }
+
+    pub fn trust(&mut self, host: String, fingerprint: String) -> Result<(), String> {
+        self.store.known_hosts.insert(host, fingerprint);
+        self.store.save()
+    }
+
     pub fn modal_open(&self) -> bool {
         self.prompt.is_some() || self.host_key.is_some() || self.editor.is_some()
     }

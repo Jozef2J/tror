@@ -15,6 +15,7 @@ use crate::editor;
 use crate::highlight::Syntaxes;
 use crate::remote_ui::{PanelEvent, RemotePanel};
 use crate::search::{Pending, SearchState};
+use crate::terminal::{TermEvent, Terminal};
 use crate::theme::{self, Palette};
 
 const SETTINGS_KEY: &str = "tror";
@@ -45,6 +46,7 @@ fn encoding_label(encoding: &'static Encoding, bom: bool) -> String {
 struct Settings {
     dark: bool,
     remote_panel: bool,
+    terminal_panel: bool,
     recent: Vec<PathBuf>,
     session: Vec<PathBuf>,
     active: usize,
@@ -55,6 +57,7 @@ impl Default for Settings {
         Self {
             dark: true,
             remote_panel: false,
+            terminal_panel: false,
             recent: Vec::new(),
             session: Vec::new(),
             active: 0,
@@ -81,6 +84,7 @@ enum Action {
     GotoLine,
     ToggleTheme,
     ToggleRemote,
+    ToggleTerminal,
     NextTab,
     PrevTab,
 }
@@ -203,6 +207,7 @@ pub struct TrorApp {
     search: SearchState,
     complete: Completion,
     remote: RemotePanel,
+    terminal: Terminal,
     goto: Option<String>,
     confirm: Option<Confirm>,
     allow_close: bool,
@@ -230,6 +235,7 @@ impl TrorApp {
             search: SearchState::default(),
             complete: Completion::default(),
             remote: RemotePanel::new(false),
+            terminal: Terminal::new(false),
             goto: None,
             confirm: None,
             allow_close: false,
@@ -239,6 +245,7 @@ impl TrorApp {
             applied_theme: None,
         };
         app.remote.visible = app.settings.remote_panel;
+        app.terminal.visible = app.settings.terminal_panel;
         let session = std::mem::take(&mut app.settings.session);
         let active = app.settings.active;
         for path in session.iter().filter(|p| p.is_file()) {
@@ -547,6 +554,7 @@ impl TrorApp {
             }
             Action::ToggleTheme => self.settings.dark = !self.settings.dark,
             Action::ToggleRemote => self.remote.visible = !self.remote.visible,
+            Action::ToggleTerminal => self.terminal.visible = !self.terminal.visible,
             Action::NextTab => {
                 if !self.docs.is_empty() {
                     self.active = (self.active + 1) % self.docs.len();
@@ -576,11 +584,15 @@ impl TrorApp {
             (cmd, Key::H, 7),
             (cmd, Key::G, 8),
             (Modifiers::NONE, Key::F8, 12),
+            (Modifiers::NONE, Key::F9, 13),
             (cmd, Key::Tab, 9),
             (Modifiers::SHIFT, Key::F3, 10),
             (Modifiers::NONE, Key::F3, 11),
         ];
         for (modifiers, key, code) in table {
+            if self.terminal.focused && code < 12 {
+                continue;
+            }
             if !ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key))) {
                 continue;
             }
@@ -595,6 +607,7 @@ impl TrorApp {
                 7 => Action::Replace,
                 8 => Action::GotoLine,
                 12 => Action::ToggleRemote,
+                13 => Action::ToggleTerminal,
                 9 => Action::NextTab,
                 10 => Action::FindPrev,
                 _ => Action::FindNext,
@@ -701,6 +714,14 @@ impl TrorApp {
                 };
                 if item(ui, panel, "F8", true) {
                     actions.push(Action::ToggleRemote);
+                }
+                let console = if self.terminal.visible {
+                    "Скрыть SSH-консоль"
+                } else {
+                    "SSH-консоль"
+                };
+                if item(ui, console, "F9", true) {
+                    actions.push(Action::ToggleTerminal);
                 }
                 ui.separator();
                 ui.weak(key("Масштаб: Ctrl + / Ctrl − / Ctrl 0"));
@@ -1195,8 +1216,20 @@ impl eframe::App for TrorApp {
         for file in ctx.input(|i| i.raw.dropped_files.clone()) {
             actions.push(Action::OpenPath(file.path().to_path_buf()));
         }
-        let modal_open = self.goto.is_some() || self.confirm.is_some() || self.remote.modal_open();
+        let modal_open = self.goto.is_some()
+            || self.confirm.is_some()
+            || self.remote.modal_open()
+            || self.terminal.modal_open();
         self.remote_events(&ctx);
+        for event in self.terminal.poll() {
+            let TermEvent::Trust { host, fingerprint } = event;
+            if let Err(e) = self.remote.trust(host, fingerprint) {
+                self.notify(
+                    format!("Не удалось сохранить ключ: {e}"),
+                    ctx.input(|i| i.time),
+                );
+            }
+        }
         if !modal_open {
             self.shortcuts(&ctx, &mut actions);
         }
@@ -1238,6 +1271,23 @@ impl eframe::App for TrorApp {
                 .show(ui, |ui| self.search_bar(ui, &pal, &mut actions));
         }
 
+        if self.terminal.visible {
+            let (profile, known) = match self.remote.selected_profile() {
+                Some((profile, known)) => (Some(profile), known),
+                None => (None, None),
+            };
+            Panel::bottom("tror_terminal")
+                .frame(bar.inner_margin(Margin::symmetric(8, 0)))
+                .resizable(true)
+                .default_size(240.0)
+                .min_size(90.0)
+                .show(ui, |ui| {
+                    self.terminal
+                        .ui(ui, &pal, self.settings.dark, profile, known)
+                });
+        } else {
+            self.terminal.focused = false;
+        }
         if self.remote.visible {
             Panel::left("tror_remote")
                 .frame(bar.inner_margin(Margin::symmetric(8, 0)))
@@ -1248,7 +1298,9 @@ impl eframe::App for TrorApp {
         }
 
         CentralPanel::no_frame().show(ui, |ui| {
-            let idle = !self.search.open && ctx.memory(|m| m.focused().is_none());
+            let idle = !self.search.open
+                && !self.terminal.focused
+                && ctx.memory(|m| m.focused().is_none());
             let focus = (std::mem::take(&mut self.focus_editor) || idle) && !modal_open;
             match self.docs.get_mut(self.active) {
                 Some(doc) => editor::show(
@@ -1292,6 +1344,7 @@ impl eframe::App for TrorApp {
         self.goto_modal(&ctx, &pal);
         self.confirm_modal(&ctx);
         self.remote.dialogs(&ctx, &pal);
+        self.terminal.dialogs(&ctx, &pal);
 
         for action in actions {
             self.run(action, &ctx);
@@ -1316,6 +1369,7 @@ impl eframe::App for TrorApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.settings.remote_panel = self.remote.visible;
+        self.settings.terminal_panel = self.terminal.visible;
         self.settings.session = self.docs.iter().filter_map(|d| d.path.clone()).collect();
         self.settings.active = self.active;
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);

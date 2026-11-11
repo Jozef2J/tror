@@ -1,6 +1,6 @@
 [package]
 name = "tror"
-version = "0.4.1"
+version = "0.5.0"
 description = "Быстрый компактный редактор кода"
 edition = "2024"
 
@@ -17,6 +17,7 @@ ssh2 = { version = "0.9.7", features = ["vendored-openssl"] }
 suppaftp = "12.2.1"
 syntect = { version = "5.3.0", default-features = false, features = ["default-onig"] }
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-onig"] }
+vt100 = "0.18.1"
 
 [profile.release]
 opt-level = 3

@@ -241,13 +241,11 @@ fn fingerprint(session: &ssh2::Session) -> Option<String> {
     Some(hash.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-fn connect_sftp(
+fn open_session(
     profile: &Profile,
     known: Option<&str>,
-    events: &Sender<Event>,
-    cmds: &Receiver<Cmd>,
-    wake: &dyn Fn(),
-) -> Result<(Backend, String, Option<String>), String> {
+    confirm: &dyn Fn(&str, bool) -> bool,
+) -> Result<(ssh2::Session, Option<String>), String> {
     let stream = tcp(profile)?;
     let mut session = ssh2::Session::new().map_err(|e| e.to_string())?;
     session.set_tcp_stream(stream);
@@ -258,15 +256,10 @@ fn connect_sftp(
     let print = fingerprint(&session).ok_or("сервер не прислал ключ")?;
     let mut accepted = None;
     if known != Some(print.as_str()) {
-        let _ = events.send(Event::HostKey {
-            fingerprint: print.clone(),
-            changed: known.is_some(),
-        });
-        wake();
-        match cmds.recv() {
-            Ok(Cmd::TrustHost(true)) => accepted = Some(print),
-            _ => return Err("ключ сервера не подтверждён".into()),
+        if !confirm(&print, known.is_some()) {
+            return Err("ключ сервера не подтверждён".into());
         }
+        accepted = Some(print);
     }
     let user = profile.user.trim();
     let key = profile.key_file.trim();
@@ -279,6 +272,25 @@ fn connect_sftp(
         session.userauth_agent(user)
     };
     auth.map_err(|e| format!("вход не выполнен: {e}"))?;
+    Ok((session, accepted))
+}
+
+fn connect_sftp(
+    profile: &Profile,
+    known: Option<&str>,
+    events: &Sender<Event>,
+    cmds: &Receiver<Cmd>,
+    wake: &dyn Fn(),
+) -> Result<(Backend, String, Option<String>), String> {
+    let confirm = |fingerprint: &str, changed: bool| {
+        let _ = events.send(Event::HostKey {
+            fingerprint: fingerprint.to_owned(),
+            changed,
+        });
+        wake();
+        matches!(cmds.recv(), Ok(Cmd::TrustHost(true)))
+    };
+    let (session, accepted) = open_session(profile, known, &confirm)?;
     let sftp = session
         .sftp()
         .map_err(|e| format!("SFTP недоступен: {e}"))?;
@@ -294,6 +306,142 @@ fn connect_sftp(
         home,
         accepted,
     ))
+}
+
+pub enum ShellCmd {
+    TrustHost(bool),
+    Input(Vec<u8>),
+    Resize(u16, u16),
+}
+
+pub enum ShellEvent {
+    HostKey { fingerprint: String, changed: bool },
+    Connected { fingerprint: Option<String> },
+    Output(Vec<u8>),
+    Closed(String),
+}
+
+pub struct Shell {
+    pub host: String,
+    pub tx: Sender<ShellCmd>,
+    pub rx: Receiver<ShellEvent>,
+}
+
+fn run_shell(
+    profile: &Profile,
+    known: Option<&str>,
+    size: (u16, u16),
+    cmds: &Receiver<ShellCmd>,
+    events: &Sender<ShellEvent>,
+    wake: &dyn Fn(),
+) -> Result<String, String> {
+    let confirm = |fingerprint: &str, changed: bool| {
+        let _ = events.send(ShellEvent::HostKey {
+            fingerprint: fingerprint.to_owned(),
+            changed,
+        });
+        wake();
+        matches!(cmds.recv(), Ok(ShellCmd::TrustHost(true)))
+    };
+    let (session, fingerprint) = open_session(profile, known, &confirm)?;
+    let mut channel = session
+        .channel_session()
+        .map_err(|e| format!("не удалось открыть канал: {e}"))?;
+    channel
+        .request_pty(
+            "xterm-256color",
+            None,
+            Some((size.0 as u32, size.1 as u32, 0, 0)),
+        )
+        .map_err(|e| format!("сервер не дал терминал: {e}"))?;
+    channel
+        .shell()
+        .map_err(|e| format!("сервер не запустил оболочку: {e}"))?;
+    let _ = events.send(ShellEvent::Connected { fingerprint });
+    wake();
+    session.set_blocking(false);
+
+    let mut pending: Vec<u8> = Vec::new();
+    let mut resize = None;
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let mut active = false;
+        match channel.read(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                let _ = events.send(ShellEvent::Output(buf[..n].to_vec()));
+                wake();
+                active = true;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(format!("соединение прервано: {e}")),
+        }
+        if channel.eof() {
+            return Ok("сеанс завершён".into());
+        }
+        if !pending.is_empty() {
+            match channel.write(&pending) {
+                Ok(n) => {
+                    pending.drain(..n);
+                    active = true;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(format!("соединение прервано: {e}")),
+            }
+        }
+        if let Some((cols, rows)) = resize
+            && channel
+                .request_pty_size(cols as u32, rows as u32, None, None)
+                .is_ok()
+        {
+            resize = None;
+        }
+        let mut handle = |cmd: ShellCmd| match cmd {
+            ShellCmd::Input(bytes) => pending.extend(bytes),
+            ShellCmd::Resize(cols, rows) => resize = Some((cols, rows)),
+            ShellCmd::TrustHost(_) => {}
+        };
+        loop {
+            match cmds.try_recv() {
+                Ok(cmd) => {
+                    handle(cmd);
+                    active = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Ok("отключено".into());
+                }
+            }
+        }
+        if !active {
+            match cmds.recv_timeout(Duration::from_millis(10)) {
+                Ok(cmd) => handle(cmd),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Ok("отключено".into());
+                }
+            }
+        }
+    }
+}
+
+pub fn open_shell(
+    profile: &Profile,
+    known: Option<String>,
+    size: (u16, u16),
+    wake: impl Fn() + Send + 'static,
+) -> Shell {
+    let (tx, cmds) = channel();
+    let (events, rx) = channel();
+    let host = format!("{}@{}", profile.user.trim(), profile.host.trim());
+    let profile = profile.clone();
+    std::thread::spawn(move || {
+        let message = run_shell(&profile, known.as_deref(), size, &cmds, &events, &wake)
+            .unwrap_or_else(|e| e);
+        let _ = events.send(ShellEvent::Closed(message));
+        wake();
+    });
+    Shell { host, tx, rx }
 }
 
 fn connect_ftp(profile: &Profile) -> Result<(Backend, String), String> {

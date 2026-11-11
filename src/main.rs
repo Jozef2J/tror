@@ -8,6 +8,7 @@ mod highlight;
 mod remote;
 mod remote_ui;
 mod search;
+mod terminal;
 mod theme;
 
 use eframe::egui;
