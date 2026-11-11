@@ -247,22 +247,18 @@ impl Terminal {
         }
     }
 
-    pub fn ui(
+    pub fn header(
         &mut self,
         ui: &mut Ui,
         pal: &Palette,
-        dark: bool,
         profile: Option<&Profile>,
         known: Option<String>,
     ) {
         let ctx = ui.ctx().clone();
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let title = match &self.shell {
-                Some(shell) => format!("SSH  ·  {}", shell.host),
-                None => "SSH-консоль".to_owned(),
-            };
-            ui.label(RichText::new(title).color(pal.subtext).size(12.5));
+        {
+            if let Some(shell) = &self.shell {
+                ui.label(RichText::new(&shell.host).color(pal.subtext).size(12.5));
+            }
             if !self.status.is_empty() {
                 ui.label(RichText::new(&self.status).color(pal.faint).size(12.5));
             }
@@ -296,9 +292,10 @@ impl Terminal {
                     }
                 }
             });
-        });
-        ui.add_space(2.0);
+        }
+    }
 
+    pub fn body(&mut self, ui: &mut Ui, pal: &Palette, dark: bool) {
         let font = FontId::monospace(FONT_SIZE);
         let (char_w, row_h) = ui.fonts_mut(|f| (f.glyph_width(&font, '0'), f.row_height(&font)));
         let row_h = row_h.round().max(1.0);

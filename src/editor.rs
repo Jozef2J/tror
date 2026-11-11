@@ -246,6 +246,7 @@ fn handle_events(ui: &Ui, doc: &mut Document, m: &Metrics) -> Typed {
                         typed = Typed::Backspace;
                     }
                     Key::Delete => doc.delete(cmd),
+                    Key::Slash if cmd => doc.toggle_comment(),
                     Key::A if cmd => doc.select_all(),
                     Key::Z if cmd && shift => doc.redo(),
                     Key::Z if cmd => doc.undo(),

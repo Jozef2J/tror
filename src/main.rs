@@ -20,7 +20,11 @@ fn main() -> eframe::Result {
             .with_app_id("tror")
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([480.0, 320.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/tror.png"))
+                    .unwrap_or_default(),
+            ),
         ..Default::default()
     };
     eframe::run_native(

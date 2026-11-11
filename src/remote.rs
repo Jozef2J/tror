@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 const MASK: &[u8] = b"tror-profile-mask";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
 const IO_TIMEOUT_MS: u32 = 30_000;
+const KEEPALIVE: Duration = Duration::from_secs(25);
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
 pub enum Protocol {
@@ -103,6 +104,8 @@ impl Profile {
 pub struct Store {
     pub profiles: Vec<Profile>,
     pub known_hosts: BTreeMap<String, String>,
+    pub hide_size: bool,
+    pub show_date: bool,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -137,6 +140,7 @@ pub struct Entry {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
+    pub mtime: Option<u64>,
 }
 
 pub enum Cmd {
@@ -178,6 +182,7 @@ pub enum Event {
         doc: Option<(u64, u64)>,
     },
     Changed(String),
+    Log(String, bool),
     Error(String),
     Closed(String),
 }
@@ -480,6 +485,7 @@ impl Backend {
                         name,
                         is_dir,
                         size: stat.size.unwrap_or(0),
+                        mtime: stat.mtime,
                     })
                 })
                 .collect::<Vec<_>>(),
@@ -492,6 +498,12 @@ impl Backend {
                     name: f.name().to_owned(),
                     is_dir: f.is_directory(),
                     size: f.size() as u64,
+                    mtime: f
+                        .modified()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs())
+                        .filter(|secs| *secs > 0),
                 })
                 .collect(),
         };
@@ -558,6 +570,93 @@ impl Backend {
             (Backend::Ftp(ftp), false) => ftp.rm(path).map_err(|e| e.to_string()),
         }
     }
+
+    fn delete_tree(&mut self, path: &str, dir: bool, removed: &mut usize) -> Result<(), String> {
+        if dir {
+            for entry in self.list(path)? {
+                self.delete_tree(&join(path, &entry.name), entry.is_dir, removed)?;
+            }
+        }
+        self.delete(path, dir)?;
+        *removed += 1;
+        Ok(())
+    }
+
+    fn ping(&mut self) -> Result<(), String> {
+        match self {
+            Backend::Sftp { sftp, .. } => sftp
+                .realpath(Path::new("."))
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            Backend::Ftp(ftp) => ftp.noop().map_err(|e| e.to_string()),
+        }
+    }
+}
+
+fn describe(cmd: &Cmd) -> String {
+    match cmd {
+        Cmd::TrustHost(_) => String::new(),
+        Cmd::List(path) => format!("Чтение каталога {path}"),
+        Cmd::Download(path) => format!("Скачивание {path}"),
+        Cmd::Upload { path, data, .. } => format!("Загрузка {path} ({} байт)", data.len()),
+        Cmd::Mkdir(path) => format!("Создание папки {path}"),
+        Cmd::Rename(from, to) => format!("Перемещение {from} → {to}"),
+        Cmd::Delete { path, .. } => format!("Удаление {path}"),
+    }
+}
+
+fn execute(backend: &mut Backend, cmd: &Cmd) -> Result<(Event, String), String> {
+    Ok(match cmd {
+        Cmd::TrustHost(_) => (Event::Log(String::new(), false), String::new()),
+        Cmd::List(path) => {
+            let entries = backend.list(path)?;
+            let summary = format!("объектов: {}", entries.len());
+            (
+                Event::Listing {
+                    path: path.clone(),
+                    entries,
+                },
+                summary,
+            )
+        }
+        Cmd::Download(path) => {
+            let data = backend.download(path)?;
+            let summary = format!("получено байт: {}", data.len());
+            (
+                Event::Downloaded {
+                    path: path.clone(),
+                    data,
+                },
+                summary,
+            )
+        }
+        Cmd::Upload { path, data, doc } => {
+            backend.upload(path, data)?;
+            (
+                Event::Uploaded {
+                    path: path.clone(),
+                    doc: *doc,
+                },
+                "файл записан".into(),
+            )
+        }
+        Cmd::Mkdir(path) => {
+            backend.mkdir(path)?;
+            (Event::Changed(parent(path)), "готово".into())
+        }
+        Cmd::Rename(from, to) => {
+            backend.rename(from, to)?;
+            (Event::Changed(parent(to)), "готово".into())
+        }
+        Cmd::Delete { path, dir } => {
+            let mut removed = 0;
+            backend.delete_tree(path, *dir, &mut removed)?;
+            (
+                Event::Changed(parent(path)),
+                format!("удалено объектов: {removed}"),
+            )
+        }
+    })
 }
 
 fn serve(
@@ -571,17 +670,33 @@ fn serve(
         let _ = events.send(event);
         wake();
     };
-    let connected = match profile.protocol {
-        Protocol::Sftp => connect_sftp(&profile, known.as_deref(), &events, &cmds, wake),
+    let log = |text: String, error: bool| send(Event::Log(text, error));
+    let mut known = known;
+    let open = |known: Option<&str>| match profile.protocol {
+        Protocol::Sftp => connect_sftp(&profile, known, &events, &cmds, wake),
         Protocol::Ftp => connect_ftp(&profile).map(|(b, home)| (b, home, None)),
     };
-    let (mut backend, home, fingerprint) = match connected {
+    log(
+        format!(
+            "Подключение к {} ({}, пользователь {})",
+            profile.address(),
+            profile.protocol.label(),
+            profile.user.trim()
+        ),
+        false,
+    );
+    let (mut backend, home, fingerprint) = match open(known.as_deref()) {
         Ok(ok) => ok,
         Err(e) => {
+            log(format!("Не удалось подключиться: {e}"), true);
             send(Event::Closed(e));
             return;
         }
     };
+    if fingerprint.is_some() {
+        known = fingerprint.clone();
+    }
+    log(format!("Подключено, домашняя папка {home}"), false);
     let start = profile.directory.trim();
     send(Event::Connected {
         home: if start.is_empty() {
@@ -591,28 +706,59 @@ fn serve(
         },
         fingerprint,
     });
-    while let Ok(cmd) = cmds.recv() {
-        let result = match cmd {
-            Cmd::TrustHost(_) => continue,
-            Cmd::List(path) => backend
-                .list(&path)
-                .map(|entries| Event::Listing { path, entries }),
-            Cmd::Download(path) => backend
-                .download(&path)
-                .map(|data| Event::Downloaded { path, data }),
-            Cmd::Upload { path, data, doc } => backend
-                .upload(&path, &data)
-                .map(|_| Event::Uploaded { path, doc }),
-            Cmd::Mkdir(path) => backend.mkdir(&path).map(|_| Event::Changed(parent(&path))),
-            Cmd::Rename(from, to) => backend
-                .rename(&from, &to)
-                .map(|_| Event::Changed(parent(&to))),
-            Cmd::Delete { path, dir } => backend
-                .delete(&path, dir)
-                .map(|_| Event::Changed(parent(&path))),
+    let mut alive = true;
+    loop {
+        let cmd = match cmds.recv_timeout(KEEPALIVE) {
+            Ok(cmd) => cmd,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if alive && backend.ping().is_err() {
+                    alive = false;
+                    log("Сервер закрыл простаивающее соединение".into(), false);
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        send(result.unwrap_or_else(Event::Error));
+        if matches!(cmd, Cmd::TrustHost(_)) {
+            continue;
+        }
+        log(describe(&cmd), false);
+        let mut result = if alive {
+            execute(&mut backend, &cmd)
+        } else {
+            Err("соединение закрыто".into())
+        };
+        if result.is_err() && (!alive || backend.ping().is_err()) {
+            log("Соединение потеряно, подключаюсь заново".into(), false);
+            match open(known.as_deref()) {
+                Ok((fresh, _, fingerprint)) => {
+                    backend = fresh;
+                    alive = true;
+                    if fingerprint.is_some() {
+                        known = fingerprint;
+                    }
+                    log("Подключено заново, повторяю операцию".into(), false);
+                    result = execute(&mut backend, &cmd);
+                }
+                Err(e) => {
+                    log(format!("Не удалось подключиться заново: {e}"), true);
+                    send(Event::Closed(e));
+                    return;
+                }
+            }
+        }
+        match result {
+            Ok((event, summary)) => {
+                log(summary, false);
+                send(event);
+            }
+            Err(e) => {
+                log(format!("Ошибка: {e}"), true);
+                send(Event::Error(e));
+            }
+        }
     }
+    log("Отключено".into(), false);
 }
 
 pub fn connect(
@@ -682,21 +828,25 @@ mod tests {
                 name: "b.php".into(),
                 is_dir: false,
                 size: 1,
+                mtime: None,
             },
             Entry {
                 name: "Zeta".into(),
                 is_dir: true,
                 size: 0,
+                mtime: None,
             },
             Entry {
                 name: "a.php".into(),
                 is_dir: false,
                 size: 1,
+                mtime: None,
             },
             Entry {
                 name: "alpha".into(),
                 is_dir: true,
                 size: 0,
+                mtime: None,
             },
         ];
         sort(&mut entries);
@@ -716,10 +866,15 @@ mod tests {
             directory: String::new(),
         };
         let conn = connect(&profile, None, || {});
-        let next = || {
-            conn.rx
+        let next = || loop {
+            match conn
+                .rx
                 .recv_timeout(Duration::from_secs(20))
                 .expect("ответ сервера")
+            {
+                Event::Log(..) => {}
+                event => break event,
+            }
         };
         let home = loop {
             match next() {
@@ -779,21 +934,12 @@ mod tests {
                 dir: true,
             })
             .unwrap();
-        assert!(matches!(next(), Event::Error(_)));
-        conn.tx
-            .send(Cmd::Delete {
-                path: moved,
-                dir: false,
-            })
-            .unwrap();
-        assert!(matches!(next(), Event::Changed(_)));
-        conn.tx
-            .send(Cmd::Delete {
-                path: dir,
-                dir: true,
-            })
-            .unwrap();
-        assert!(matches!(next(), Event::Changed(_)));
+        assert!(matches!(next(), Event::Changed(p) if p == www));
+        conn.tx.send(Cmd::List(www.clone())).unwrap();
+        let Event::Listing { entries, .. } = next() else {
+            panic!("нет списка")
+        };
+        assert!(entries.iter().all(|e| !e.name.starts_with("dir-")));
         conn.tx
             .send(Cmd::Download(join(&www, "missing.txt")))
             .unwrap();
@@ -821,15 +967,17 @@ mod tests {
         profile.user = "jozef".into();
         profile.password = "wrong".into();
         let conn = connect(&profile, Some("00".repeat(32)), || {});
-        let Ok(Event::HostKey { changed, .. }) = conn.rx.recv_timeout(Duration::from_secs(20))
-        else {
+        let next = || loop {
+            match conn.rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(Event::Log(..)) => {}
+                other => break other,
+            }
+        };
+        let Ok(Event::HostKey { changed, .. }) = next() else {
             panic!("нет запроса ключа")
         };
         assert!(changed);
         conn.tx.send(Cmd::TrustHost(true)).unwrap();
-        assert!(matches!(
-            conn.rx.recv_timeout(Duration::from_secs(20)),
-            Ok(Event::Closed(_))
-        ));
+        assert!(matches!(next(), Ok(Event::Closed(_))));
     }
 }

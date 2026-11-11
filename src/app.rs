@@ -167,6 +167,13 @@ fn icon_button(ui: &mut Ui, pal: &Palette, icon: Icon) -> egui::Response {
 enum Confirm {
     Tab(u64),
     Quit,
+    Missing(u64),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum BottomTab {
+    Console,
+    Log,
 }
 
 #[derive(Default)]
@@ -208,6 +215,9 @@ pub struct TrorApp {
     complete: Completion,
     remote: RemotePanel,
     terminal: Terminal,
+    bottom_tab: BottomTab,
+    ctx: egui::Context,
+    checked: (u64, bool),
     goto: Option<String>,
     confirm: Option<Confirm>,
     allow_close: bool,
@@ -236,6 +246,9 @@ impl TrorApp {
             complete: Completion::default(),
             remote: RemotePanel::new(false),
             terminal: Terminal::new(false),
+            bottom_tab: BottomTab::Console,
+            ctx: cc.egui_ctx.clone(),
+            checked: (0, false),
             goto: None,
             confirm: None,
             allow_close: false,
@@ -318,11 +331,36 @@ impl TrorApp {
         }
     }
 
-    fn remote_events(&mut self, ctx: &egui::Context) {
+    fn remote_events(&mut self, ctx: &egui::Context, events: Vec<PanelEvent>) {
         let now = ctx.input(|i| i.time);
-        for event in self.remote.poll() {
+        for event in events {
             match event {
                 PanelEvent::Toast(text) => self.notify(text, now),
+                PanelEvent::OpenLocal(paths) => {
+                    for path in paths {
+                        self.open_path(&path, now);
+                    }
+                }
+                PanelEvent::Listed {
+                    profile,
+                    dir,
+                    names,
+                } => {
+                    for doc in &mut self.docs {
+                        if let Some((p, path)) = &doc.remote
+                            && *p == profile
+                            && crate::remote::parent(path) == dir
+                        {
+                            let exists = names.iter().any(|n| n == crate::remote::file_name(path));
+                            if exists {
+                                doc.missing = false;
+                                doc.missing_ack = false;
+                            } else {
+                                doc.missing = true;
+                            }
+                        }
+                    }
+                }
                 PanelEvent::Uploaded { doc, path } => {
                     if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc.0) {
                         d.mark_saved(doc.1);
@@ -357,6 +395,32 @@ impl TrorApp {
         }
     }
 
+    fn check_missing(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|i| i.focused);
+        let Some(doc) = self.docs.get_mut(self.active) else {
+            return;
+        };
+        if self.checked != (doc.id, focused) {
+            self.checked = (doc.id, focused);
+            if focused && let Some(path) = &doc.path {
+                if path.exists() {
+                    doc.missing = false;
+                    doc.missing_ack = false;
+                } else {
+                    doc.missing = true;
+                }
+            }
+        }
+        if doc.missing
+            && !doc.missing_ack
+            && self.confirm.is_none()
+            && self.goto.is_none()
+            && !self.remote.modal_open()
+        {
+            self.confirm = Some(Confirm::Missing(doc.id));
+        }
+    }
+
     fn remember(&mut self, path: &Path) {
         self.settings.recent.retain(|p| p != path);
         self.settings.recent.insert(0, path.to_path_buf());
@@ -385,11 +449,13 @@ impl TrorApp {
             return false;
         };
         if let Some((profile, path)) = doc.remote.clone() {
-            let result = self
-                .remote
-                .upload(&profile, &path, doc.encoded(), (doc.id, doc.version));
-            if let Err(e) = result {
-                self.notify(format!("Не сохранено: {e}"), now);
+            let ctx = self.ctx.clone();
+            let result =
+                self.remote
+                    .upload(&ctx, &profile, &path, doc.encoded(), (doc.id, doc.version));
+            match result {
+                Ok(text) => self.notify(text, now),
+                Err(e) => self.notify(format!("Не сохранено: {e}"), now),
             }
             return false;
         }
@@ -738,7 +804,13 @@ impl TrorApp {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     for (i, doc) in self.docs.iter().enumerate() {
                         let active = i == self.active;
-                        let color = if active { pal.text } else { pal.subtext };
+                        let color = if doc.missing {
+                            pal.warn
+                        } else if active {
+                            pal.text
+                        } else {
+                            pal.subtext
+                        };
                         let galley = ui.painter().layout_no_wrap(
                             doc.title(),
                             FontId::proportional(13.5),
@@ -784,9 +856,19 @@ impl TrorApp {
                                 rect.left() + 14.0,
                                 rect.center().y - galley.size().y / 2.0 + 2.0,
                             ),
-                            galley,
+                            galley.clone(),
                             color,
                         );
+                        if doc.missing {
+                            let y = rect.center().y + 2.5;
+                            painter.line_segment(
+                                [
+                                    egui::pos2(rect.left() + 14.0, y),
+                                    egui::pos2(rect.left() + 14.0 + galley.size().x, y),
+                                ],
+                                Stroke::new(1.0, pal.warn),
+                            );
+                        }
                         let center = close_rect.center() + egui::vec2(0.0, 2.0);
                         if close.hovered() {
                             painter.rect_filled(
@@ -1153,13 +1235,38 @@ impl TrorApp {
                 "Несохранённых файлов: {}. Сохранить перед выходом?",
                 self.docs.iter().filter(|d| d.dirty()).count()
             ),
+            Confirm::Missing(id) => match self.docs.iter().find(|d| d.id == id) {
+                Some(doc) => format!(
+                    "Файл «{}» больше не существует {}. Оставить вкладку открытой?",
+                    doc.title(),
+                    if doc.remote.is_some() {
+                        "на сервере"
+                    } else {
+                        "на диске"
+                    }
+                ),
+                None => {
+                    self.confirm = None;
+                    return;
+                }
+            },
         };
+        let missing = matches!(confirm, Confirm::Missing(_));
         let mut choice = None;
         let modal = dialog("tror_confirm", &pal).show(ctx, |ui| {
             ui.set_width(340.0);
             ui.label(message);
             ui.add_space(10.0);
             ui.horizontal(|ui| {
+                if missing {
+                    if dialog_button(ui, &pal, "Оставить", true) {
+                        choice = Some(2);
+                    }
+                    if dialog_button(ui, &pal, "Закрыть вкладку", false) {
+                        choice = Some(1);
+                    }
+                    return;
+                }
                 if dialog_button(ui, &pal, "Сохранить", true) {
                     choice = Some(0);
                 }
@@ -1184,6 +1291,15 @@ impl TrorApp {
                     && (choice == 1 || self.save(i, now))
                 {
                     self.remove_doc(i);
+                }
+            }
+            (Confirm::Missing(id), _) => {
+                if let Some(i) = self.docs.iter().position(|d| d.id == id) {
+                    if choice == 1 {
+                        self.remove_doc(i);
+                    } else {
+                        self.docs[i].missing_ack = true;
+                    }
                 }
             }
             (Confirm::Quit, 0 | 1) if choice == 1 || self.save_all(now) => {
@@ -1213,14 +1329,31 @@ impl eframe::App for TrorApp {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.confirm = Some(Confirm::Quit);
         }
-        for file in ctx.input(|i| i.raw.dropped_files.clone()) {
-            actions.push(Action::OpenPath(file.path().to_path_buf()));
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if !dropped.is_empty() && self.remote.can_upload() {
+            self.remote.offer_drop(dropped);
+        } else {
+            for path in dropped {
+                actions.push(Action::OpenPath(path));
+            }
         }
+        let zoom = ctx.input(|i| i.zoom_delta());
+        if zoom != 1.0 {
+            ctx.set_zoom_factor((ctx.zoom_factor() * zoom).clamp(0.5, 3.0));
+        }
+        self.check_missing(&ctx);
         let modal_open = self.goto.is_some()
             || self.confirm.is_some()
             || self.remote.modal_open()
             || self.terminal.modal_open();
-        self.remote_events(&ctx);
+        let events = self.remote.poll();
+        self.remote_events(&ctx, events);
         for event in self.terminal.poll() {
             let TermEvent::Trust { host, fingerprint } = event;
             if let Err(e) = self.remote.trust(host, fingerprint) {
@@ -1273,17 +1406,76 @@ impl eframe::App for TrorApp {
 
         if self.terminal.visible {
             let (profile, known) = match self.remote.selected_profile() {
-                Some((profile, known)) => (Some(profile), known),
+                Some((profile, known)) => (Some(profile.clone()), known),
                 None => (None, None),
             };
+            let profile = profile.as_ref();
             Panel::bottom("tror_terminal")
                 .frame(bar.inner_margin(Margin::symmetric(8, 0)))
                 .resizable(true)
                 .default_size(240.0)
                 .min_size(90.0)
                 .show(ui, |ui| {
-                    self.terminal
-                        .ui(ui, &pal, self.settings.dark, profile, known)
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        for (tab, label) in
+                            [(BottomTab::Console, "SSH-консоль"), (BottomTab::Log, "Журнал")]
+                        {
+                            let active = self.bottom_tab == tab;
+                            let text = RichText::new(label).size(12.5).color(if active {
+                                pal.text
+                            } else {
+                                pal.subtext
+                            });
+                            let mut button = Button::new(text);
+                            if active {
+                                button = button.fill(pal.surface);
+                            }
+                            if ui.add(button).clicked() {
+                                self.bottom_tab = tab;
+                            }
+                        }
+                        match self.bottom_tab {
+                            BottomTab::Console => self.terminal.header(ui, &pal, profile, known),
+                            BottomTab::Log => {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.add(Button::new("Очистить").fill(pal.surface)).clicked() {
+                                        self.remote.log.clear();
+                                    }
+                                });
+                            }
+                        }
+                    });
+                    ui.add_space(2.0);
+                    match self.bottom_tab {
+                        BottomTab::Console => self.terminal.body(ui, &pal, self.settings.dark),
+                        BottomTab::Log => {
+                            self.terminal.focused = false;
+                            let rect = ui.available_rect_before_wrap();
+                            ui.painter().rect_filled(rect, 0.0, pal.base);
+                            ScrollArea::vertical()
+                                .auto_shrink(false)
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    ui.add_space(4.0);
+                                    if self.remote.log.is_empty() {
+                                        ui.label(
+                                            RichText::new("  Здесь появятся сообщения о подключении и операциях с сервером.")
+                                                .color(pal.faint)
+                                                .size(12.5),
+                                        );
+                                    }
+                                    for (text, error) in &self.remote.log {
+                                        ui.label(
+                                            RichText::new(format!("  {text}"))
+                                                .monospace()
+                                                .size(12.5)
+                                                .color(if *error { pal.warn } else { pal.subtext }),
+                                        );
+                                    }
+                                });
+                        }
+                    }
                 });
         } else {
             self.terminal.focused = false;
@@ -1343,7 +1535,8 @@ impl eframe::App for TrorApp {
 
         self.goto_modal(&ctx, &pal);
         self.confirm_modal(&ctx);
-        self.remote.dialogs(&ctx, &pal);
+        let events = self.remote.dialogs(&ctx, &pal);
+        self.remote_events(&ctx, events);
         self.terminal.dialogs(&ctx, &pal);
 
         for action in actions {

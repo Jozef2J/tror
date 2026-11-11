@@ -152,6 +152,42 @@ fn longest_line(text: &str) -> usize {
     longest.max(current)
 }
 
+fn comment_tokens(syntax: &str) -> (&'static str, &'static str) {
+    let s = syntax.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| s.contains(w));
+    if has(&["twig"]) {
+        ("{#", "#}")
+    } else if has(&["html", "xml", "markdown", "vue", "svg"]) {
+        ("<!--", "-->")
+    } else if s == "css" {
+        ("/*", "*/")
+    } else if has(&["sql", "lua", "haskell"]) {
+        ("--", "")
+    } else if has(&[
+        "python",
+        "yaml",
+        "shell",
+        "bash",
+        "toml",
+        "ruby",
+        "perl",
+        "nginx",
+        "docker",
+        "makefile",
+        "ini",
+        "apache",
+        "plain text",
+        "git",
+        "properties",
+    ]) {
+        ("#", "")
+    } else if has(&["batch"]) {
+        ("REM", "")
+    } else {
+        ("//", "")
+    }
+}
+
 fn class(c: char) -> u8 {
     if c.is_whitespace() {
         0
@@ -180,6 +216,8 @@ pub struct Document {
     pub id: u64,
     pub path: Option<PathBuf>,
     pub remote: Option<(String, String)>,
+    pub missing: bool,
+    pub missing_ack: bool,
     pub untitled: u32,
     pub rope: Rope,
     pub encoding: &'static Encoding,
@@ -210,6 +248,8 @@ impl Document {
             id,
             path: None,
             remote: None,
+            missing: false,
+            missing_ack: false,
             untitled,
             rope: Rope::new(),
             encoding: UTF_8,
@@ -267,6 +307,89 @@ impl Document {
     pub fn mark_saved(&mut self, version: u64) {
         self.saved_version = version;
         self.format_changed = false;
+        self.missing = false;
+        self.missing_ack = false;
+    }
+
+    pub fn toggle_comment(&mut self) {
+        let (open, close) = comment_tokens(&self.syntax);
+        let lines = self.selected_lines();
+        let single = lines.len() < 2;
+        let text_of = |doc: &Self, line: usize| -> String {
+            let start = doc.rope.line_to_char(line);
+            doc.rope
+                .slice(start..start + doc.line_len(line))
+                .to_string()
+        };
+        let busy: Vec<usize> = lines
+            .clone()
+            .filter(|l| !text_of(self, *l).trim().is_empty())
+            .collect();
+        if busy.is_empty() {
+            return;
+        }
+        let commented = busy.iter().all(|l| {
+            let text = text_of(self, *l);
+            let body = text.trim();
+            body.starts_with(open)
+                && body.ends_with(close)
+                && body.len() >= open.len() + close.len()
+        });
+        let indent = busy
+            .iter()
+            .map(|l| {
+                text_of(self, *l)
+                    .chars()
+                    .take_while(|c| *c == ' ' || *c == '\t')
+                    .count()
+            })
+            .min()
+            .unwrap_or(0);
+        let head = self.sel.1;
+        let head_line = self.rope.char_to_line(head);
+        let mut head_shift: isize = 0;
+        self.checkpoint(EditKind::Other);
+        for line in busy {
+            let text = text_of(self, line);
+            let start = self.rope.line_to_char(line);
+            if commented {
+                let lead = text.chars().take_while(|c| c.is_whitespace()).count();
+                let mut remove = open.chars().count();
+                if text.chars().nth(lead + remove) == Some(' ') {
+                    remove += 1;
+                }
+                if !close.is_empty() {
+                    let trimmed = text.trim_end();
+                    let mut tail = close.chars().count();
+                    let body_end = trimmed.chars().count();
+                    if trimmed.chars().nth(body_end - tail - 1) == Some(' ') {
+                        tail += 1;
+                    }
+                    self.apply(start + body_end - tail..start + body_end, "");
+                }
+                self.apply(start + lead..start + lead + remove, "");
+                if line == head_line && head >= start + lead {
+                    head_shift = -(remove.min(head - start - lead) as isize);
+                }
+            } else {
+                if !close.is_empty() {
+                    let end = start + text.trim_end().chars().count();
+                    self.apply(end..end, &format!(" {close}"));
+                }
+                let insert = format!("{open} ");
+                self.apply(start + indent..start + indent, &insert);
+                if line == head_line && head >= start + indent {
+                    head_shift = insert.chars().count() as isize;
+                }
+            }
+        }
+        if single {
+            let pos = ((head as isize + head_shift).max(0) as usize).min(self.len());
+            self.sel = (pos, pos);
+        } else {
+            self.select_lines(lines);
+        }
+        self.reveal = true;
     }
 
     fn load_text(&mut self, text: &str) {
@@ -835,5 +958,39 @@ mod tests {
         assert_eq!(doc.selected_text(), "foo_bar = $baz->qux;\n");
         assert_eq!(doc.line_home(5), 0);
         assert_eq!(doc.line_end(5), 20);
+    }
+
+    #[test]
+    fn toggle_comment_lines_and_blocks() {
+        let mut doc = Document::from_text("    $a = 1;\n\n        $b = 2;\nend");
+        doc.syntax = "PHP".into();
+        doc.move_to(0, false);
+        doc.move_to(26, true);
+        doc.toggle_comment();
+        assert_eq!(text(&doc), "    // $a = 1;\n\n    //     $b = 2;\nend");
+        doc.toggle_comment();
+        assert_eq!(text(&doc), "    $a = 1;\n\n        $b = 2;\nend");
+        doc.undo();
+        doc.undo();
+        assert_eq!(text(&doc), "    $a = 1;\n\n        $b = 2;\nend");
+
+        let mut css = Document::from_text("a { color: red; }");
+        css.syntax = "CSS".into();
+        css.move_to(4, false);
+        css.toggle_comment();
+        assert_eq!(text(&css), "/* a { color: red; } */");
+        assert_eq!(css.sel, (7, 7));
+        css.toggle_comment();
+        assert_eq!(text(&css), "a { color: red; }");
+        assert_eq!(css.sel, (4, 4));
+
+        let mut py = Document::from_text("x = 1");
+        py.syntax = "Python".into();
+        py.toggle_comment();
+        assert_eq!(text(&py), "# x = 1");
+        let mut twig = Document::from_text("{{ a }}");
+        twig.syntax = "HTML (Twig)".into();
+        twig.toggle_comment();
+        assert_eq!(text(&twig), "{# {{ a }} #}");
     }
 }
