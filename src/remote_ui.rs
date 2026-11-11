@@ -17,6 +17,7 @@ pub enum PanelEvent {
         profile: String,
         path: String,
         data: Vec<u8>,
+        line: Option<usize>,
     },
     Uploaded {
         doc: (u64, u64),
@@ -70,7 +71,17 @@ pub struct RemotePanel {
     editor: Option<ProfileEditor>,
     save_to: HashMap<String, PathBuf>,
     dropped: Option<Vec<PathBuf>>,
+    pub want_search: bool,
+    search_query: String,
+    search_content: bool,
+    search_excludes: String,
+    search_job: Option<remote::SearchJob>,
+    hits: Vec<(String, Option<usize>, String)>,
+    search_status: String,
+    open_at: HashMap<String, usize>,
 }
+
+const DEFAULT_EXCLUDES: &str = "bitrix/cache, bitrix/managed_cache, bitrix/stack_cache, bitrix/backup, upload/resize_cache, node_modules, .git";
 
 fn date_label(secs: u64) -> String {
     chrono::DateTime::from_timestamp(secs as i64, 0)
@@ -184,10 +195,22 @@ fn refresh_button(ui: &mut Ui, pal: &Palette) -> egui::Response {
 impl RemotePanel {
     pub fn new(visible: bool) -> Self {
         let path = eframe::storage_dir("Tror").map(|dir| dir.join("connections.json"));
+        let store = Store::load(path);
         Self {
             visible,
             log: Vec::new(),
-            store: Store::load(path),
+            want_search: false,
+            search_query: String::new(),
+            search_content: true,
+            search_excludes: store
+                .search_excludes
+                .clone()
+                .unwrap_or_else(|| DEFAULT_EXCLUDES.to_owned()),
+            search_job: None,
+            hits: Vec::new(),
+            search_status: String::new(),
+            open_at: HashMap::new(),
+            store,
             selected: 0,
             conn: None,
             connected: false,
@@ -420,6 +443,30 @@ impl RemotePanel {
     pub fn poll(&mut self) -> Vec<PanelEvent> {
         let mut out = Vec::new();
         self.poll_saver(&mut out);
+        if let Some(job) = &self.search_job {
+            let mut finished = false;
+            while let Ok(event) = job.rx.try_recv() {
+                match event {
+                    remote::SearchEvent::Hit { path, line, text } => {
+                        self.hits.push((path, line, text))
+                    }
+                    remote::SearchEvent::Status(text) => self.search_status = text,
+                    remote::SearchEvent::Done(text) => {
+                        self.search_status = text;
+                        finished = true;
+                    }
+                    remote::SearchEvent::Failed(e) => {
+                        self.search_status = format!("ошибка: {e}");
+                        finished = true;
+                    }
+                }
+            }
+            if finished {
+                let status = self.search_status.clone();
+                self.push_log(format!("Поиск на сервере: {status}"), false);
+                self.search_job = None;
+            }
+        }
         let (events, dead) = match &self.conn {
             Some(conn) => Self::drain(conn),
             None => (Vec::new(), false),
@@ -487,6 +534,7 @@ impl RemotePanel {
                         }
                         None => out.push(PanelEvent::Open {
                             profile: profile.clone(),
+                            line: self.open_at.remove(&path),
                             path,
                             data,
                         }),
@@ -614,6 +662,10 @@ impl RemotePanel {
                     self.list(self.cwd.clone());
                 }
                 ui.menu_button("Ещё", |ui| {
+                    if ui.button("Поиск на сервере…").clicked() {
+                        self.want_search = true;
+                    }
+                    ui.separator();
                     if ui.button("Новый файл…").clicked() {
                         self.prompt = Some(Prompt::NewFile(String::new()));
                     }
@@ -646,6 +698,157 @@ impl RemotePanel {
                 ui.spinner();
                 ui.label(RichText::new(busy).color(pal.subtext).size(12.5));
             });
+        }
+    }
+
+    fn start_search(&mut self, ctx: &egui::Context) {
+        let query = self.search_query.trim().to_owned();
+        if query.is_empty() || !self.connected {
+            return;
+        }
+        let Some((profile, known)) = self.selected_profile() else {
+            return;
+        };
+        let params = remote::SearchParams {
+            root: self.cwd.clone(),
+            query: query.clone(),
+            content: self.search_content,
+            excludes: self
+                .search_excludes
+                .split(',')
+                .map(|e| e.trim().to_owned())
+                .collect(),
+        };
+        let ctx = ctx.clone();
+        let job = remote::search(profile, known, params, move || ctx.request_repaint());
+        self.hits.clear();
+        self.search_status = "поиск…".into();
+        self.push_log(format!("Поиск «{query}» в {}", self.cwd), false);
+        self.search_job = Some(job);
+        if self.store.search_excludes.as_deref() != Some(self.search_excludes.as_str()) {
+            self.store.search_excludes = Some(self.search_excludes.clone());
+            let _ = self.store.save();
+        }
+    }
+
+    pub fn search_ui(&mut self, ui: &mut Ui, pal: &Palette) {
+        let ctx = ui.ctx().clone();
+        let rect = ui.available_rect_before_wrap();
+        ui.painter().rect_filled(rect, 0.0, pal.base);
+        ui.add_space(6.0);
+        if !self.connected {
+            ui.label(
+                RichText::new("  Подключитесь к серверу в панели файлов (F8) — поиск идёт в открытой там папке.")
+                    .color(pal.faint)
+                    .size(12.5),
+            );
+            return;
+        }
+        let mut start = false;
+        ui.horizontal(|ui| {
+            ui.add_space(6.0);
+            let field = ui.add(
+                TextEdit::singleline(&mut self.search_query)
+                    .hint_text(format!("Искать в {}", self.cwd))
+                    .desired_width(280.0),
+            );
+            if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                start = true;
+            }
+            for (content, label) in [(true, "В тексте файлов"), (false, "В именах")]
+            {
+                let active = self.search_content == content;
+                let mut button = Button::new(RichText::new(label).size(12.5));
+                if active {
+                    button = button.fill(pal.surface);
+                }
+                if ui.add(button).clicked() {
+                    self.search_content = content;
+                }
+            }
+            if self.search_job.is_some() {
+                if ui.add(Button::new("Стоп").fill(pal.surface)).clicked()
+                    && let Some(job) = &self.search_job
+                {
+                    job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                ui.spinner();
+            } else if ui.add(Button::new("Найти").fill(pal.surface)).clicked() {
+                start = true;
+            }
+            ui.label(
+                RichText::new(&self.search_status)
+                    .color(pal.subtext)
+                    .size(12.5),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Не искать в папках:")
+                    .color(pal.subtext)
+                    .size(12.5),
+            );
+            ui.add(
+                TextEdit::singleline(&mut self.search_excludes)
+                    .desired_width(ui.available_width() - 12.0)
+                    .font(egui::TextStyle::Small),
+            );
+        });
+        if start && self.search_job.is_none() {
+            self.start_search(&ctx);
+        }
+        let mut open = None;
+        let row_h = 20.0;
+        ScrollArea::vertical().auto_shrink(false).show_rows(
+            ui,
+            row_h,
+            self.hits.len(),
+            |ui, rows| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for row in rows {
+                    let (path, line, text) = &self.hits[row];
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_h),
+                        Sense::click(),
+                    );
+                    let painter = ui.painter_at(rect);
+                    if response.hovered() {
+                        painter.rect_filled(rect, 4.0, pal.crust);
+                    }
+                    let shown = path
+                        .strip_prefix(self.cwd.trim_end_matches('/'))
+                        .map_or(path.as_str(), |p| p.trim_start_matches('/'));
+                    let label = match line {
+                        Some(n) => format!("{shown}:{n}"),
+                        None => shown.to_owned(),
+                    };
+                    let placed = painter.text(
+                        egui::pos2(rect.left() + 10.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        label,
+                        egui::FontId::proportional(12.5),
+                        pal.accent,
+                    );
+                    painter.text(
+                        egui::pos2(placed.right() + 12.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        text,
+                        egui::FontId::monospace(12.0),
+                        pal.subtext,
+                    );
+                    if response.double_clicked() {
+                        open = Some((path.clone(), *line));
+                    }
+                }
+            },
+        );
+        if let Some((path, line)) = open {
+            if let Some(line) = line {
+                self.open_at.insert(path.clone(), line);
+            }
+            let name = remote::file_name(&path).to_owned();
+            self.send(Cmd::Download(path), format!("Скачивание {name}…"));
         }
     }
 

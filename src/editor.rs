@@ -27,6 +27,7 @@ pub struct View<'a> {
     pub pal: &'a Palette,
     pub dark: bool,
     pub focus: bool,
+    pub wrap: bool,
     pub complete: &'a mut Completion,
 }
 
@@ -44,6 +45,7 @@ struct Metrics {
     row_h: f32,
     view_w: f32,
     rows: usize,
+    wrap: bool,
 }
 
 struct LineLayout {
@@ -52,6 +54,8 @@ struct LineLayout {
     c0: usize,
     c1: usize,
     len: usize,
+    grid: usize,
+    starts: Vec<usize>,
 }
 
 impl LineLayout {
@@ -70,11 +74,96 @@ impl LineLayout {
             .cursor_from_pos(egui::vec2((x - self.x0) as f32, 0.0));
         (self.c0 + local.index.0).min(self.len)
     }
+
+    fn rows(&self) -> usize {
+        if self.grid > 0 {
+            self.len.div_ceil(self.grid).max(1)
+        } else {
+            self.starts.len().max(1)
+        }
+    }
+
+    fn row_range(&self, row: usize) -> (usize, usize) {
+        if self.grid > 0 {
+            (
+                (row * self.grid).min(self.len),
+                ((row + 1) * self.grid).min(self.len),
+            )
+        } else if self.starts.is_empty() {
+            (0, self.len)
+        } else {
+            let start = self.starts[row.min(self.starts.len() - 1)];
+            let end = self.starts.get(row + 1).copied().unwrap_or(self.len);
+            (start, end)
+        }
+    }
+
+    fn x_in_row(&self, row: usize, col: usize, char_w: f32) -> f64 {
+        let (start, _) = self.row_range(row);
+        if self.grid > 0 {
+            (col - start) as f64 * char_w as f64
+        } else if self.starts.is_empty() {
+            self.x_of(col, char_w)
+        } else {
+            match self.galley.rows.get(row) {
+                Some(placed) => placed.x_offset(CCursor::new(col - start).index) as f64,
+                None => 0.0,
+            }
+        }
+    }
+
+    fn place(&self, col: usize, char_w: f32) -> (f64, usize) {
+        let rows = self.rows();
+        let mut row = col
+            .checked_div(self.grid)
+            .unwrap_or_else(|| self.starts.partition_point(|s| *s <= col).saturating_sub(1));
+        if row >= rows {
+            row = rows - 1;
+        }
+        (self.x_in_row(row, col.min(self.len), char_w), row)
+    }
+
+    fn col_at_row(&self, x: f64, row: usize, char_w: f32) -> usize {
+        let row = row.min(self.rows() - 1);
+        let (start, end) = self.row_range(row);
+        let last = end == self.len;
+        let limit = if last {
+            end
+        } else {
+            end.saturating_sub(1).max(start)
+        };
+        if self.grid > 0 {
+            (start + (x / char_w as f64).round().max(0.0) as usize).min(limit)
+        } else if self.starts.is_empty() {
+            self.col_at(x)
+        } else {
+            let y = self
+                .galley
+                .rows
+                .get(row)
+                .map_or(0.0, |r| r.pos.y + r.height() * 0.5);
+            let index = self.galley.cursor_from_pos(egui::vec2(x as f32, y)).index.0;
+            index.clamp(start, limit)
+        }
+    }
 }
 
 fn layout_line(ui: &Ui, doc: &Document, line: usize, m: &Metrics) -> LineLayout {
     let len = doc.line_len(line);
     let start = doc.rope.line_to_char(line);
+    if m.wrap && len > LONG_LINE {
+        let empty = LayoutJob::simple(String::new(), m.font.clone(), doc.hl.default_color, 0.0);
+        return LineLayout {
+            galley: ui.fonts_mut(|f| f.layout_job(empty)),
+            x0: 0.0,
+            c0: 0,
+            c1: 0,
+            len,
+            grid: ((m.view_w / m.char_w) as usize).max(8),
+            starts: Vec::new(),
+        };
+    }
+    let wrap_width = if m.wrap { m.view_w } else { f32::INFINITY };
     let (c0, c1) = if len > LONG_LINE {
         let first = (doc.scroll_x / m.char_w as f64) as usize;
         let c0 = first.saturating_sub(LONG_PAD).min(len);
@@ -114,22 +203,100 @@ fn layout_line(ui: &Ui, doc: &Document, line: usize, m: &Metrics) -> LineLayout 
         }
     }
     let job = if sections.is_empty() {
-        LayoutJob::simple(text, m.font.clone(), default, f32::INFINITY)
+        LayoutJob::simple(text, m.font.clone(), default, wrap_width)
     } else {
         let mut job = LayoutJob {
             text,
             sections,
             ..Default::default()
         };
-        job.wrap.max_width = f32::INFINITY;
+        job.wrap.max_width = wrap_width;
         job
     };
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let mut starts = Vec::new();
+    if m.wrap {
+        let mut at = 0;
+        for row in &galley.rows {
+            starts.push(at);
+            at += row.char_count_including_newline().0;
+        }
+    }
     LineLayout {
-        galley: ui.fonts_mut(|f| f.layout_job(job)),
+        galley,
         x0: c0 as f64 * m.char_w as f64,
         c0,
         c1,
         len,
+        grid: 0,
+        starts,
+    }
+}
+
+fn grid_row(
+    ui: &Ui,
+    doc: &Document,
+    line_start: usize,
+    layout: &LineLayout,
+    row: usize,
+    m: &Metrics,
+) -> Arc<Galley> {
+    let (start, end) = layout.row_range(row);
+    let text = String::from(doc.rope.slice(line_start + start..line_start + end));
+    let job = LayoutJob::simple(text, m.font.clone(), doc.hl.default_color, f32::INFINITY);
+    ui.fonts_mut(|f| f.layout_job(job))
+}
+
+fn visible_lines(ui: &Ui, doc: &Document, m: &Metrics, view_h: f32) -> Vec<(usize, f64)> {
+    let lines = doc.line_count();
+    let row = m.row_h as f64;
+    let scroll = doc.scroll_y.max(0.0);
+    let first = ((scroll / row) as usize).min(lines - 1);
+    if !m.wrap {
+        let offset = -(scroll - first as f64 * row);
+        return (first..(first + m.rows + 2).min(lines))
+            .enumerate()
+            .map(|(i, line)| (line, offset + i as f64 * row))
+            .collect();
+    }
+    let mut out = Vec::new();
+    let mut y = 0.0;
+    for line in first..lines {
+        let height = layout_line(ui, doc, line, m).rows() as f64 * row;
+        if line == first {
+            let frac = (scroll / row - first as f64).clamp(0.0, 1.0);
+            y = -(frac * height).min(height - 1.0).max(0.0);
+        }
+        out.push((line, y));
+        y += height;
+        if y > view_h as f64 {
+            break;
+        }
+    }
+    out
+}
+
+fn wrapped_step(ui: &Ui, doc: &Document, m: &Metrics, pos: usize, goal: f64, down: bool) -> usize {
+    let line = doc.rope.char_to_line(pos);
+    let start = doc.rope.line_to_char(line);
+    let layout = layout_line(ui, doc, line, m);
+    let (_, row) = layout.place(pos - start, m.char_w);
+    if down {
+        if row + 1 < layout.rows() {
+            start + layout.col_at_row(goal, row + 1, m.char_w)
+        } else if line + 1 < doc.line_count() {
+            let next = layout_line(ui, doc, line + 1, m);
+            doc.rope.line_to_char(line + 1) + next.col_at_row(goal, 0, m.char_w)
+        } else {
+            doc.len()
+        }
+    } else if row > 0 {
+        start + layout.col_at_row(goal, row - 1, m.char_w)
+    } else if line > 0 {
+        let prev = layout_line(ui, doc, line - 1, m);
+        doc.rope.line_to_char(line - 1) + prev.col_at_row(goal, prev.rows() - 1, m.char_w)
+    } else {
+        0
     }
 }
 
@@ -137,6 +304,22 @@ fn move_vertical(ui: &Ui, doc: &mut Document, m: &Metrics, delta: isize, extend:
     let head = doc.sel.1;
     let line = doc.rope.char_to_line(head);
     let col = head - doc.rope.line_to_char(line);
+    if m.wrap {
+        let goal = doc
+            .goal_x
+            .unwrap_or_else(|| layout_line(ui, doc, line, m).place(col, m.char_w).0);
+        let mut pos = head;
+        for _ in 0..delta.unsigned_abs() {
+            let next = wrapped_step(ui, doc, m, pos, goal, delta > 0);
+            if next == pos {
+                break;
+            }
+            pos = next;
+        }
+        doc.move_to(pos, extend);
+        doc.goal_x = Some(goal);
+        return;
+    }
     let goal = doc
         .goal_x
         .unwrap_or_else(|| layout_line(ui, doc, line, m).x_of(col, m.char_w));
@@ -335,6 +518,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         pal,
         dark,
         focus,
+        wrap,
         complete,
     } = view;
     let font = FontId::monospace(FONT_SIZE);
@@ -360,7 +544,11 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         row_h,
         view_w: text_rect.width() - PAD_X,
         rows: ((text_rect.height() - PAD_TOP) / row_h) as usize,
+        wrap,
     };
+    if wrap {
+        doc.scroll_x = 0.0;
+    }
     let view_h = (text_rect.height() - PAD_TOP) as f64;
     let row = row_h as f64;
 
@@ -372,6 +560,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
 
     let response = ui.interact(text_rect, id, Sense::click_and_drag());
     let pressed = response.contains_pointer() && ui.input(|i| i.pointer.primary_pressed());
+    let had_focus = ui.memory(|mem| mem.has_focus(id));
     if focus || pressed {
         ui.memory_mut(|mem| mem.request_focus(id));
     }
@@ -394,7 +583,9 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     }
 
     let before = (doc.version, doc.sel);
-    if focused {
+    if focused && !had_focus {
+        complete.close();
+    } else if focused {
         let mut manual = false;
         ui.input_mut(|i| {
             manual = i.consume_key(egui::Modifiers::CTRL, Key::Space);
@@ -432,15 +623,36 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     }
     if ui.rect_contains_pointer(full) {
         let delta = ui.input(|i| i.smooth_scroll_delta);
-        doc.scroll_x -= delta.x as f64;
-        doc.scroll_y -= delta.y as f64;
+        if wrap {
+            let rows = visible_lines(ui, doc, &m, 1.0)
+                .first()
+                .map_or(1, |(line, _)| layout_line(ui, doc, *line, &m).rows());
+            doc.scroll_y -= delta.y as f64 / rows as f64;
+        } else {
+            doc.scroll_x -= delta.x as f64;
+            doc.scroll_y -= delta.y as f64;
+        }
     }
 
     let char_at = |ui: &Ui, doc: &Document, p: Pos2| {
-        let y = (p.y - text_rect.top() - PAD_TOP) as f64 + doc.scroll_y;
-        let line = ((y / row).floor().max(0.0) as usize).min(doc.line_count() - 1);
+        let py = p.y - text_rect.top() - PAD_TOP;
         let x = (p.x - text_rect.left() - PAD_X) as f64 + doc.scroll_x;
-        doc.rope.line_to_char(line) + layout_line(ui, doc, line, &m).col_at(x)
+        if !wrap {
+            let y = py as f64 + doc.scroll_y;
+            let line = ((y / row).floor().max(0.0) as usize).min(doc.line_count() - 1);
+            return doc.rope.line_to_char(line) + layout_line(ui, doc, line, &m).col_at(x);
+        }
+        let visible = visible_lines(ui, doc, &m, view_h as f32);
+        let (line, top) = visible
+            .iter()
+            .rev()
+            .find(|(_, y)| *y <= py as f64)
+            .or(visible.first())
+            .copied()
+            .unwrap_or((0, 0.0));
+        let layout = layout_line(ui, doc, line, &m);
+        let at = (((py as f64 - top) / row).floor().max(0.0) as usize).min(layout.rows() - 1);
+        doc.rope.line_to_char(line) + layout.col_at_row(x, at, char_w)
     };
     let pointer = ui.input(|i| i.pointer.interact_pos());
     let mut state = ui.data(|d| d.get_temp::<Pointer>(id)).unwrap_or_default();
@@ -497,12 +709,58 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     ui.data_mut(|d| d.insert_temp(id, state));
 
     let lines = doc.line_count();
-    let max_y = (lines as f64 * row - view_h + row * 3.0).max(0.0);
     let cw = char_w as f64;
     let view_w = m.view_w as f64;
     let content_w = doc.content_w.max(doc.max_line_chars as f64 * cw);
-    let max_x = (content_w - view_w + cw * 6.0).max(0.0);
-    if std::mem::take(&mut doc.reveal) {
+    let max_x = if wrap {
+        0.0
+    } else {
+        (content_w - view_w + cw * 6.0).max(0.0)
+    };
+    let max_y = if wrap {
+        lines as f64 * row * (1.0 - 1e-12)
+    } else {
+        (lines as f64 * row - view_h + row * 3.0).max(0.0)
+    };
+    let reveal = std::mem::take(&mut doc.reveal);
+    if reveal && wrap {
+        let head = doc.sel.1;
+        let line = doc.rope.char_to_line(head);
+        let layout = layout_line(ui, doc, line, &m);
+        let (_, at) = layout.place(head - doc.rope.line_to_char(line), char_w);
+        let visible = visible_lines(ui, doc, &m, view_h as f32);
+        let shown = visible.iter().find(|(l, _)| *l == line).map(|(_, y)| *y);
+        let cursor_y = shown.map(|y| y + at as f64 * row);
+        let above = match (visible.first(), cursor_y) {
+            (Some((first, _)), None) => line < *first,
+            (_, Some(y)) => y < 0.0,
+            _ => false,
+        };
+        let below = cursor_y.is_none_or(|y| y + row > view_h);
+        if above {
+            doc.scroll_y = (line as f64 + at as f64 / layout.rows() as f64) * row;
+        } else if below {
+            let mut room = (view_h as f32 - row_h).max(0.0);
+            let mut top_line = line;
+            let mut top_row = at;
+            let take = ((room / row_h) as usize).min(at);
+            top_row -= take;
+            room -= take as f32 * row_h;
+            let mut rows = layout.rows();
+            while top_row == 0 && top_line > 0 && room >= row_h {
+                let prev = layout_line(ui, doc, top_line - 1, &m).rows();
+                let take = ((room / row_h) as usize).min(prev);
+                room -= take as f32 * row_h;
+                top_line -= 1;
+                top_row = prev - take;
+                rows = prev;
+                if take < prev {
+                    break;
+                }
+            }
+            doc.scroll_y = (top_line as f64 + top_row as f64 / rows as f64) * row + 0.01;
+        }
+    } else if reveal {
         let head = doc.sel.1;
         let line = doc.rope.char_to_line(head);
         let top = line as f64 * row;
@@ -536,7 +794,11 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         true,
         doc.scroll_y,
         max_y,
-        view_h,
+        if wrap {
+            (max_y / 40.0).max(1.0)
+        } else {
+            view_h
+        },
         pal,
     );
     doc.scroll_y = scrolled_y;
@@ -555,8 +817,9 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     );
     doc.scroll_x = scrolled_x;
 
-    let first = ((doc.scroll_y / row) as usize).min(lines - 1);
-    let last = (first + m.rows + 2).min(lines);
+    let visible = visible_lines(ui, doc, &m, view_h as f32);
+    let first = visible.first().map_or(0, |v| v.0);
+    let last = visible.last().map_or(1, |v| v.0 + 1);
     if doc.hl.process(
         syn,
         &doc.rope,
@@ -580,26 +843,60 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     let gutter_painter = ui.painter_at(gutter_rect);
     let origin_x = text_rect.left() + PAD_X;
     let scroll_x = doc.scroll_x;
-    let origin_y = text_rect.top() + PAD_TOP - (doc.scroll_y - first as f64 * row) as f32;
+    let origin_y = text_rect.top() + PAD_TOP;
     let sel = doc.selection();
     let head = doc.sel.1;
     let head_line = doc.rope.char_to_line(head);
     let sorted = (sel.start, sel.end);
     let mut cursor_rect = None;
 
-    for line in first..last {
-        let y = origin_y + (line - first) as f32 * row_h;
+    for (line, offset) in visible {
+        let top64 = origin_y as f64 + offset;
+        let row_top = |r: usize| (top64 + r as f64 * row) as f32;
+        let y = top64.max(-1.0e6) as f32;
         let layout = layout_line(ui, doc, line, &m);
         let line_start = doc.rope.line_to_char(line);
         let line_end = line_start + layout.len;
-        let sx = |col: usize| origin_x + (layout.x_of(col, char_w) - scroll_x) as f32;
-        doc.content_w = doc.content_w.max(layout.x0 + layout.galley.size().x as f64);
+        let rows = layout.rows();
+        let row_from =
+            (((text_rect.top() as f64 - top64) / row).floor().max(0.0) as usize).min(rows - 1);
+        let row_to =
+            (((text_rect.bottom() as f64 - top64) / row).ceil().max(1.0) as usize).min(rows);
+        let sx = |x: f64| origin_x + (x - scroll_x) as f32;
+        if !wrap {
+            doc.content_w = doc.content_w.max(layout.x0 + layout.galley.size().x as f64);
+        }
+        let fill = |a: usize, b: usize, tail: f32, radius: f32, color: egui::Color32| {
+            for r in row_from..row_to {
+                let (start, end) = layout.row_range(r);
+                if a > end || b < start {
+                    continue;
+                }
+                let lo = a.max(start);
+                let hi = b.min(end);
+                let extra = if b > end && r + 1 == rows { tail } else { 0.0 };
+                if hi > lo || extra > 0.0 {
+                    let top = row_top(r);
+                    painter.rect_filled(
+                        Rect::from_min_max(
+                            egui::pos2(sx(layout.x_in_row(r, lo, char_w)), top),
+                            egui::pos2(sx(layout.x_in_row(r, hi, char_w)) + extra, top + row_h),
+                        ),
+                        radius,
+                        color,
+                    );
+                }
+            }
+        };
 
         if line == head_line && sel.is_empty() {
             painter.rect_filled(
                 Rect::from_min_max(
                     egui::pos2(text_rect.left(), y),
-                    egui::pos2(text_rect.right(), y + row_h),
+                    egui::pos2(
+                        text_rect.right(),
+                        row_top(rows).min(text_rect.bottom() + 4.0),
+                    ),
                 ),
                 0.0,
                 pal.current_line,
@@ -619,38 +916,37 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                     } else {
                         pal.match_bg
                     };
-                    painter.rect_filled(
-                        Rect::from_min_max(egui::pos2(sx(a), y), egui::pos2(sx(b), y + row_h)),
-                        2.0,
-                        color,
-                    );
+                    fill(a, b, 0.0, 2.0, color);
                 }
             }
         }
         if !sel.is_empty() && sel.start <= line_end && sel.end > line_start {
             let a = sel.start.max(line_start) - line_start;
             let b = sel.end.min(line_end) - line_start;
-            let tail = if sel.end > line_end {
-                char_w * 0.6
-            } else {
-                0.0
-            };
-            painter.rect_filled(
-                Rect::from_min_max(egui::pos2(sx(a), y), egui::pos2(sx(b) + tail, y + row_h)),
-                0.0,
-                pal.selection,
+            let past = if sel.end > line_end { b + 1 } else { b };
+            fill(a, past, char_w * 0.6, 0.0, pal.selection);
+        }
+        if layout.grid > 0 {
+            for r in row_from..row_to {
+                painter.galley(
+                    egui::pos2(origin_x, row_top(r)),
+                    grid_row(ui, doc, line_start, &layout, r, &m),
+                    doc.hl.default_color,
+                );
+            }
+        } else {
+            painter.galley(
+                egui::pos2(sx(layout.x0), y),
+                layout.galley.clone(),
+                doc.hl.default_color,
             );
         }
-        painter.galley(
-            egui::pos2(origin_x + (layout.x0 - scroll_x) as f32, y),
-            layout.galley.clone(),
-            doc.hl.default_color,
-        );
         if line == head_line {
-            let x = sx(head - line_start);
+            let (x, at) = layout.place(head - line_start, char_w);
+            let top = row_top(at);
             cursor_rect = Some(Rect::from_min_max(
-                egui::pos2(x, y),
-                egui::pos2(x + 1.0, y + row_h),
+                egui::pos2(sx(x), top),
+                egui::pos2(sx(x) + 1.0, top + row_h),
             ));
         }
         gutter_painter.text(

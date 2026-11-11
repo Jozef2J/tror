@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
@@ -106,6 +108,7 @@ pub struct Store {
     pub known_hosts: BTreeMap<String, String>,
     pub hide_size: bool,
     pub show_date: bool,
+    pub search_excludes: Option<String>,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -761,6 +764,322 @@ fn serve(
     log("Отключено".into(), false);
 }
 
+pub struct SearchParams {
+    pub root: String,
+    pub query: String,
+    pub content: bool,
+    pub excludes: Vec<String>,
+}
+
+pub enum SearchEvent {
+    Hit {
+        path: String,
+        line: Option<usize>,
+        text: String,
+    },
+    Status(String),
+    Done(String),
+    Failed(String),
+}
+
+pub struct SearchJob {
+    pub rx: Receiver<SearchEvent>,
+    pub cancel: Arc<AtomicBool>,
+}
+
+const MAX_HITS: usize = 2000;
+const MAX_GREP_FILE: u64 = 2 * 1024 * 1024;
+const BINARY: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "gz", "tar", "rar", "7z",
+    "woff", "woff2", "ttf", "eot", "otf", "mp3", "mp4", "avi", "mov", "exe", "dll", "so", "phar",
+    "doc", "docx", "xls", "xlsx",
+];
+
+fn quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+pub fn search_command(params: &SearchParams) -> String {
+    let prunes: Vec<String> = params
+        .excludes
+        .iter()
+        .map(|e| e.trim().trim_matches('/'))
+        .filter(|e| !e.is_empty())
+        .map(|e| {
+            if e.contains('/') {
+                format!("-path {}", quote(&format!("*/{e}")))
+            } else {
+                format!("-name {}", quote(e))
+            }
+        })
+        .collect();
+    let prune = if prunes.is_empty() {
+        String::new()
+    } else {
+        format!("\\( {} \\) -prune -o ", prunes.join(" -o "))
+    };
+    let root = quote(&params.root);
+    let check = "command -v find >/dev/null 2>&1 && command -v grep >/dev/null 2>&1 || exit 97; ";
+    if params.content {
+        format!(
+            "{check}find -H {root} {prune}-type f -size -{}k -print0 2>/dev/null | xargs -0 grep -InH -i -F -e {} -- 2>/dev/null | head -n {MAX_HITS}",
+            MAX_GREP_FILE / 1024,
+            quote(&params.query)
+        )
+    } else {
+        let mut glob = String::new();
+        for c in params.query.chars() {
+            if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+                glob.push('\\');
+            }
+            glob.push(c);
+        }
+        format!(
+            "{check}find -H {root} {prune}-iname {} -print 2>/dev/null | head -n {MAX_HITS}",
+            quote(&format!("*{glob}*"))
+        )
+    }
+}
+
+pub fn parse_grep_line(line: &str) -> Option<(String, usize, String)> {
+    let mut from = 0;
+    while let Some(i) = line[from..].find(':') {
+        let colon = from + i;
+        let rest = &line[colon + 1..];
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0 && rest[digits..].starts_with(':') {
+            let number = rest[..digits].parse().ok()?;
+            return Some((
+                line[..colon].to_owned(),
+                number,
+                rest[digits + 1..].trim().chars().take(200).collect(),
+            ));
+        }
+        from = colon + 1;
+    }
+    None
+}
+
+fn excluded(path: &str, name: &str, excludes: &[String]) -> bool {
+    excludes.iter().any(|e| {
+        let e = e.trim().trim_matches('/');
+        !e.is_empty()
+            && if e.contains('/') {
+                path.ends_with(&format!("/{e}"))
+            } else {
+                name == e
+            }
+    })
+}
+
+fn search_remote_shell(
+    session: &ssh2::Session,
+    params: &SearchParams,
+    cancel: &AtomicBool,
+    emit: &dyn Fn(SearchEvent),
+) -> Result<Option<usize>, String> {
+    let Ok(mut channel) = session.channel_session() else {
+        return Ok(None);
+    };
+    if channel.exec(&search_command(params)).is_err() {
+        return Ok(None);
+    }
+    session.set_blocking(false);
+    let mut pending: Vec<u8> = Vec::new();
+    let mut hits = 0;
+    let mut buf = [0u8; 16 * 1024];
+    let handle = |line: &str, hits: &mut usize| {
+        if line.is_empty() {
+            return;
+        }
+        if params.content {
+            if let Some((path, number, text)) = parse_grep_line(line) {
+                emit(SearchEvent::Hit {
+                    path,
+                    line: Some(number),
+                    text,
+                });
+                *hits += 1;
+            }
+        } else {
+            emit(SearchEvent::Hit {
+                path: line.to_owned(),
+                line: None,
+                text: String::new(),
+            });
+            *hits += 1;
+        }
+    };
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            session.set_blocking(true);
+            let _ = channel.close();
+            return Ok(Some(hits));
+        }
+        match channel.read(&mut buf) {
+            Ok(0) if channel.eof() => break,
+            Ok(0) => std::thread::sleep(Duration::from_millis(15)),
+            Ok(n) => {
+                pending.extend_from_slice(&buf[..n]);
+                while let Some(end) = pending.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = pending.drain(..=end).collect();
+                    handle(String::from_utf8_lossy(&line).trim_end(), &mut hits);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if channel.eof() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+            Err(e) => {
+                session.set_blocking(true);
+                return Err(e.to_string());
+            }
+        }
+    }
+    handle(String::from_utf8_lossy(&pending).trim_end(), &mut hits);
+    session.set_blocking(true);
+    let _ = channel.wait_close();
+    let status = channel.exit_status().unwrap_or(0);
+    if hits == 0 && status != 0 {
+        return Ok(None);
+    }
+    Ok(Some(hits))
+}
+
+fn search_walk(
+    backend: &mut Backend,
+    params: &SearchParams,
+    cancel: &AtomicBool,
+    emit: &dyn Fn(SearchEvent),
+) -> usize {
+    let needle = params.query.to_lowercase();
+    let mut stack = vec![params.root.clone()];
+    let mut hits = 0;
+    let mut dirs = 0;
+    while let Some(dir) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) || hits >= MAX_HITS {
+            break;
+        }
+        dirs += 1;
+        emit(SearchEvent::Status(format!(
+            "просмотрено каталогов: {dirs}"
+        )));
+        let Ok(entries) = backend.list(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            if cancel.load(Ordering::Relaxed) || hits >= MAX_HITS {
+                break;
+            }
+            let path = join(&dir, &entry.name);
+            if excluded(&path, &entry.name, &params.excludes) {
+                continue;
+            }
+            if entry.is_dir {
+                stack.push(path.clone());
+            }
+            if !params.content {
+                if entry.name.to_lowercase().contains(&needle) {
+                    emit(SearchEvent::Hit {
+                        path,
+                        line: None,
+                        text: String::new(),
+                    });
+                    hits += 1;
+                }
+                continue;
+            }
+            let ext = entry.name.rsplit('.').next().unwrap_or("").to_lowercase();
+            if entry.is_dir || entry.size > MAX_GREP_FILE || BINARY.contains(&ext.as_str()) {
+                continue;
+            }
+            let Ok(data) = backend.download(&path) else {
+                continue;
+            };
+            if data.contains(&0) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&data);
+            for (number, line) in text.lines().enumerate() {
+                if line.to_lowercase().contains(&needle) {
+                    emit(SearchEvent::Hit {
+                        path: path.clone(),
+                        line: Some(number + 1),
+                        text: line.trim().chars().take(200).collect(),
+                    });
+                    hits += 1;
+                    if hits >= MAX_HITS {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    hits
+}
+
+pub fn search(
+    profile: &Profile,
+    known: Option<String>,
+    params: SearchParams,
+    wake: impl Fn() + Send + 'static,
+) -> SearchJob {
+    let (tx, rx) = channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let profile = profile.clone();
+    std::thread::spawn(move || {
+        let emit = |event: SearchEvent| {
+            let _ = tx.send(event);
+            wake();
+        };
+        let run = || -> Result<(usize, &'static str), String> {
+            match profile.protocol {
+                Protocol::Sftp => {
+                    let (session, _) = open_session(&profile, known.as_deref(), &|_, _| false)?;
+                    if let Some(hits) = search_remote_shell(&session, &params, &flag, &emit)? {
+                        return Ok((hits, "поиск командами сервера"));
+                    }
+                    let sftp = session.sftp().map_err(|e| e.to_string())?;
+                    let mut backend = Backend::Sftp {
+                        _session: session,
+                        sftp,
+                    };
+                    Ok((
+                        search_walk(&mut backend, &params, &flag, &emit),
+                        "обход каталогов",
+                    ))
+                }
+                Protocol::Ftp => {
+                    let (mut backend, _) = connect_ftp(&profile)?;
+                    Ok((
+                        search_walk(&mut backend, &params, &flag, &emit),
+                        "обход каталогов",
+                    ))
+                }
+            }
+        };
+        match run() {
+            Ok((hits, how)) => {
+                let stopped = if flag.load(Ordering::Relaxed) {
+                    ", остановлен"
+                } else if hits >= MAX_HITS {
+                    ", показаны первые результаты"
+                } else {
+                    ""
+                };
+                emit(SearchEvent::Done(format!(
+                    "найдено: {hits} ({how}{stopped})"
+                )));
+            }
+            Err(e) => emit(SearchEvent::Failed(e)),
+        }
+    });
+    SearchJob { rx, cancel }
+}
+
 pub fn connect(
     profile: &Profile,
     known: Option<String>,
@@ -979,5 +1298,132 @@ mod tests {
         assert!(changed);
         conn.tx.send(Cmd::TrustHost(true)).unwrap();
         assert!(matches!(next(), Ok(Event::Closed(_))));
+    }
+
+    #[test]
+    fn search_command_and_grep_parsing() {
+        let params = SearchParams {
+            root: "/var/www/site".into(),
+            query: "it's $x".into(),
+            content: true,
+            excludes: vec![
+                "bitrix/cache".into(),
+                " node_modules ".into(),
+                String::new(),
+            ],
+        };
+        let cmd = search_command(&params);
+        assert!(cmd.contains("find -H '/var/www/site' \\( -path '*/bitrix/cache' -o -name 'node_modules' \\) -prune -o -type f"));
+        assert!(cmd.contains("grep -InH -i -F -e 'it'\\''s $x' --"));
+        let names = search_command(&SearchParams {
+            content: false,
+            query: "a*b".into(),
+            excludes: Vec::new(),
+            ..params
+        });
+        assert!(names.contains("find -H '/var/www/site' -iname '*a\\*b*' -print"));
+
+        assert_eq!(
+            parse_grep_line("/www/a:b.php:12:  echo $x; // 3:4"),
+            Some(("/www/a:b.php".into(), 12, "echo $x; // 3:4".into()))
+        );
+        assert_eq!(parse_grep_line("no line number here"), None);
+        assert!(excluded(
+            "/www/bitrix/cache",
+            "cache",
+            &["bitrix/cache".into()]
+        ));
+        assert!(!excluded(
+            "/www/local/cache",
+            "cache",
+            &["bitrix/cache".into()]
+        ));
+        assert!(excluded("/www/x/.git", ".git", &[".git".into()]));
+    }
+
+    fn collect(job: SearchJob) -> (Vec<(String, Option<usize>, String)>, String) {
+        let mut hits = Vec::new();
+        loop {
+            match job.rx.recv_timeout(Duration::from_secs(30)).expect("поиск") {
+                SearchEvent::Hit { path, line, text } => hits.push((path, line, text)),
+                SearchEvent::Status(_) => {}
+                SearchEvent::Done(note) => return (hits, note),
+                SearchEvent::Failed(e) => panic!("{e}"),
+            }
+        }
+    }
+
+    fn live_search(protocol: Protocol, port: u16) -> String {
+        let mut profile = Profile::new("s".into());
+        profile.protocol = protocol;
+        profile.host = "127.0.0.1".into();
+        profile.port = port;
+        profile.user = "jozef".into();
+        profile.password = "secret".into();
+        let known = if protocol == Protocol::Sftp {
+            let conn = connect(&profile, None, || {});
+            loop {
+                match conn.rx.recv_timeout(Duration::from_secs(20)).unwrap() {
+                    Event::HostKey { .. } => conn.tx.send(Cmd::TrustHost(true)).unwrap(),
+                    Event::Connected { fingerprint, .. } => break fingerprint,
+                    _ => {}
+                }
+            }
+        } else {
+            None
+        };
+        let root = "/search".to_owned();
+        let text = |excludes: Vec<String>| SearchParams {
+            root: root.clone(),
+            query: "needle_42".into(),
+            content: true,
+            excludes,
+        };
+        let (hits, note) = collect(search(&profile, known.clone(), text(Vec::new()), || {}));
+        let mut found: Vec<_> = hits.iter().map(|h| (h.0.as_str(), h.1)).collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                ("/search/a.php", Some(2)),
+                ("/search/bitrix/cache/c.php", Some(1)),
+                ("/search/sub/b.js", Some(1)),
+            ],
+            "{note}"
+        );
+        assert!(hits.iter().any(|h| h.2 == "echo 'NEEDLE_42';"));
+        let (hits, _) = collect(search(
+            &profile,
+            known.clone(),
+            text(vec!["bitrix/cache".into()]),
+            || {},
+        ));
+        assert_eq!(hits.len(), 2);
+        let (hits, _) = collect(search(
+            &profile,
+            known,
+            SearchParams {
+                root,
+                query: "B.J".into(),
+                content: false,
+                excludes: Vec::new(),
+            },
+            || {},
+        ));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "/search/sub/b.js");
+        note
+    }
+
+    #[test]
+    #[ignore]
+    fn live_search_sftp_uses_server_commands() {
+        assert!(live_search(Protocol::Sftp, 2222).contains("командами сервера"));
+    }
+
+    #[test]
+    #[ignore]
+    fn live_search_ftp_walks_directories() {
+        assert!(live_search(Protocol::Ftp, 2121).contains("обход каталогов"));
     }
 }

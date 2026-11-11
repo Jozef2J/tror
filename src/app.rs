@@ -45,6 +45,7 @@ fn encoding_label(encoding: &'static Encoding, bom: bool) -> String {
 #[serde(default)]
 struct Settings {
     dark: bool,
+    wrap: bool,
     remote_panel: bool,
     terminal_panel: bool,
     recent: Vec<PathBuf>,
@@ -56,6 +57,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             dark: true,
+            wrap: false,
             remote_panel: false,
             terminal_panel: false,
             recent: Vec::new(),
@@ -83,6 +85,7 @@ enum Action {
     CloseSearch,
     GotoLine,
     ToggleTheme,
+    ToggleWrap,
     ToggleRemote,
     ToggleTerminal,
     NextTab,
@@ -174,6 +177,7 @@ enum Confirm {
 enum BottomTab {
     Console,
     Log,
+    Search,
 }
 
 #[derive(Default)]
@@ -216,6 +220,7 @@ pub struct TrorApp {
     remote: RemotePanel,
     terminal: Terminal,
     bottom_tab: BottomTab,
+    logo: Option<egui::TextureHandle>,
     ctx: egui::Context,
     checked: (u64, bool),
     goto: Option<String>,
@@ -247,6 +252,16 @@ impl TrorApp {
             remote: RemotePanel::new(false),
             terminal: Terminal::new(false),
             bottom_tab: BottomTab::Console,
+            logo: eframe::icon_data::from_png_bytes(include_bytes!("../assets/tror.png"))
+                .ok()
+                .map(|icon| {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [icon.width as usize, icon.height as usize],
+                        &icon.rgba,
+                    );
+                    cc.egui_ctx
+                        .load_texture("tror_logo", image, egui::TextureOptions::LINEAR)
+                }),
             ctx: cc.egui_ctx.clone(),
             checked: (0, false),
             goto: None,
@@ -371,11 +386,16 @@ impl TrorApp {
                     profile,
                     path,
                     data,
+                    line,
                 } => {
                     let target = Some((profile.clone(), path.clone()));
                     if let Some(i) = self.docs.iter().position(|d| d.remote == target) {
                         self.active = i;
-                        self.notify("Файл уже открыт — показана открытая вкладка", now);
+                        self.focus_editor = true;
+                        match line {
+                            Some(line) => self.docs[i].goto_line(line),
+                            None => self.notify("Файл уже открыт — показана открытая вкладка", now),
+                        }
                         continue;
                     }
                     match Document::open_remote(self.next_id, &profile, &path, data) {
@@ -384,6 +404,9 @@ impl TrorApp {
                             doc.syntax = self
                                 .syntaxes
                                 .detect(Some(Path::new(&path)), &doc.first_line());
+                            if let Some(line) = line {
+                                doc.goto_line(line);
+                            }
                             self.docs.push(doc);
                             self.active = self.docs.len() - 1;
                             self.focus_editor = true;
@@ -619,6 +642,7 @@ impl TrorApp {
                 }
             }
             Action::ToggleTheme => self.settings.dark = !self.settings.dark,
+            Action::ToggleWrap => self.settings.wrap = !self.settings.wrap,
             Action::ToggleRemote => self.remote.visible = !self.remote.visible,
             Action::ToggleTerminal => self.terminal.visible = !self.terminal.visible,
             Action::NextTab => {
@@ -651,6 +675,7 @@ impl TrorApp {
             (cmd, Key::G, 8),
             (Modifiers::NONE, Key::F8, 12),
             (Modifiers::NONE, Key::F9, 13),
+            (Modifiers::ALT, Key::Z, 14),
             (cmd, Key::Tab, 9),
             (Modifiers::SHIFT, Key::F3, 10),
             (Modifiers::NONE, Key::F3, 11),
@@ -674,6 +699,10 @@ impl TrorApp {
                 8 => Action::GotoLine,
                 12 => Action::ToggleRemote,
                 13 => Action::ToggleTerminal,
+                14 => {
+                    ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
+                    Action::ToggleWrap
+                }
                 9 => Action::NextTab,
                 10 => Action::FindPrev,
                 _ => Action::FindNext,
@@ -773,6 +802,14 @@ impl TrorApp {
                     actions.push(Action::ToggleTheme);
                 }
                 ui.separator();
+                let wrap = if self.settings.wrap {
+                    "Выключить перенос строк"
+                } else {
+                    "Перенос строк"
+                };
+                if item(ui, wrap, "Alt+Z", true) {
+                    actions.push(Action::ToggleWrap);
+                }
                 let panel = if self.remote.visible {
                     "Скрыть удалённые файлы"
                 } else {
@@ -1152,7 +1189,11 @@ impl TrorApp {
         ui.painter().rect_filled(rect, 0.0, pal.base);
         ui.vertical_centered(|ui| {
             ui.add_space((rect.height() * 0.3).max(20.0));
-            ui.label(RichText::new("Tror").size(44.0).color(pal.faint));
+            if let Some(logo) = &self.logo {
+                ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(96.0, 96.0)));
+                ui.add_space(6.0);
+            }
+            ui.label(RichText::new("Tror").size(34.0).color(pal.faint));
             ui.add_space(4.0);
             ui.label(
                 RichText::new("Перетащите файлы сюда или начните с пустой вкладки")
@@ -1352,6 +1393,10 @@ impl eframe::App for TrorApp {
             || self.confirm.is_some()
             || self.remote.modal_open()
             || self.terminal.modal_open();
+        if std::mem::take(&mut self.remote.want_search) {
+            self.terminal.visible = true;
+            self.bottom_tab = BottomTab::Search;
+        }
         let events = self.remote.poll();
         self.remote_events(&ctx, events);
         for event in self.terminal.poll() {
@@ -1419,7 +1464,11 @@ impl eframe::App for TrorApp {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         for (tab, label) in
-                            [(BottomTab::Console, "SSH-консоль"), (BottomTab::Log, "Журнал")]
+                            [
+                                (BottomTab::Console, "SSH-консоль"),
+                                (BottomTab::Log, "Журнал"),
+                                (BottomTab::Search, "Поиск на сервере"),
+                            ]
                         {
                             let active = self.bottom_tab == tab;
                             let text = RichText::new(label).size(12.5).color(if active {
@@ -1437,6 +1486,7 @@ impl eframe::App for TrorApp {
                         }
                         match self.bottom_tab {
                             BottomTab::Console => self.terminal.header(ui, &pal, profile, known),
+                            BottomTab::Search => {}
                             BottomTab::Log => {
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     if ui.add(Button::new("Очистить").fill(pal.surface)).clicked() {
@@ -1449,6 +1499,10 @@ impl eframe::App for TrorApp {
                     ui.add_space(2.0);
                     match self.bottom_tab {
                         BottomTab::Console => self.terminal.body(ui, &pal, self.settings.dark),
+                        BottomTab::Search => {
+                            self.terminal.focused = false;
+                            self.remote.search_ui(ui, &pal);
+                        }
                         BottomTab::Log => {
                             self.terminal.focused = false;
                             let rect = ui.available_rect_before_wrap();
@@ -1504,6 +1558,7 @@ impl eframe::App for TrorApp {
                         pal: &pal,
                         dark: self.settings.dark,
                         focus,
+                        wrap: self.settings.wrap,
                         complete: &mut self.complete,
                     },
                 ),
