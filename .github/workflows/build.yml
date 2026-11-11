@@ -14,21 +14,26 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact: tror-linux-x86_64
-            bin: tror
+            path: tror-linux-x86_64.tar.gz
           - os: windows-latest
             artifact: tror-windows-x86_64
-            bin: tror.exe
+            path: target/release/tror.exe
           - os: macos-latest
-            artifact: tror-macos-arm64
-            bin: tror
+            artifact: tror-macos-universal
+            path: Tror-macos.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
-      - run: cargo build --release --locked
+      - if: runner.os != 'macOS'
+        run: cargo build --release --locked
+      - if: runner.os == 'Linux'
+        run: tar -czf tror-linux-x86_64.tar.gz -C target/release tror
+      - if: runner.os == 'macOS'
+        run: packaging/macos.sh
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: target/release/${{ matrix.bin }}
+          path: ${{ matrix.path }}

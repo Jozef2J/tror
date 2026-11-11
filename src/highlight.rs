@@ -8,7 +8,6 @@ use syntect::highlighting::{HighlightIterator, HighlightState, Highlighter as St
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 use two_face::theme::EmbeddedThemeName;
 
-pub const FONT_SIZE: f32 = 14.0;
 pub const FRAME_BUDGET: Duration = Duration::from_millis(8);
 const FULL_LIMIT: usize = 2 * 1024 * 1024;
 const MAX_LINE_BYTES: usize = 10_000;

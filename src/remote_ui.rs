@@ -93,7 +93,7 @@ fn date_label(secs: u64) -> String {
         .unwrap_or_default()
 }
 
-fn kind_color(name: &str, pal: &Palette) -> Color32 {
+pub fn kind_color(name: &str, pal: &Palette) -> Color32 {
     let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
         "php" | "phtml" | "twig" | "tpl" => Color32::from_rgb(0x9d, 0x8c, 0xf2),

@@ -8,7 +8,7 @@ use eframe::egui::{
 
 use crate::complete::Completion;
 use crate::document::Document;
-use crate::highlight::{FONT_SIZE, FRAME_BUDGET, Syntaxes};
+use crate::highlight::{FRAME_BUDGET, Syntaxes};
 use crate::search::SearchState;
 use crate::theme::Palette;
 
@@ -28,6 +28,8 @@ pub struct View<'a> {
     pub dark: bool,
     pub focus: bool,
     pub wrap: bool,
+    pub font_size: f32,
+    pub line_spacing: f32,
     pub complete: &'a mut Completion,
 }
 
@@ -148,11 +150,23 @@ impl LineLayout {
     }
 }
 
+fn plain_job(text: String, m: &Metrics, color: egui::Color32, wrap_width: f32) -> LayoutJob {
+    let mut job = LayoutJob::single_section(
+        text,
+        TextFormat {
+            line_height: Some(m.row_h),
+            ..TextFormat::simple(m.font.clone(), color)
+        },
+    );
+    job.wrap.max_width = wrap_width;
+    job
+}
+
 fn layout_line(ui: &Ui, doc: &Document, line: usize, m: &Metrics) -> LineLayout {
     let len = doc.line_len(line);
     let start = doc.rope.line_to_char(line);
     if m.wrap && len > LONG_LINE {
-        let empty = LayoutJob::simple(String::new(), m.font.clone(), doc.hl.default_color, 0.0);
+        let empty = plain_job(String::new(), m, doc.hl.default_color, f32::INFINITY);
         return LineLayout {
             galley: ui.fonts_mut(|f| f.layout_job(empty)),
             x0: 0.0,
@@ -173,7 +187,10 @@ fn layout_line(ui: &Ui, doc: &Document, line: usize, m: &Metrics) -> LineLayout 
         (0, len)
     };
     let text = String::from(doc.rope.slice(start + c0..start + c1));
-    let format = |color| TextFormat::simple(m.font.clone(), color);
+    let format = |color| TextFormat {
+        line_height: Some(m.row_h),
+        ..TextFormat::simple(m.font.clone(), color)
+    };
     let default = doc.hl.default_color;
     let mut sections = Vec::new();
     if c0 == 0 && c1 == len {
@@ -203,7 +220,7 @@ fn layout_line(ui: &Ui, doc: &Document, line: usize, m: &Metrics) -> LineLayout 
         }
     }
     let job = if sections.is_empty() {
-        LayoutJob::simple(text, m.font.clone(), default, wrap_width)
+        plain_job(text, m, default, wrap_width)
     } else {
         let mut job = LayoutJob {
             text,
@@ -243,7 +260,7 @@ fn grid_row(
 ) -> Arc<Galley> {
     let (start, end) = layout.row_range(row);
     let text = String::from(doc.rope.slice(line_start + start..line_start + end));
-    let job = LayoutJob::simple(text, m.font.clone(), doc.hl.default_color, f32::INFINITY);
+    let job = plain_job(text, m, doc.hl.default_color, f32::INFINITY);
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
@@ -519,11 +536,13 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         dark,
         focus,
         wrap,
+        font_size,
+        line_spacing,
         complete,
     } = view;
-    let font = FontId::monospace(FONT_SIZE);
-    let (char_w, row_h) = ui.fonts_mut(|f| (f.glyph_width(&font, '0'), f.row_height(&font)));
-    let row_h = row_h.round().max(1.0);
+    let font = FontId::monospace(font_size);
+    let (char_w, font_h) = ui.fonts_mut(|f| (f.glyph_width(&font, '0'), f.row_height(&font)));
+    let row_h = (font_size * line_spacing).round().max(font_h.ceil());
     let lines = doc.line_count();
     let digits = lines.to_string().len().max(3);
     let gutter_w = digits as f32 * char_w + 28.0;
@@ -950,8 +969,8 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             ));
         }
         gutter_painter.text(
-            egui::pos2(gutter_rect.right() - 14.0, y),
-            Align2::RIGHT_TOP,
+            egui::pos2(gutter_rect.right() - 14.0, y + row_h * 0.5),
+            Align2::RIGHT_CENTER,
             line + 1,
             font.clone(),
             if line == head_line {

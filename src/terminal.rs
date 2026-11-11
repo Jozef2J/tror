@@ -5,7 +5,6 @@ use eframe::egui::{
 };
 
 use crate::app::{dialog, dialog_button};
-use crate::highlight::FONT_SIZE;
 use crate::remote::{self, Profile, Protocol, Shell, ShellCmd, ShellEvent};
 use crate::theme::Palette;
 
@@ -295,8 +294,8 @@ impl Terminal {
         }
     }
 
-    pub fn body(&mut self, ui: &mut Ui, pal: &Palette, dark: bool) {
-        let font = FontId::monospace(FONT_SIZE);
+    pub fn body(&mut self, ui: &mut Ui, pal: &Palette, dark: bool, font_size: f32) {
+        let font = FontId::monospace(font_size);
         let (char_w, row_h) = ui.fonts_mut(|f| (f.glyph_width(&font, '0'), f.row_height(&font)));
         let row_h = row_h.round().max(1.0);
         let rect = ui.available_rect_before_wrap();

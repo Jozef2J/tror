@@ -23,54 +23,107 @@ const fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
-pub fn palette(dark: bool) -> Palette {
+pub const ACCENTS: [(&str, u32, u32); 5] = [
+    ("Сирень", 0x8ea6ff, 0x4f6bed),
+    ("Бирюза", 0x5fd4c4, 0x0f9d8a),
+    ("Янтарь", 0xf0b55a, 0xc27a0a),
+    ("Роза", 0xf28fb0, 0xd6336c),
+    ("Зелень", 0x8fd694, 0x2f9e44),
+];
+
+pub fn palette(dark: bool, accent: usize) -> Palette {
+    let (_, on_dark, on_light) = ACCENTS[accent.min(ACCENTS.len() - 1)];
+    let mut palette = base_palette(dark);
+    palette.accent = rgb(if dark { on_dark } else { on_light });
+    palette
+}
+
+fn base_palette(dark: bool) -> Palette {
     if dark {
         Palette {
-            base: rgb(0x1e1e2e),
-            mantle: rgb(0x181825),
-            crust: rgb(0x11111b),
-            surface: rgb(0x313244),
-            surface_hover: rgb(0x3b3c52),
-            border: rgb(0x2a2b3c),
-            text: rgb(0xcdd6f4),
-            subtext: rgb(0xa6adc8),
-            faint: rgb(0x585b70),
-            accent: rgb(0x89b4fa),
-            current_line: rgb(0x262738),
-            selection: rgb(0x414668),
-            match_bg: rgb(0x4f4a32),
+            base: rgb(0x16181d),
+            mantle: rgb(0x101216),
+            crust: rgb(0x1b1e25),
+            surface: rgb(0x262a33),
+            surface_hover: rgb(0x30353f),
+            border: rgb(0x24272f),
+            text: rgb(0xe4e7ec),
+            subtext: rgb(0xa0a7b4),
+            faint: rgb(0x596070),
+            accent: rgb(0x8ea6ff),
+            current_line: rgb(0x1c1f27),
+            selection: rgb(0x2f3d66),
+            match_bg: rgb(0x4a4326),
             match_current: rgb(0x8a6a1f),
-            warn: rgb(0xf9e2af),
+            warn: rgb(0xf2c46d),
         }
     } else {
         Palette {
-            base: rgb(0xfbfbfd),
-            mantle: rgb(0xf1f2f6),
-            crust: rgb(0xe6e8ee),
-            surface: rgb(0xdfe2ea),
-            surface_hover: rgb(0xd3d7e1),
-            border: rgb(0xdcdfe7),
-            text: rgb(0x3b3e52),
-            subtext: rgb(0x6c6f85),
-            faint: rgb(0xa3a7b8),
-            accent: rgb(0x1e66f5),
-            current_line: rgb(0xf0f1f6),
-            selection: rgb(0xc9d7fb),
+            base: rgb(0xffffff),
+            mantle: rgb(0xf4f5f8),
+            crust: rgb(0xeaecf1),
+            surface: rgb(0xe1e4eb),
+            surface_hover: rgb(0xd5d9e2),
+            border: rgb(0xdfe2e9),
+            text: rgb(0x24272e),
+            subtext: rgb(0x5c6370),
+            faint: rgb(0xa2a8b3),
+            accent: rgb(0x4f6bed),
+            current_line: rgb(0xf3f5f9),
+            selection: rgb(0xcfdaff),
             match_bg: rgb(0xfbe9a8),
             match_current: rgb(0xf5c542),
-            warn: rgb(0xdf8e1d),
+            warn: rgb(0xc9811a),
         }
     }
 }
 
-pub fn apply(ctx: &egui::Context, dark: bool) {
-    let p = palette(dark);
+pub fn medium() -> egui::FontFamily {
+    egui::FontFamily::Name("medium".into())
+}
+
+pub fn install_fonts(ctx: &egui::Context) {
+    use egui::{FontData, FontDefinitions, FontFamily};
+    let mut fonts = FontDefinitions::default();
+    let mut add = |name: &str, bytes: &'static [u8]| {
+        fonts.font_data.insert(
+            name.to_owned(),
+            std::sync::Arc::new(FontData::from_static(bytes)),
+        );
+    };
+    add("inter", include_bytes!("../assets/fonts/Inter-Regular.ttf"));
+    add(
+        "inter-medium",
+        include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+    );
+    add(
+        "jbmono",
+        include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+    );
+    let fallback = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    let mut with = |family: FontFamily, first: &[&str]| {
+        let mut list: Vec<String> = first.iter().map(|s| (*s).to_owned()).collect();
+        list.extend(fallback.iter().cloned());
+        fonts.families.insert(family, list);
+    };
+    with(FontFamily::Proportional, &["inter"]);
+    with(medium(), &["inter-medium", "inter"]);
+    with(FontFamily::Monospace, &["jbmono", "Hack"]);
+    ctx.set_fonts(fonts);
+}
+
+pub fn apply(ctx: &egui::Context, dark: bool, accent: usize) {
+    let p = palette(dark, accent);
     let mut v = if dark {
         Visuals::dark()
     } else {
         Visuals::light()
     };
-    let radius = CornerRadius::same(6);
+    let radius = CornerRadius::same(7);
 
     v.panel_fill = p.mantle;
     v.window_fill = p.mantle;
@@ -121,8 +174,23 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
 
     ctx.set_visuals(v);
     ctx.all_styles_mut(|s| {
-        s.spacing.button_padding = egui::vec2(8.0, 4.0);
+        s.spacing.button_padding = egui::vec2(10.0, 5.0);
         s.spacing.item_spacing = egui::vec2(6.0, 6.0);
         s.spacing.menu_margin = egui::Margin::same(6);
+        s.spacing.interact_size.y = 26.0;
+        for (style, size) in [
+            (egui::TextStyle::Body, 13.5),
+            (egui::TextStyle::Button, 13.5),
+            (egui::TextStyle::Small, 11.5),
+            (egui::TextStyle::Heading, 18.0),
+            (egui::TextStyle::Monospace, 13.0),
+        ] {
+            let family = if style == egui::TextStyle::Monospace {
+                egui::FontFamily::Monospace
+            } else {
+                egui::FontFamily::Proportional
+            };
+            s.text_styles.insert(style, egui::FontId::new(size, family));
+        }
     });
 }
