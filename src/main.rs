@@ -5,6 +5,8 @@ mod complete;
 mod document;
 mod editor;
 mod highlight;
+mod remote;
+mod remote_ui;
 mod search;
 mod theme;
 

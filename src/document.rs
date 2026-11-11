@@ -179,6 +179,7 @@ struct Snapshot {
 pub struct Document {
     pub id: u64,
     pub path: Option<PathBuf>,
+    pub remote: Option<(String, String)>,
     pub untitled: u32,
     pub rope: Rope,
     pub encoding: &'static Encoding,
@@ -208,6 +209,7 @@ impl Document {
         Self {
             id,
             path: None,
+            remote: None,
             untitled,
             rope: Rope::new(),
             encoding: UTF_8,
@@ -250,6 +252,23 @@ impl Document {
         Ok(doc)
     }
 
+    pub fn open_remote(id: u64, profile: &str, path: &str, bytes: Vec<u8>) -> Result<Self, String> {
+        let decoded = decode(bytes, None)?;
+        let mut doc = Self::empty(id, 0);
+        doc.remote = Some((profile.to_owned(), path.to_owned()));
+        doc.apply_decoded(decoded);
+        Ok(doc)
+    }
+
+    pub fn encoded(&self) -> Vec<u8> {
+        encode(&String::from(&self.rope), self.encoding, self.bom, self.eol)
+    }
+
+    pub fn mark_saved(&mut self, version: u64) {
+        self.saved_version = version;
+        self.format_changed = false;
+    }
+
     fn load_text(&mut self, text: &str) {
         self.rope = Rope::from_str(text);
         self.max_line_chars = longest_line(text);
@@ -273,8 +292,19 @@ impl Document {
         self.format_changed = false;
     }
 
+    pub fn location(&self) -> Option<String> {
+        match (&self.remote, &self.path) {
+            (Some((profile, path)), _) => Some(format!("{profile}: {path}")),
+            (None, Some(path)) => Some(path.display().to_string()),
+            (None, None) => None,
+        }
+    }
+
     pub fn reopen_as(&mut self, encoding: &'static Encoding) -> Result<(), String> {
-        let path = self.path.clone().ok_or("файл ещё не сохранён")?;
+        let path = self
+            .path
+            .clone()
+            .ok_or("файл не сохранён на этом компьютере")?;
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         let decoded = decode(bytes, Some(encoding))?;
         self.apply_decoded(decoded);
@@ -283,11 +313,9 @@ impl Document {
 
     pub fn save(&mut self) -> Result<(), String> {
         let path = self.path.clone().ok_or("не задан путь")?;
-        let text = String::from(&self.rope);
-        let bytes = encode(&text, self.encoding, self.bom, self.eol);
-        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
-        self.saved_version = self.version;
-        self.format_changed = false;
+        std::fs::write(&path, self.encoded()).map_err(|e| e.to_string())?;
+        self.remote = None;
+        self.mark_saved(self.version);
         Ok(())
     }
 
@@ -300,6 +328,9 @@ impl Document {
     }
 
     pub fn title(&self) -> String {
+        if let Some((_, path)) = &self.remote {
+            return crate::remote::file_name(path).to_owned();
+        }
         match &self.path {
             Some(p) => p
                 .file_name()

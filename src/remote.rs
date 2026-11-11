@@ -1,0 +1,687 @@
+use std::collections::BTreeMap;
+use std::io::{Cursor, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+const MASK: &[u8] = b"tror-profile-mask";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
+const IO_TIMEOUT_MS: u32 = 30_000;
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+pub enum Protocol {
+    #[default]
+    Sftp,
+    Ftp,
+}
+
+impl Protocol {
+    pub fn label(self) -> &'static str {
+        match self {
+            Protocol::Sftp => "SFTP",
+            Protocol::Ftp => "FTP",
+        }
+    }
+
+    pub fn default_port(self) -> u16 {
+        match self {
+            Protocol::Sftp => 22,
+            Protocol::Ftp => 21,
+        }
+    }
+}
+
+mod masked {
+    use super::MASK;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn hide(plain: &str) -> String {
+        plain
+            .bytes()
+            .enumerate()
+            .map(|(i, b)| format!("{:02x}", b ^ MASK[i % MASK.len()]))
+            .collect()
+    }
+
+    pub fn reveal(hidden: &str) -> Option<String> {
+        if !hidden.len().is_multiple_of(2) || !hidden.is_ascii() {
+            return None;
+        }
+        let bytes: Option<Vec<u8>> = (0..hidden.len() / 2)
+            .map(|i| {
+                u8::from_str_radix(&hidden[i * 2..i * 2 + 2], 16)
+                    .ok()
+                    .map(|b| b ^ MASK[i % MASK.len()])
+            })
+            .collect();
+        String::from_utf8(bytes?).ok()
+    }
+
+    pub fn serialize<S: Serializer>(plain: &str, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hide(plain))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+        let hidden = String::deserialize(d)?;
+        Ok(reveal(&hidden).unwrap_or_default())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq, Debug)]
+#[serde(default)]
+pub struct Profile {
+    pub name: String,
+    pub protocol: Protocol,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    #[serde(with = "masked")]
+    pub password: String,
+    pub key_file: String,
+    pub directory: String,
+}
+
+impl Profile {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            port: 22,
+            ..Default::default()
+        }
+    }
+
+    fn address(&self) -> String {
+        format!("{}:{}", self.host.trim(), self.port)
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Store {
+    pub profiles: Vec<Profile>,
+    pub known_hosts: BTreeMap<String, String>,
+    #[serde(skip)]
+    path: Option<PathBuf>,
+}
+
+impl Store {
+    pub fn load(path: Option<PathBuf>) -> Self {
+        let mut store: Store = path
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        store.path = path;
+        store
+    }
+
+    pub fn save(&self) -> Result<(), String> {
+        let path = self.path.as_deref().ok_or("нет каталога настроек")?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(path, text).map_err(|e| e.to_string())
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+pub enum Cmd {
+    TrustHost(bool),
+    List(String),
+    Download(String),
+    Upload {
+        path: String,
+        data: Vec<u8>,
+        doc: Option<(u64, u64)>,
+    },
+    Mkdir(String),
+    Rename(String, String),
+    Delete {
+        path: String,
+        dir: bool,
+    },
+}
+
+pub enum Event {
+    HostKey {
+        fingerprint: String,
+        changed: bool,
+    },
+    Connected {
+        home: String,
+        fingerprint: Option<String>,
+    },
+    Listing {
+        path: String,
+        entries: Vec<Entry>,
+    },
+    Downloaded {
+        path: String,
+        data: Vec<u8>,
+    },
+    Uploaded {
+        path: String,
+        doc: Option<(u64, u64)>,
+    },
+    Changed(String),
+    Error(String),
+    Closed(String),
+}
+
+pub struct Connection {
+    pub profile: String,
+    pub tx: Sender<Cmd>,
+    pub rx: Receiver<Event>,
+}
+
+pub fn join(dir: &str, name: &str) -> String {
+    if dir.ends_with('/') {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+pub fn parent(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(0) | None => "/".into(),
+        Some(i) => trimmed[..i].into(),
+    }
+}
+
+pub fn file_name(path: &str) -> &str {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+}
+
+fn sort(entries: &mut [Entry]) {
+    entries.sort_by(|a, b| {
+        (!a.is_dir, a.name.to_lowercase()).cmp(&(!b.is_dir, b.name.to_lowercase()))
+    });
+}
+
+enum Backend {
+    Sftp {
+        _session: ssh2::Session,
+        sftp: ssh2::Sftp,
+    },
+    Ftp(Box<suppaftp::FtpStream>),
+}
+
+fn tcp(profile: &Profile) -> Result<TcpStream, String> {
+    let address = profile
+        .address()
+        .to_socket_addrs()
+        .map_err(|e| format!("не удалось найти хост: {e}"))?
+        .next()
+        .ok_or("не удалось найти хост")?;
+    TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
+        .map_err(|e| format!("нет соединения: {e}"))
+}
+
+fn fingerprint(session: &ssh2::Session) -> Option<String> {
+    let hash = session.host_key_hash(ssh2::HashType::Sha256)?;
+    Some(hash.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn connect_sftp(
+    profile: &Profile,
+    known: Option<&str>,
+    events: &Sender<Event>,
+    cmds: &Receiver<Cmd>,
+    wake: &dyn Fn(),
+) -> Result<(Backend, String, Option<String>), String> {
+    let stream = tcp(profile)?;
+    let mut session = ssh2::Session::new().map_err(|e| e.to_string())?;
+    session.set_tcp_stream(stream);
+    session.set_timeout(IO_TIMEOUT_MS);
+    session
+        .handshake()
+        .map_err(|e| format!("ошибка SSH: {e}"))?;
+    let print = fingerprint(&session).ok_or("сервер не прислал ключ")?;
+    let mut accepted = None;
+    if known != Some(print.as_str()) {
+        let _ = events.send(Event::HostKey {
+            fingerprint: print.clone(),
+            changed: known.is_some(),
+        });
+        wake();
+        match cmds.recv() {
+            Ok(Cmd::TrustHost(true)) => accepted = Some(print),
+            _ => return Err("ключ сервера не подтверждён".into()),
+        }
+    }
+    let user = profile.user.trim();
+    let key = profile.key_file.trim();
+    let auth = if !key.is_empty() {
+        let phrase = (!profile.password.is_empty()).then_some(profile.password.as_str());
+        session.userauth_pubkey_file(user, None, Path::new(key), phrase)
+    } else if !profile.password.is_empty() {
+        session.userauth_password(user, &profile.password)
+    } else {
+        session.userauth_agent(user)
+    };
+    auth.map_err(|e| format!("вход не выполнен: {e}"))?;
+    let sftp = session
+        .sftp()
+        .map_err(|e| format!("SFTP недоступен: {e}"))?;
+    let home = sftp
+        .realpath(Path::new("."))
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| "/".into());
+    Ok((
+        Backend::Sftp {
+            _session: session,
+            sftp,
+        },
+        home,
+        accepted,
+    ))
+}
+
+fn connect_ftp(profile: &Profile) -> Result<(Backend, String), String> {
+    let stream = tcp(profile)?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(IO_TIMEOUT_MS as u64)))
+        .ok();
+    let mut ftp =
+        suppaftp::FtpStream::connect_with_stream(stream).map_err(|e| format!("ошибка FTP: {e}"))?;
+    let user = if profile.user.trim().is_empty() {
+        "anonymous"
+    } else {
+        profile.user.trim()
+    };
+    ftp.login(user, profile.password.as_str())
+        .map_err(|e| format!("вход не выполнен: {e}"))?;
+    ftp.transfer_type(suppaftp::types::FileType::Binary)
+        .map_err(|e| e.to_string())?;
+    let home = ftp.pwd().unwrap_or_else(|_| "/".into());
+    Ok((Backend::Ftp(Box::new(ftp)), home))
+}
+
+impl Backend {
+    fn list(&mut self, path: &str) -> Result<Vec<Entry>, String> {
+        let mut entries = match self {
+            Backend::Sftp { sftp, .. } => sftp
+                .readdir(Path::new(path))
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter_map(|(p, stat)| {
+                    let name = p.file_name()?.to_string_lossy().into_owned();
+                    let is_dir = stat.is_dir()
+                        || (stat.file_type().is_symlink()
+                            && sftp.stat(&p).map(|s| s.is_dir()).unwrap_or(false));
+                    Some(Entry {
+                        name,
+                        is_dir,
+                        size: stat.size.unwrap_or(0),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            Backend::Ftp(ftp) => ftp
+                .list(Some(path))
+                .map_err(|e| e.to_string())?
+                .iter()
+                .filter_map(|line| line.parse::<suppaftp::list::File>().ok())
+                .map(|f| Entry {
+                    name: f.name().to_owned(),
+                    is_dir: f.is_directory(),
+                    size: f.size() as u64,
+                })
+                .collect(),
+        };
+        entries.retain(|e| e.name != "." && e.name != "..");
+        sort(&mut entries);
+        Ok(entries)
+    }
+
+    fn download(&mut self, path: &str) -> Result<Vec<u8>, String> {
+        match self {
+            Backend::Sftp { sftp, .. } => {
+                let mut file = sftp.open(Path::new(path)).map_err(|e| e.to_string())?;
+                let mut data = Vec::new();
+                file.read_to_end(&mut data).map_err(|e| e.to_string())?;
+                Ok(data)
+            }
+            Backend::Ftp(ftp) => ftp
+                .retr_as_buffer(path)
+                .map(Cursor::into_inner)
+                .map_err(|e| e.to_string()),
+        }
+    }
+
+    fn upload(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
+        match self {
+            Backend::Sftp { sftp, .. } => {
+                let mut file = sftp.create(Path::new(path)).map_err(|e| e.to_string())?;
+                file.write_all(data).map_err(|e| e.to_string())
+            }
+            Backend::Ftp(ftp) => ftp
+                .put_file(path, &mut Cursor::new(data))
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+        }
+    }
+
+    fn mkdir(&mut self, path: &str) -> Result<(), String> {
+        match self {
+            Backend::Sftp { sftp, .. } => sftp
+                .mkdir(Path::new(path), 0o755)
+                .map_err(|e| e.to_string()),
+            Backend::Ftp(ftp) => ftp.mkdir(path).map_err(|e| e.to_string()),
+        }
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
+        match self {
+            Backend::Sftp { sftp, .. } => sftp
+                .rename(Path::new(from), Path::new(to), None)
+                .map_err(|e| e.to_string()),
+            Backend::Ftp(ftp) => ftp.rename(from, to).map_err(|e| e.to_string()),
+        }
+    }
+
+    fn delete(&mut self, path: &str, dir: bool) -> Result<(), String> {
+        match (self, dir) {
+            (Backend::Sftp { sftp, .. }, true) => {
+                sftp.rmdir(Path::new(path)).map_err(|e| e.to_string())
+            }
+            (Backend::Sftp { sftp, .. }, false) => {
+                sftp.unlink(Path::new(path)).map_err(|e| e.to_string())
+            }
+            (Backend::Ftp(ftp), true) => ftp.rmdir(path).map_err(|e| e.to_string()),
+            (Backend::Ftp(ftp), false) => ftp.rm(path).map_err(|e| e.to_string()),
+        }
+    }
+}
+
+fn serve(
+    profile: Profile,
+    known: Option<String>,
+    cmds: Receiver<Cmd>,
+    events: Sender<Event>,
+    wake: &dyn Fn(),
+) {
+    let send = |event: Event| {
+        let _ = events.send(event);
+        wake();
+    };
+    let connected = match profile.protocol {
+        Protocol::Sftp => connect_sftp(&profile, known.as_deref(), &events, &cmds, wake),
+        Protocol::Ftp => connect_ftp(&profile).map(|(b, home)| (b, home, None)),
+    };
+    let (mut backend, home, fingerprint) = match connected {
+        Ok(ok) => ok,
+        Err(e) => {
+            send(Event::Closed(e));
+            return;
+        }
+    };
+    let start = profile.directory.trim();
+    send(Event::Connected {
+        home: if start.is_empty() {
+            home
+        } else {
+            start.to_owned()
+        },
+        fingerprint,
+    });
+    while let Ok(cmd) = cmds.recv() {
+        let result = match cmd {
+            Cmd::TrustHost(_) => continue,
+            Cmd::List(path) => backend
+                .list(&path)
+                .map(|entries| Event::Listing { path, entries }),
+            Cmd::Download(path) => backend
+                .download(&path)
+                .map(|data| Event::Downloaded { path, data }),
+            Cmd::Upload { path, data, doc } => backend
+                .upload(&path, &data)
+                .map(|_| Event::Uploaded { path, doc }),
+            Cmd::Mkdir(path) => backend.mkdir(&path).map(|_| Event::Changed(parent(&path))),
+            Cmd::Rename(from, to) => backend
+                .rename(&from, &to)
+                .map(|_| Event::Changed(parent(&to))),
+            Cmd::Delete { path, dir } => backend
+                .delete(&path, dir)
+                .map(|_| Event::Changed(parent(&path))),
+        };
+        send(result.unwrap_or_else(Event::Error));
+    }
+}
+
+pub fn connect(
+    profile: &Profile,
+    known: Option<String>,
+    wake: impl Fn() + Send + 'static,
+) -> Connection {
+    let (tx, cmds) = channel();
+    let (events, rx) = channel();
+    let name = profile.name.clone();
+    let profile = profile.clone();
+    std::thread::spawn(move || serve(profile, known, cmds, events, &wake));
+    Connection {
+        profile: name,
+        tx,
+        rx,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paths() {
+        assert_eq!(join("/var/www", "index.php"), "/var/www/index.php");
+        assert_eq!(join("/", "etc"), "/etc");
+        assert_eq!(parent("/var/www/site"), "/var/www");
+        assert_eq!(parent("/var"), "/");
+        assert_eq!(parent("/"), "/");
+        assert_eq!(file_name("/var/www/index.php"), "index.php");
+    }
+
+    #[test]
+    fn store_roundtrip_masks_password() {
+        let dir = std::env::temp_dir().join(format!("tror-test-{}", std::process::id()));
+        let path = dir.join("connections.json");
+        let mut store = Store::load(Some(path.clone()));
+        assert!(store.profiles.is_empty());
+        store.profiles.push(Profile {
+            name: "Клиент".into(),
+            protocol: Protocol::Ftp,
+            host: "example.org".into(),
+            port: 21,
+            user: "admin".into(),
+            password: "s3cret пароль".into(),
+            key_file: String::new(),
+            directory: "/www".into(),
+        });
+        store
+            .known_hosts
+            .insert("example.org:22".into(), "ab12".into());
+        store.save().unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("s3cret"));
+        assert!(raw.contains("example.org"));
+        let loaded = Store::load(Some(path));
+        assert_eq!(loaded.profiles, store.profiles);
+        assert_eq!(loaded.known_hosts, store.known_hosts);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn entries_sorted_dirs_first() {
+        let mut entries = vec![
+            Entry {
+                name: "b.php".into(),
+                is_dir: false,
+                size: 1,
+            },
+            Entry {
+                name: "Zeta".into(),
+                is_dir: true,
+                size: 0,
+            },
+            Entry {
+                name: "a.php".into(),
+                is_dir: false,
+                size: 1,
+            },
+            Entry {
+                name: "alpha".into(),
+                is_dir: true,
+                size: 0,
+            },
+        ];
+        sort(&mut entries);
+        let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "Zeta", "a.php", "b.php"]);
+    }
+
+    fn exercise(protocol: Protocol, port: u16) {
+        let profile = Profile {
+            name: "test".into(),
+            protocol,
+            host: "127.0.0.1".into(),
+            port,
+            user: "jozef".into(),
+            password: "secret".into(),
+            key_file: String::new(),
+            directory: String::new(),
+        };
+        let conn = connect(&profile, None, || {});
+        let next = || {
+            conn.rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("ответ сервера")
+        };
+        let home = loop {
+            match next() {
+                Event::HostKey {
+                    fingerprint,
+                    changed,
+                } => {
+                    assert_eq!(fingerprint.len(), 64);
+                    assert!(!changed);
+                    conn.tx.send(Cmd::TrustHost(true)).unwrap();
+                }
+                Event::Connected { home, .. } => break home,
+                Event::Closed(e) | Event::Error(e) => panic!("{e}"),
+                _ => panic!("неожиданное событие"),
+            }
+        };
+        let www = join(&home, "www");
+        conn.tx.send(Cmd::List(www.clone())).unwrap();
+        let Event::Listing { entries, .. } = next() else {
+            panic!("нет списка")
+        };
+        let names: Vec<_> = entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.is_dir))
+            .collect();
+        assert_eq!(names[0], ("css", true));
+        assert!(names.contains(&("index.php", false)));
+
+        let file = join(&www, &format!("tror-{}.txt", protocol.label()));
+        let body = "привет\nсервер".as_bytes().to_vec();
+        conn.tx
+            .send(Cmd::Upload {
+                path: file.clone(),
+                data: body.clone(),
+                doc: Some((7, 9)),
+            })
+            .unwrap();
+        let Event::Uploaded { doc, .. } = next() else {
+            panic!("нет загрузки")
+        };
+        assert_eq!(doc, Some((7, 9)));
+        conn.tx.send(Cmd::Download(file.clone())).unwrap();
+        let Event::Downloaded { data, .. } = next() else {
+            panic!("нет файла")
+        };
+        assert_eq!(data, body);
+
+        let dir = join(&www, &format!("dir-{}", protocol.label()));
+        conn.tx.send(Cmd::Mkdir(dir.clone())).unwrap();
+        assert!(matches!(next(), Event::Changed(p) if p == www));
+        let moved = join(&dir, "moved.txt");
+        conn.tx.send(Cmd::Rename(file, moved.clone())).unwrap();
+        assert!(matches!(next(), Event::Changed(p) if p == dir));
+        conn.tx
+            .send(Cmd::Delete {
+                path: dir.clone(),
+                dir: true,
+            })
+            .unwrap();
+        assert!(matches!(next(), Event::Error(_)));
+        conn.tx
+            .send(Cmd::Delete {
+                path: moved,
+                dir: false,
+            })
+            .unwrap();
+        assert!(matches!(next(), Event::Changed(_)));
+        conn.tx
+            .send(Cmd::Delete {
+                path: dir,
+                dir: true,
+            })
+            .unwrap();
+        assert!(matches!(next(), Event::Changed(_)));
+        conn.tx
+            .send(Cmd::Download(join(&www, "missing.txt")))
+            .unwrap();
+        assert!(matches!(next(), Event::Error(_)));
+    }
+
+    #[test]
+    #[ignore]
+    fn live_sftp_server() {
+        exercise(Protocol::Sftp, 2222);
+    }
+
+    #[test]
+    #[ignore]
+    fn live_ftp_server() {
+        exercise(Protocol::Ftp, 2121);
+    }
+
+    #[test]
+    #[ignore]
+    fn live_sftp_rejects_wrong_password_and_changed_key() {
+        let mut profile = Profile::new("x".into());
+        profile.host = "127.0.0.1".into();
+        profile.port = 2222;
+        profile.user = "jozef".into();
+        profile.password = "wrong".into();
+        let conn = connect(&profile, Some("00".repeat(32)), || {});
+        let Ok(Event::HostKey { changed, .. }) = conn.rx.recv_timeout(Duration::from_secs(20))
+        else {
+            panic!("нет запроса ключа")
+        };
+        assert!(changed);
+        conn.tx.send(Cmd::TrustHost(true)).unwrap();
+        assert!(matches!(
+            conn.rx.recv_timeout(Duration::from_secs(20)),
+            Ok(Event::Closed(_))
+        ));
+    }
+}
