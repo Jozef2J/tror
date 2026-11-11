@@ -1,0 +1,808 @@
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
+use ropey::Rope;
+
+use crate::highlight::Highlighter;
+
+const MAX_UNDO: usize = 2000;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Eol {
+    Lf,
+    Crlf,
+    Cr,
+}
+
+impl Eol {
+    pub fn label(self) -> &'static str {
+        match self {
+            Eol::Lf => "LF",
+            Eol::Crlf => "CRLF",
+            Eol::Cr => "CR",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Eol::Lf => "\n",
+            Eol::Crlf => "\r\n",
+            Eol::Cr => "\r",
+        }
+    }
+
+    fn native() -> Self {
+        if cfg!(windows) { Eol::Crlf } else { Eol::Lf }
+    }
+}
+
+pub struct Decoded {
+    pub text: String,
+    pub encoding: &'static Encoding,
+    pub bom: bool,
+    pub eol: Eol,
+}
+
+pub fn decode(bytes: Vec<u8>, forced: Option<&'static Encoding>) -> Result<Decoded, String> {
+    let (encoding, bom_len) = match (forced, Encoding::for_bom(&bytes)) {
+        (Some(enc), Some((bom_enc, len))) if enc == bom_enc => (enc, len),
+        (Some(enc), _) => (enc, 0),
+        (None, Some((enc, len))) => (enc, len),
+        (None, None) => {
+            if bytes.contains(&0) {
+                return Err("похоже на бинарный файл".into());
+            }
+            if std::str::from_utf8(&bytes).is_ok() {
+                (UTF_8, 0)
+            } else {
+                let mut detector =
+                    chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
+                let sample = &bytes[..bytes.len().min(4 * 1024 * 1024)];
+                detector.feed(sample, sample.len() == bytes.len());
+                (
+                    detector.guess(Some(b"ru"), chardetng::Utf8Detection::Deny),
+                    0,
+                )
+            }
+        }
+    };
+    let mut text = if encoding == UTF_8 {
+        match String::from_utf8(bytes) {
+            Ok(mut text) => {
+                text.drain(..bom_len);
+                text
+            }
+            Err(e) => String::from_utf8_lossy(&e.as_bytes()[bom_len..]).into_owned(),
+        }
+    } else {
+        encoding
+            .decode_without_bom_handling(&bytes[bom_len..])
+            .0
+            .into_owned()
+    };
+    let eol = if text.as_bytes().contains(&b'\r') {
+        let eol = if text.contains("\r\n") {
+            Eol::Crlf
+        } else {
+            Eol::Cr
+        };
+        text = text.replace("\r\n", "\n");
+        if text.as_bytes().contains(&b'\r') {
+            text = text.replace('\r', "\n");
+        }
+        eol
+    } else if text.as_bytes().contains(&b'\n') {
+        Eol::Lf
+    } else {
+        Eol::native()
+    };
+    Ok(Decoded {
+        text,
+        encoding,
+        bom: bom_len > 0,
+        eol,
+    })
+}
+
+pub fn encode(text: &str, encoding: &'static Encoding, bom: bool, eol: Eol) -> Vec<u8> {
+    let converted;
+    let text = if eol == Eol::Lf {
+        text
+    } else {
+        converted = text.replace('\n', eol.as_str());
+        &converted
+    };
+    if encoding == UTF_16LE || encoding == UTF_16BE {
+        let mut out = Vec::with_capacity(text.len() * 2 + 2);
+        let le = encoding == UTF_16LE;
+        let mut push = |unit: u16| {
+            out.extend_from_slice(&if le {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            })
+        };
+        if bom {
+            push(0xFEFF);
+        }
+        text.encode_utf16().for_each(push);
+        return out;
+    }
+    let mut out = Vec::with_capacity(text.len() + 3);
+    if bom && encoding == UTF_8 {
+        out.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    }
+    out.extend_from_slice(&encoding.encode(text).0);
+    out
+}
+
+fn longest_line(text: &str) -> usize {
+    let mut longest = 0;
+    let mut current = 0;
+    for b in text.bytes() {
+        if b == b'\n' {
+            longest = longest.max(current);
+            current = 0;
+        } else if b & 0xC0 != 0x80 {
+            current += 1;
+        }
+    }
+    longest.max(current)
+}
+
+fn class(c: char) -> u8 {
+    if c.is_whitespace() {
+        0
+    } else if c.is_alphanumeric() || c == '_' {
+        1
+    } else {
+        2
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum EditKind {
+    Insert,
+    Delete,
+    Other,
+}
+
+struct Snapshot {
+    rope: Rope,
+    sel: (usize, usize),
+    version: u64,
+    max_line_chars: usize,
+}
+
+pub struct Document {
+    pub id: u64,
+    pub path: Option<PathBuf>,
+    pub untitled: u32,
+    pub rope: Rope,
+    pub encoding: &'static Encoding,
+    pub bom: bool,
+    pub eol: Eol,
+    pub syntax: String,
+    pub hl: Highlighter,
+    pub version: u64,
+    saved_version: u64,
+    next_version: u64,
+    format_changed: bool,
+    pub sel: (usize, usize),
+    pub goal_x: Option<f64>,
+    pub scroll_x: f64,
+    pub scroll_y: f64,
+    pub reveal: bool,
+    pub max_line_chars: usize,
+    pub content_w: f64,
+    pub activity: f64,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    last_edit: Option<(EditKind, Instant)>,
+}
+
+impl Document {
+    pub fn empty(id: u64, untitled: u32) -> Self {
+        Self {
+            id,
+            path: None,
+            untitled,
+            rope: Rope::new(),
+            encoding: UTF_8,
+            bom: false,
+            eol: Eol::native(),
+            syntax: "Plain Text".into(),
+            hl: Highlighter::default(),
+            version: 0,
+            saved_version: 0,
+            next_version: 1,
+            format_changed: false,
+            sel: (0, 0),
+            goal_x: None,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            reveal: false,
+            max_line_chars: 0,
+            content_w: 0.0,
+            activity: 0.0,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_edit: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn from_text(text: &str) -> Self {
+        let mut doc = Self::empty(1, 1);
+        doc.load_text(text);
+        doc.saved_version = doc.version;
+        doc
+    }
+
+    pub fn open(id: u64, path: &Path) -> Result<Self, String> {
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        let decoded = decode(bytes, None)?;
+        let mut doc = Self::empty(id, 0);
+        doc.path = Some(path.to_path_buf());
+        doc.apply_decoded(decoded);
+        Ok(doc)
+    }
+
+    fn load_text(&mut self, text: &str) {
+        self.rope = Rope::from_str(text);
+        self.max_line_chars = longest_line(text);
+        self.hl = Highlighter::default();
+        self.sel = (0, 0);
+        self.content_w = 0.0;
+        self.scroll_x = 0.0;
+        self.scroll_y = 0.0;
+        self.undo.clear();
+        self.redo.clear();
+        self.last_edit = None;
+        self.bump();
+    }
+
+    fn apply_decoded(&mut self, d: Decoded) {
+        self.load_text(&d.text);
+        self.encoding = d.encoding;
+        self.bom = d.bom;
+        self.eol = d.eol;
+        self.saved_version = self.version;
+        self.format_changed = false;
+    }
+
+    pub fn reopen_as(&mut self, encoding: &'static Encoding) -> Result<(), String> {
+        let path = self.path.clone().ok_or("файл ещё не сохранён")?;
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let decoded = decode(bytes, Some(encoding))?;
+        self.apply_decoded(decoded);
+        Ok(())
+    }
+
+    pub fn save(&mut self) -> Result<(), String> {
+        let path = self.path.clone().ok_or("не задан путь")?;
+        let text = String::from(&self.rope);
+        let bytes = encode(&text, self.encoding, self.bom, self.eol);
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        self.saved_version = self.version;
+        self.format_changed = false;
+        Ok(())
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.version != self.saved_version || self.format_changed
+    }
+
+    pub fn mark_modified(&mut self) {
+        self.format_changed = true;
+    }
+
+    pub fn title(&self) -> String {
+        match &self.path {
+            Some(p) => p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string()),
+            None => format!("Новый {}", self.untitled),
+        }
+    }
+
+    pub fn first_line(&self) -> String {
+        self.rope.line(0).chars().take(200).collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.rope.len_chars()
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.rope.len_lines()
+    }
+
+    pub fn line_len(&self, line: usize) -> usize {
+        let slice = self.rope.line(line);
+        let len = slice.len_chars();
+        if len > 0 && slice.char(len - 1) == '\n' {
+            len - 1
+        } else {
+            len
+        }
+    }
+
+    pub fn selection(&self) -> Range<usize> {
+        self.sel.0.min(self.sel.1)..self.sel.0.max(self.sel.1)
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.sel.0 != self.sel.1
+    }
+
+    pub fn selected_text(&self) -> String {
+        self.rope.slice(self.selection()).to_string()
+    }
+
+    pub fn cursor_line_col(&self) -> (usize, usize) {
+        let line = self.rope.char_to_line(self.sel.1);
+        (line + 1, self.sel.1 - self.rope.line_to_char(line) + 1)
+    }
+
+    fn bump(&mut self) {
+        self.version = self.next_version;
+        self.next_version += 1;
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            rope: self.rope.clone(),
+            sel: self.sel,
+            version: self.version,
+            max_line_chars: self.max_line_chars,
+        }
+    }
+
+    fn checkpoint(&mut self, kind: EditKind) {
+        let now = Instant::now();
+        let coalesce = kind != EditKind::Other
+            && self
+                .last_edit
+                .is_some_and(|(k, t)| k == kind && now.duration_since(t).as_millis() < 1000);
+        if !coalesce {
+            self.undo.push(self.snapshot());
+            if self.undo.len() > MAX_UNDO {
+                self.undo.remove(0);
+            }
+        }
+        self.redo.clear();
+        self.last_edit = Some((kind, now));
+    }
+
+    fn apply(&mut self, range: Range<usize>, text: &str) -> usize {
+        let start_line = self.rope.char_to_line(range.start);
+        let old_end_line = self.rope.char_to_line(range.end);
+        if !range.is_empty() {
+            self.rope.remove(range.clone());
+        }
+        if !text.is_empty() {
+            self.rope.insert(range.start, text);
+        }
+        let end = range.start + text.chars().count();
+        let new_end_line = self.rope.char_to_line(end);
+        self.hl.edit(
+            start_line,
+            old_end_line - start_line + 1,
+            new_end_line - start_line + 1,
+        );
+        if new_end_line - start_line < 64 {
+            for line in start_line..=new_end_line {
+                self.max_line_chars = self.max_line_chars.max(self.line_len(line));
+            }
+        } else {
+            let bound =
+                longest_line(text) + self.line_len(start_line) + self.line_len(new_end_line);
+            self.max_line_chars = self.max_line_chars.max(bound);
+        }
+        self.bump();
+        end
+    }
+
+    pub fn replace(&mut self, range: Range<usize>, text: &str, kind: EditKind) {
+        self.checkpoint(kind);
+        let end = self.apply(range, text);
+        self.sel = (end, end);
+        self.goal_x = None;
+        self.reveal = true;
+    }
+
+    pub fn set_text(&mut self, text: &str) {
+        self.checkpoint(EditKind::Other);
+        self.rope = Rope::from_str(text);
+        self.max_line_chars = longest_line(text);
+        self.hl.reset();
+        let pos = self.sel.1.min(self.len());
+        self.sel = (pos, pos);
+        self.bump();
+    }
+
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.hl.replace_all(&self.rope, &snapshot.rope);
+        self.rope = snapshot.rope;
+        self.sel = snapshot.sel;
+        self.version = snapshot.version;
+        self.max_line_chars = self.max_line_chars.max(snapshot.max_line_chars);
+        self.last_edit = None;
+        self.goal_x = None;
+        self.reveal = true;
+    }
+
+    pub fn undo(&mut self) {
+        if let Some(snapshot) = self.undo.pop() {
+            self.redo.push(self.snapshot());
+            self.restore(snapshot);
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(snapshot) = self.redo.pop() {
+            self.undo.push(self.snapshot());
+            self.restore(snapshot);
+        }
+    }
+
+    pub fn insert_text(&mut self, text: &str) {
+        let kind = if text.contains('\n') || self.has_selection() {
+            EditKind::Other
+        } else {
+            EditKind::Insert
+        };
+        self.replace(self.selection(), text, kind);
+    }
+
+    pub fn newline(&mut self) {
+        let start = self.selection().start;
+        let line = self.rope.char_to_line(start);
+        let line_start = self.rope.line_to_char(line);
+        let indent: String = self
+            .rope
+            .slice(line_start..start)
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        self.replace(self.selection(), &format!("\n{indent}"), EditKind::Other);
+    }
+
+    pub fn backspace(&mut self, word: bool) {
+        if self.has_selection() {
+            self.replace(self.selection(), "", EditKind::Other);
+        } else if self.sel.1 > 0 {
+            let start = if word {
+                self.word_left(self.sel.1)
+            } else {
+                self.sel.1 - 1
+            };
+            self.replace(start..self.sel.1, "", EditKind::Delete);
+        }
+    }
+
+    pub fn delete(&mut self, word: bool) {
+        if self.has_selection() {
+            self.replace(self.selection(), "", EditKind::Other);
+        } else if self.sel.1 < self.len() {
+            let end = if word {
+                self.word_right(self.sel.1)
+            } else {
+                self.sel.1 + 1
+            };
+            self.replace(self.sel.1..end, "", EditKind::Delete);
+        }
+    }
+
+    fn selected_lines(&self) -> Range<usize> {
+        let range = self.selection();
+        let first = self.rope.char_to_line(range.start);
+        let mut last = self.rope.char_to_line(range.end);
+        if last > first && self.rope.line_to_char(last) == range.end {
+            last -= 1;
+        }
+        first..last + 1
+    }
+
+    pub fn indent(&mut self) {
+        let lines = self.selected_lines();
+        if lines.len() < 2 {
+            self.insert_text("\t");
+            return;
+        }
+        self.checkpoint(EditKind::Other);
+        for line in lines.clone() {
+            if self.line_len(line) > 0 {
+                let at = self.rope.line_to_char(line);
+                self.apply(at..at, "\t");
+            }
+        }
+        self.select_lines(lines);
+    }
+
+    pub fn outdent(&mut self) {
+        let lines = self.selected_lines();
+        let single = lines.len() < 2;
+        let head = self.sel.1;
+        self.checkpoint(EditKind::Other);
+        let mut removed_before_head = 0;
+        for line in lines.clone() {
+            let at = self.rope.line_to_char(line);
+            let mut remove = 0;
+            for c in self.rope.line(line).chars().take(4) {
+                match c {
+                    '\t' if remove == 0 => {
+                        remove = 1;
+                        break;
+                    }
+                    ' ' => remove += 1,
+                    _ => break,
+                }
+            }
+            if remove > 0 {
+                self.apply(at..at + remove, "");
+                removed_before_head = remove.min(head.saturating_sub(at));
+            }
+        }
+        if single {
+            let pos = head - removed_before_head;
+            self.sel = (pos, pos);
+        } else {
+            self.select_lines(lines);
+        }
+        self.reveal = true;
+    }
+
+    fn select_lines(&mut self, lines: Range<usize>) {
+        let start = self.rope.line_to_char(lines.start);
+        let end = if lines.end < self.line_count() {
+            self.rope.line_to_char(lines.end)
+        } else {
+            self.len()
+        };
+        self.sel = (start, end);
+        self.reveal = true;
+    }
+
+    pub fn move_to(&mut self, pos: usize, extend: bool) {
+        let pos = pos.min(self.len());
+        self.sel = if extend {
+            (self.sel.0, pos)
+        } else {
+            (pos, pos)
+        };
+        self.last_edit = None;
+        self.goal_x = None;
+        self.reveal = true;
+    }
+
+    pub fn select_all(&mut self) {
+        self.sel = (0, self.len());
+        self.last_edit = None;
+    }
+
+    pub fn word_left(&self, pos: usize) -> usize {
+        let mut i = pos;
+        let mut chars = self.rope.chars_at(pos);
+        let mut kind = None;
+        while let Some(c) = chars.prev() {
+            let k = class(c);
+            match kind {
+                None if k == 0 => {}
+                None => kind = Some(k),
+                Some(expected) if expected != k => break,
+                Some(_) => {}
+            }
+            i -= 1;
+        }
+        i
+    }
+
+    pub fn word_right(&self, pos: usize) -> usize {
+        let mut i = pos;
+        let mut kind = None;
+        for c in self.rope.chars_at(pos) {
+            let k = class(c);
+            match kind {
+                None if k == 0 => {}
+                None => kind = Some(k),
+                Some(expected) if expected != k => break,
+                Some(_) => {}
+            }
+            i += 1;
+        }
+        i
+    }
+
+    pub fn line_home(&self, pos: usize) -> usize {
+        let line = self.rope.char_to_line(pos);
+        let start = self.rope.line_to_char(line);
+        let indent = self
+            .rope
+            .line(line)
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .count();
+        if pos == start + indent {
+            start
+        } else {
+            start + indent
+        }
+    }
+
+    pub fn line_end(&self, pos: usize) -> usize {
+        let line = self.rope.char_to_line(pos);
+        self.rope.line_to_char(line) + self.line_len(line)
+    }
+
+    pub fn select_word_at(&mut self, pos: usize) {
+        let pos = pos.min(self.len());
+        let at = |i: usize| (i < self.len()).then(|| self.rope.char(i));
+        let kind = match at(pos) {
+            Some(c) if c != '\n' => class(c),
+            _ if pos > 0 && at(pos - 1) != Some('\n') => class(self.rope.char(pos - 1)),
+            _ => {
+                self.sel = (pos, pos);
+                return;
+            }
+        };
+        let same = |c: char| c != '\n' && class(c) == kind;
+        let mut start = pos;
+        let mut back = self.rope.chars_at(pos);
+        while back.prev().is_some_and(same) {
+            start -= 1;
+        }
+        let end = pos + self.rope.chars_at(pos).take_while(|c| same(*c)).count();
+        self.sel = (start, end);
+        self.last_edit = None;
+    }
+
+    pub fn select_line_at(&mut self, pos: usize) {
+        let line = self.rope.char_to_line(pos.min(self.len()));
+        self.select_lines(line..line + 1);
+        self.last_edit = None;
+    }
+
+    pub fn goto_line(&mut self, line: usize) {
+        let line = line.clamp(1, self.line_count()) - 1;
+        let pos = self.rope.line_to_char(line);
+        self.move_to(pos, false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use encoding_rs::WINDOWS_1251;
+
+    fn text(doc: &Document) -> String {
+        doc.rope.to_string()
+    }
+
+    #[test]
+    fn utf8_roundtrip_keeps_crlf_and_bom() {
+        let src = b"\xEF\xBB\xBFline1\r\nline2\r\n";
+        let d = decode(src.to_vec(), None).unwrap();
+        assert_eq!(d.text, "line1\nline2\n");
+        assert_eq!(d.eol, Eol::Crlf);
+        assert!(d.bom);
+        assert_eq!(encode(&d.text, d.encoding, d.bom, d.eol), src);
+    }
+
+    #[test]
+    fn cp1251_detected_and_roundtrips() {
+        let original = "<?php\n// Привет, мир! Это проверка кодировки для старого шаблона сайта.\necho 'Каталог товаров';\n";
+        let (bytes, _, _) = WINDOWS_1251.encode(original);
+        let d = decode(bytes.to_vec(), None).unwrap();
+        assert_eq!(d.encoding, WINDOWS_1251);
+        assert_eq!(d.text, original);
+        assert_eq!(encode(&d.text, d.encoding, d.bom, d.eol), bytes.as_ref());
+    }
+
+    #[test]
+    fn utf16_roundtrip() {
+        let src: Vec<u8> = [0xFFu8, 0xFE]
+            .into_iter()
+            .chain("aб\n".encode_utf16().flat_map(|u| u.to_le_bytes()))
+            .collect();
+        let d = decode(src.clone(), None).unwrap();
+        assert_eq!(d.text, "aб\n");
+        assert_eq!(encode(&d.text, d.encoding, d.bom, d.eol), src);
+    }
+
+    #[test]
+    fn binary_rejected() {
+        assert!(decode(vec![0x7f, b'E', b'L', b'F', 0, 0, 1], None).is_err());
+    }
+
+    #[test]
+    fn cursor_lines_and_longest_line() {
+        let mut doc = Document::from_text("ab\nпривет\nx");
+        assert_eq!(doc.line_count(), 3);
+        assert_eq!(doc.max_line_chars, 6);
+        doc.move_to(5, false);
+        assert_eq!(doc.cursor_line_col(), (2, 3));
+        doc.goto_line(3);
+        assert_eq!(doc.sel, (10, 10));
+        assert_eq!(doc.line_len(1), 6);
+        assert!(!doc.dirty());
+    }
+
+    #[test]
+    fn typing_undo_redo_and_dirty_state() {
+        let mut doc = Document::from_text("abc");
+        doc.move_to(3, false);
+        doc.insert_text("d");
+        doc.insert_text("e");
+        assert_eq!(text(&doc), "abcde");
+        assert!(doc.dirty());
+        doc.undo();
+        assert_eq!(text(&doc), "abc");
+        assert!(!doc.dirty());
+        doc.redo();
+        assert_eq!(text(&doc), "abcde");
+        assert_eq!(doc.sel, (5, 5));
+        doc.move_to(0, false);
+        doc.move_to(2, true);
+        doc.insert_text("X");
+        assert_eq!(text(&doc), "Xcde");
+        doc.undo();
+        assert_eq!(text(&doc), "abcde");
+        assert_eq!(doc.selection(), 0..2);
+    }
+
+    #[test]
+    fn newline_keeps_indent_and_backspace_joins() {
+        let mut doc = Document::from_text("\tif (x) {");
+        doc.move_to(doc.len(), false);
+        doc.newline();
+        doc.insert_text("y");
+        assert_eq!(text(&doc), "\tif (x) {\n\ty");
+        doc.backspace(false);
+        doc.backspace(false);
+        doc.backspace(false);
+        assert_eq!(text(&doc), "\tif (x) {");
+        doc.backspace(true);
+        assert_eq!(text(&doc), "\tif (x) ");
+        doc.move_to(1, false);
+        doc.delete(true);
+        assert_eq!(text(&doc), "\t (x) ");
+    }
+
+    #[test]
+    fn indent_and_outdent_selected_lines() {
+        let mut doc = Document::from_text("a\nb\n\nc\nd");
+        doc.move_to(0, false);
+        doc.move_to(6, true);
+        doc.indent();
+        assert_eq!(text(&doc), "\ta\n\tb\n\n\tc\nd");
+        doc.outdent();
+        assert_eq!(text(&doc), "a\nb\n\nc\nd");
+        let mut spaces = Document::from_text("      x");
+        spaces.move_to(6, false);
+        spaces.outdent();
+        assert_eq!(text(&spaces), "  x");
+        assert_eq!(spaces.sel, (2, 2));
+    }
+
+    #[test]
+    fn word_motion_and_selection() {
+        let mut doc = Document::from_text("foo_bar = $baz->qux;\nnext");
+        assert_eq!(doc.word_right(0), 7);
+        assert_eq!(doc.word_right(7), 9);
+        assert_eq!(doc.word_left(14), 11);
+        assert_eq!(doc.word_left(10), 8);
+        doc.select_word_at(12);
+        assert_eq!(doc.selected_text(), "baz");
+        doc.select_word_at(20);
+        assert_eq!(doc.selected_text(), ";");
+        doc.select_line_at(3);
+        assert_eq!(doc.selected_text(), "foo_bar = $baz->qux;\n");
+        assert_eq!(doc.line_home(5), 0);
+        assert_eq!(doc.line_end(5), 20);
+    }
+}
