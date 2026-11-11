@@ -6,19 +6,25 @@ use eframe::egui::{
     Sense, Stroke, TextEdit, Ui, ViewportCommand,
     containers::menu::{MenuButton, MenuConfig},
 };
+use egui_stack::{DockArea, DockState, TabViewer};
 use encoding_rs::Encoding;
-use serde::{Deserialize, Serialize};
 
 use crate::complete::Completion;
+use crate::db::DbPanel;
+use crate::diff::DiffPanel;
+use crate::dock::{self, Pane};
 use crate::document::{Document, Eol};
 use crate::editor;
 use crate::highlight::Syntaxes;
+use crate::prefs::{self, Look, Settings};
+use crate::preview::{self, Preview};
 use crate::remote_ui::{PanelEvent, RemotePanel};
 use crate::search::{Pending, SearchState};
 use crate::terminal::{TermEvent, Terminal};
 use crate::theme::{self, Palette};
 
 const SETTINGS_KEY: &str = "tror";
+const DOCK_KEY: &str = "tror_dock";
 const MAX_RECENT: usize = 12;
 
 const ENCODINGS: &[(&str, &Encoding, bool)] = &[
@@ -41,38 +47,6 @@ fn encoding_label(encoding: &'static Encoding, bom: bool) -> String {
         .unwrap_or_else(|| encoding.name().to_owned())
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(default)]
-struct Settings {
-    dark: bool,
-    accent: usize,
-    font_size: f32,
-    line_spacing: f32,
-    wrap: bool,
-    remote_panel: bool,
-    terminal_panel: bool,
-    recent: Vec<PathBuf>,
-    session: Vec<PathBuf>,
-    active: usize,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            dark: true,
-            accent: 0,
-            font_size: 14.0,
-            line_spacing: 1.5,
-            wrap: false,
-            remote_panel: false,
-            terminal_panel: false,
-            recent: Vec::new(),
-            session: Vec::new(),
-            active: 0,
-        }
-    }
-}
-
 enum Action {
     New,
     Open,
@@ -92,9 +66,12 @@ enum Action {
     GotoLine,
     ToggleTheme,
     ToggleWrap,
-    Settings,
-    ToggleRemote,
-    ToggleTerminal,
+    Toggle(Pane),
+    Show(Pane),
+    ResetLayout,
+    Preview,
+    Compare,
+    Goto(u64, usize),
     NextTab,
     PrevTab,
 }
@@ -180,13 +157,6 @@ enum Confirm {
     Missing(u64),
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum BottomTab {
-    Console,
-    Log,
-    Search,
-}
-
 #[derive(Default)]
 struct Perf {
     frames: u32,
@@ -226,7 +196,11 @@ pub struct TrorApp {
     complete: Completion,
     remote: RemotePanel,
     terminal: Terminal,
-    bottom_tab: BottomTab,
+    dock: DockState<Pane>,
+    diff: DiffPanel,
+    db: DbPanel,
+    preview: Preview,
+    console_shown: bool,
     logo: Option<egui::TextureHandle>,
     ctx: egui::Context,
     checked: (u64, bool),
@@ -236,17 +210,22 @@ pub struct TrorApp {
     focus_editor: bool,
     lang_filter: String,
     toast: Option<(String, f64)>,
-    applied_theme: Option<(bool, usize)>,
-    settings_open: bool,
+    applied: Option<Look>,
 }
 
 impl TrorApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let settings: Settings = cc
+        let mut settings: Settings = cc
             .storage
             .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
             .unwrap_or_default();
-        theme::install_fonts(&cc.egui_ctx);
+        settings.migrate();
+        let mut dock = cc
+            .storage
+            .and_then(|s| eframe::get_value::<DockState<Pane>>(s, DOCK_KEY))
+            .unwrap_or_else(dock::new);
+        dock::translate(&mut dock);
+        crate::trace::install();
         let mut app = Self {
             perf: std::env::var_os("TROR_PERF").map(|_| Perf::default()),
             title: String::new(),
@@ -259,8 +238,12 @@ impl TrorApp {
             search: SearchState::default(),
             complete: Completion::default(),
             remote: RemotePanel::new(false),
-            terminal: Terminal::new(false),
-            bottom_tab: BottomTab::Console,
+            terminal: Terminal::new(),
+            dock,
+            diff: DiffPanel::default(),
+            db: DbPanel::default(),
+            preview: Preview::default(),
+            console_shown: false,
             logo: eframe::icon_data::from_png_bytes(include_bytes!("../assets/tror.png"))
                 .ok()
                 .map(|icon| {
@@ -279,16 +262,17 @@ impl TrorApp {
             focus_editor: true,
             lang_filter: String::new(),
             toast: None,
-            applied_theme: None,
-            settings_open: false,
+            applied: None,
         };
-        app.remote.visible = app.settings.remote_panel;
-        app.terminal.visible = app.settings.terminal_panel;
-        let session = std::mem::take(&mut app.settings.session);
+        let open = std::mem::take(&mut app.settings.open);
         let active = app.settings.active;
-        for path in session.iter().filter(|p| p.is_file()) {
+        let mut top = 1;
+        for (id, path) in open.iter().filter(|(_, p)| p.is_file()) {
+            app.next_id = *id;
             app.open_path(path, 0.0);
+            top = top.max(id + 1);
         }
+        app.next_id = top;
         if active < app.docs.len() {
             app.active = active;
         }
@@ -301,7 +285,32 @@ impl TrorApp {
     }
 
     fn palette(&self) -> Palette {
-        theme::palette(self.settings.dark, self.settings.accent)
+        self.settings.look.palette()
+    }
+
+    fn apply_look(&mut self, ctx: &egui::Context) {
+        if self.applied.as_ref() == Some(&self.settings.look) {
+            return;
+        }
+        let look = self.settings.look.clone();
+        let old = self.applied.take();
+        let fonts = |l: &Look| (l.ui_font.clone(), l.code_font.clone());
+        if old.as_ref().map(fonts) != Some(fonts(&look))
+            && let Err(e) =
+                theme::install_fonts(ctx, look.ui_font.as_deref(), look.code_font.as_deref())
+        {
+            self.notify(format!("Шрифт не загружен: {e}"), ctx.input(|i| i.time));
+        }
+        theme::apply(ctx, &look.palette(), look.dark, look.radius, look.ui_size);
+        let code = |l: &Look| {
+            let (scheme, colors) = l.syntax();
+            (scheme.to_owned(), colors.clone())
+        };
+        if old.as_ref().map(code) != Some(code(&look)) {
+            let (scheme, colors) = look.syntax();
+            self.syntaxes.set_theme(scheme, colors);
+        }
+        self.applied = Some(look);
     }
 
     fn notify(&mut self, text: impl Into<String>, now: f64) {
@@ -498,6 +507,7 @@ impl TrorApp {
         match doc.save() {
             Ok(()) => {
                 let title = doc.title();
+                self.preview.touch();
                 self.notify(format!("Сохранено: {title}"), now);
                 true
             }
@@ -530,6 +540,7 @@ impl TrorApp {
         match doc.save() {
             Ok(()) => {
                 doc.syntax = self.syntaxes.detect(Some(&path), &doc.first_line());
+                self.preview.touch();
                 self.remember(&path);
                 self.notify(format!("Сохранено: {}", path.display()), now);
                 true
@@ -651,11 +662,54 @@ impl TrorApp {
                     self.goto = Some(String::new());
                 }
             }
-            Action::ToggleTheme => self.settings.dark = !self.settings.dark,
+            Action::ToggleTheme => self.settings.look.dark = !self.settings.look.dark,
             Action::ToggleWrap => self.settings.wrap = !self.settings.wrap,
-            Action::Settings => self.settings_open = true,
-            Action::ToggleRemote => self.remote.visible = !self.remote.visible,
-            Action::ToggleTerminal => self.terminal.visible = !self.terminal.visible,
+            Action::Toggle(pane) => dock::toggle(&mut self.dock, pane),
+            Action::Show(pane) => dock::show(&mut self.dock, pane),
+            Action::ResetLayout => {
+                self.dock = dock::new();
+                self.focus_editor = true;
+            }
+            Action::Preview => {
+                let url = match self.docs.get(self.active) {
+                    None => Err("Нет открытого файла".to_owned()),
+                    Some(doc) => match (&doc.remote, &doc.path) {
+                        (Some((profile, path)), _) => self.remote.site_url(profile, path).ok_or(
+                            "В профиле хоста не указан адрес сайта — добавьте его в настройках профиля"
+                                .to_owned(),
+                        ),
+                        (None, Some(path)) => self.preview.url(path),
+                        _ => Err("Сначала сохраните файл на диск".to_owned()),
+                    },
+                };
+                match url.and_then(|url| preview::open_url(&url).map(|()| url)) {
+                    Ok(url) => self.notify(format!("Открыто в браузере: {url}"), now),
+                    Err(e) => self.notify(format!("Предпросмотр: {e}"), now),
+                }
+            }
+            Action::Compare => {
+                if let Some(doc) = self.docs.get(self.active) {
+                    self.diff.left = Some(doc.id);
+                    if self.diff.right.is_none() || self.diff.right == self.diff.left {
+                        self.diff.right = self
+                            .docs
+                            .iter()
+                            .cycle()
+                            .skip(self.active + 1)
+                            .take(self.docs.len().saturating_sub(1))
+                            .next()
+                            .map(|d| d.id);
+                    }
+                }
+                dock::show(&mut self.dock, Pane::Diff);
+            }
+            Action::Goto(id, line) => {
+                if let Some(i) = self.docs.iter().position(|d| d.id == id) {
+                    self.active = i;
+                    self.focus_editor = true;
+                    self.docs[i].goto_line(line);
+                }
+            }
             Action::NextTab => {
                 if !self.docs.is_empty() {
                     self.active = (self.active + 1) % self.docs.len();
@@ -687,6 +741,7 @@ impl TrorApp {
             (cmd, Key::Comma, 15),
             (Modifiers::NONE, Key::F8, 12),
             (Modifiers::NONE, Key::F9, 13),
+            (Modifiers::NONE, Key::F12, 16),
             (Modifiers::ALT, Key::Z, 14),
             (cmd, Key::Tab, 9),
             (Modifiers::SHIFT, Key::F3, 10),
@@ -709,9 +764,10 @@ impl TrorApp {
                 6 => Action::Find,
                 7 => Action::Replace,
                 8 => Action::GotoLine,
-                12 => Action::ToggleRemote,
-                13 => Action::ToggleTerminal,
-                15 => Action::Settings,
+                12 => Action::Toggle(Pane::Hosts),
+                13 => Action::Toggle(Pane::Console),
+                15 => Action::Show(Pane::Settings),
+                16 => Action::Preview,
                 14 => {
                     ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
                     Action::ToggleWrap
@@ -785,8 +841,8 @@ impl TrorApp {
                     actions.push(Action::CloseAll);
                 }
                 ui.separator();
-                if item(ui, "Настройки…", &key("Ctrl+,"), true) {
-                    actions.push(Action::Settings);
+                if item(ui, "Настройки", &key("Ctrl+,"), true) {
+                    actions.push(Action::Show(Pane::Settings));
                 }
                 ui.separator();
                 if item(ui, "Выход", "", true) {
@@ -813,8 +869,8 @@ impl TrorApp {
                 }
             });
             ui.menu_button("Вид", |ui| {
-                ui.set_min_width(240.0);
-                let theme = if self.settings.dark {
+                ui.set_min_width(260.0);
+                let theme = if self.settings.look.dark {
                     "Светлая тема"
                 } else {
                     "Тёмная тема"
@@ -822,7 +878,6 @@ impl TrorApp {
                 if item(ui, theme, "", true) {
                     actions.push(Action::ToggleTheme);
                 }
-                ui.separator();
                 let wrap = if self.settings.wrap {
                     "Выключить перенос строк"
                 } else {
@@ -831,28 +886,67 @@ impl TrorApp {
                 if item(ui, wrap, "Alt+Z", true) {
                     actions.push(Action::ToggleWrap);
                 }
-                let panel = if self.remote.visible {
-                    "Скрыть удалённые файлы"
-                } else {
-                    "Удалённые файлы (SFTP/FTP)"
-                };
-                if item(ui, panel, "F8", true) {
-                    actions.push(Action::ToggleRemote);
+                ui.separator();
+                let panes = [
+                    (
+                        Pane::Hosts,
+                        "Удалённые хосты (SFTP/FTP)",
+                        "Скрыть удалённые хосты",
+                        "F8",
+                    ),
+                    (Pane::Console, "SSH-консоль", "Скрыть SSH-консоль", "F9"),
+                    (Pane::Log, "Журнал", "Скрыть журнал", ""),
+                    (
+                        Pane::ServerSearch,
+                        "Поиск на сервере",
+                        "Скрыть поиск на сервере",
+                        "",
+                    ),
+                    (Pane::Db, "База данных", "Скрыть базу данных", ""),
+                    (
+                        Pane::Diff,
+                        "Сравнение файлов",
+                        "Скрыть сравнение файлов",
+                        "",
+                    ),
+                    (Pane::Settings, "Настройки", "Скрыть настройки", ""),
+                ];
+                for (pane, show, hide, shortcut) in panes {
+                    let label = if dock::has(&self.dock, pane) {
+                        hide
+                    } else {
+                        show
+                    };
+                    if item(ui, label, shortcut, true) {
+                        actions.push(Action::Toggle(pane));
+                    }
                 }
-                let console = if self.terminal.visible {
-                    "Скрыть SSH-консоль"
-                } else {
-                    "SSH-консоль"
-                };
-                if item(ui, console, "F9", true) {
-                    actions.push(Action::ToggleTerminal);
+                ui.separator();
+                if item(ui, "Сбросить расположение панелей", "", true) {
+                    actions.push(Action::ResetLayout);
                 }
                 ui.separator();
                 ui.weak(key("Масштаб: Ctrl + / Ctrl − / Ctrl 0"));
             });
+            ui.menu_button("Инструменты", |ui| {
+                ui.set_min_width(260.0);
+                if item(ui, "Сравнить с другим файлом", "", has_doc) {
+                    actions.push(Action::Compare);
+                }
+                if item(ui, "Предпросмотр в браузере", "F12", has_doc) {
+                    actions.push(Action::Preview);
+                }
+                ui.separator();
+                if item(ui, "База данных", "", true) {
+                    actions.push(Action::Show(Pane::Db));
+                }
+                if item(ui, "Поиск на сервере", "", true) {
+                    actions.push(Action::Show(Pane::ServerSearch));
+                }
+            });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                let theme_hint = if self.settings.dark {
+                let theme_hint = if self.settings.look.dark {
                     "Светлая тема"
                 } else {
                     "Тёмная тема"
@@ -868,143 +962,25 @@ impl TrorApp {
                     ui,
                     pal,
                     1,
-                    self.terminal.visible,
-                    "Консоль, журнал, поиск на сервере (F9)",
+                    dock::has(&self.dock, Pane::Console),
+                    "SSH-консоль (F9)",
                 ) {
-                    actions.push(Action::ToggleTerminal);
+                    actions.push(Action::Toggle(Pane::Console));
                 }
-                if Self::tool_button(ui, pal, 0, self.remote.visible, "Удалённые файлы (F8)")
-                {
-                    actions.push(Action::ToggleRemote);
+                if Self::tool_button(
+                    ui,
+                    pal,
+                    0,
+                    dock::has(&self.dock, Pane::Hosts),
+                    "Удалённые хосты (F8)",
+                ) {
+                    actions.push(Action::Toggle(Pane::Hosts));
+                }
+                if Self::tool_button(ui, pal, 4, false, "Новая вкладка (Ctrl+N)") {
+                    actions.push(Action::New);
                 }
             });
         });
-    }
-
-    fn tabs(&mut self, ui: &mut Ui, pal: &Palette, actions: &mut Vec<Action>) {
-        let height = 38.0;
-        ScrollArea::horizontal()
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    for (i, doc) in self.docs.iter().enumerate() {
-                        let active = i == self.active;
-                        let color = if doc.missing {
-                            pal.warn
-                        } else if active {
-                            pal.text
-                        } else {
-                            pal.subtext
-                        };
-                        let title = doc.title();
-                        let family = if active {
-                            theme::medium()
-                        } else {
-                            egui::FontFamily::Proportional
-                        };
-                        let galley = ui.painter().layout_no_wrap(
-                            title.clone(),
-                            FontId::new(13.0, family),
-                            color,
-                        );
-                        let size = egui::vec2(galley.size().x + 62.0, height);
-                        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-                        let pill = rect.shrink2(egui::vec2(0.0, 5.0));
-                        let close_rect = Rect::from_center_size(
-                            egui::pos2(pill.right() - 15.0, pill.center().y),
-                            egui::vec2(18.0, 18.0),
-                        );
-                        let close = ui.interact(
-                            close_rect,
-                            ui.scope_id().with(("tab_close", doc.id)),
-                            Sense::click(),
-                        );
-                        let hovered = response.hovered() || close.hovered();
-                        let painter = ui.painter();
-                        if active {
-                            painter.rect(
-                                pill,
-                                8.0,
-                                pal.base,
-                                Stroke::new(1.0, pal.border),
-                                egui::StrokeKind::Inside,
-                            );
-                        } else if hovered {
-                            painter.rect_filled(pill, 8.0, pal.crust);
-                        }
-                        painter.circle_filled(
-                            egui::pos2(pill.left() + 14.0, pill.center().y),
-                            3.5,
-                            crate::remote_ui::kind_color(&title, pal).gamma_multiply(if active {
-                                1.0
-                            } else {
-                                0.7
-                            }),
-                        );
-                        let text_pos =
-                            egui::pos2(pill.left() + 26.0, pill.center().y - galley.size().y / 2.0);
-                        painter.galley(text_pos, galley.clone(), color);
-                        if doc.missing {
-                            let y = pill.center().y + 1.0;
-                            painter.line_segment(
-                                [
-                                    egui::pos2(text_pos.x, y),
-                                    egui::pos2(text_pos.x + galley.size().x, y),
-                                ],
-                                Stroke::new(1.0, pal.warn),
-                            );
-                        }
-                        let center = close_rect.center();
-                        if close.hovered() {
-                            painter.rect_filled(close_rect, 5.0, pal.surface);
-                        }
-                        if doc.dirty() && !close.hovered() {
-                            painter.circle_filled(center, 3.5, pal.accent);
-                        } else if hovered || active {
-                            let stroke = Stroke::new(
-                                1.3,
-                                if close.hovered() { pal.text } else { pal.faint },
-                            );
-                            let d = 3.5;
-                            painter.line_segment(
-                                [center + egui::vec2(-d, -d), center + egui::vec2(d, d)],
-                                stroke,
-                            );
-                            painter.line_segment(
-                                [center + egui::vec2(d, -d), center + egui::vec2(-d, d)],
-                                stroke,
-                            );
-                        }
-                        if close.clicked() || response.middle_clicked() {
-                            actions.push(Action::CloseTab(i));
-                        } else if response.clicked() {
-                            actions.push(Action::Activate(i));
-                        }
-                        if let Some(location) = doc.location() {
-                            response.on_hover_text(location);
-                        }
-                    }
-                    let (rect, plus) =
-                        ui.allocate_exact_size(egui::vec2(28.0, height), Sense::click());
-                    let c = rect.center();
-                    if plus.hovered() {
-                        ui.painter().rect_filled(
-                            Rect::from_center_size(c, egui::vec2(26.0, 26.0)),
-                            7.0,
-                            pal.crust,
-                        );
-                    }
-                    let stroke = Stroke::new(1.4, pal.subtext);
-                    ui.painter()
-                        .line_segment([c - egui::vec2(5.0, 0.0), c + egui::vec2(5.0, 0.0)], stroke);
-                    ui.painter()
-                        .line_segment([c - egui::vec2(0.0, 5.0), c + egui::vec2(0.0, 5.0)], stroke);
-                    if plus.on_hover_text("Новая вкладка").clicked() {
-                        actions.push(Action::New);
-                    }
-                });
-            });
     }
 
     fn tool_button(ui: &mut Ui, pal: &Palette, kind: u8, active: bool, hint: &str) -> bool {
@@ -1074,6 +1050,10 @@ impl TrorApp {
                     stroke,
                 );
             }
+            4 => {
+                p.line_segment([c - egui::vec2(5.5, 0.0), c + egui::vec2(5.5, 0.0)], stroke);
+                p.line_segment([c - egui::vec2(0.0, 5.5), c + egui::vec2(0.0, 5.5)], stroke);
+            }
             _ => {
                 p.circle_stroke(c, 6.0, stroke);
                 let half: Vec<egui::Pos2> = (0..=12)
@@ -1111,11 +1091,12 @@ impl TrorApp {
             }
             clicked
         };
+        let field_w = (ui.available_width() - 440.0).clamp(70.0, 260.0);
         ui.horizontal(|ui| {
             let query = ui.add(
                 TextEdit::singleline(&mut s.query)
                     .hint_text("Найти")
-                    .desired_width(260.0)
+                    .desired_width(field_w)
                     .margin(Margin::symmetric(8, 5)),
             );
             if std::mem::take(&mut s.focus_query) {
@@ -1194,7 +1175,7 @@ impl TrorApp {
                 ui.add(
                     TextEdit::singleline(&mut s.replacement)
                         .hint_text("Заменить на")
-                        .desired_width(260.0)
+                        .desired_width(field_w)
                         .margin(Margin::symmetric(8, 5)),
                 );
                 if ui.button("Заменить").clicked() {
@@ -1352,106 +1333,6 @@ impl TrorApp {
         });
     }
 
-    fn settings_modal(&mut self, ctx: &egui::Context, pal: &Palette) {
-        if !self.settings_open {
-            return;
-        }
-        let mut close = false;
-        let modal = dialog("tror_settings", pal).show(ctx, |ui| {
-            ui.set_width(430.0);
-            ui.label(
-                RichText::new("Настройки")
-                    .family(theme::medium())
-                    .size(16.0),
-            );
-            ui.add_space(10.0);
-            egui::Grid::new("tror_settings_grid")
-                .num_columns(2)
-                .spacing([18.0, 12.0])
-                .show(ui, |ui| {
-                    ui.label("Тема");
-                    ui.horizontal(|ui| {
-                        for (dark, label) in [(true, "Тёмная"), (false, "Светлая")] {
-                            let mut button = Button::new(label);
-                            if self.settings.dark == dark {
-                                button = button.fill(pal.surface);
-                            }
-                            if ui.add(button).clicked() {
-                                self.settings.dark = dark;
-                            }
-                        }
-                    });
-                    ui.end_row();
-                    ui.label("Акцентный цвет");
-                    ui.horizontal(|ui| {
-                        for (i, (name, on_dark, on_light)) in theme::ACCENTS.iter().enumerate() {
-                            let hex = if self.settings.dark {
-                                *on_dark
-                            } else {
-                                *on_light
-                            };
-                            let color =
-                                Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
-                            let (rect, response) =
-                                ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::click());
-                            ui.painter().circle_filled(rect.center(), 9.0, color);
-                            if self.settings.accent == i {
-                                ui.painter().circle_stroke(
-                                    rect.center(),
-                                    12.0,
-                                    Stroke::new(1.5, pal.text),
-                                );
-                            }
-                            if response.on_hover_text(*name).clicked() {
-                                self.settings.accent = i;
-                            }
-                        }
-                    });
-                    ui.end_row();
-                    ui.label("Размер шрифта кода");
-                    ui.add(
-                        egui::Slider::new(&mut self.settings.font_size, 10.0..=24.0)
-                            .step_by(1.0)
-                            .suffix(" px"),
-                    );
-                    ui.end_row();
-                    ui.label("Межстрочный интервал");
-                    ui.add(
-                        egui::Slider::new(&mut self.settings.line_spacing, 1.2..=2.0).step_by(0.05),
-                    );
-                    ui.end_row();
-                    ui.label("Масштаб интерфейса");
-                    let mut zoom = ctx.zoom_factor();
-                    if ui
-                        .add(egui::Slider::new(&mut zoom, 0.7..=2.0).step_by(0.05))
-                        .changed()
-                    {
-                        ctx.set_zoom_factor(zoom);
-                    }
-                    ui.end_row();
-                    ui.label("Перенос строк");
-                    ui.checkbox(&mut self.settings.wrap, "переносить длинные строки");
-                    ui.end_row();
-                });
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                if dialog_button(ui, pal, "Готово", true) {
-                    close = true;
-                }
-                if dialog_button(ui, pal, "По умолчанию", false) {
-                    self.settings.accent = 0;
-                    self.settings.font_size = 14.0;
-                    self.settings.line_spacing = 1.5;
-                    ctx.set_zoom_factor(1.0);
-                }
-            });
-        });
-        if close || modal.should_close() {
-            self.settings_open = false;
-            self.focus_editor = true;
-        }
-    }
-
     fn goto_modal(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(input) = &mut self.goto else {
             return;
@@ -1590,15 +1471,285 @@ impl TrorApp {
     }
 }
 
+impl TrorApp {
+    fn doc_pane(
+        &mut self,
+        ui: &mut Ui,
+        id: u64,
+        pal: &Palette,
+        actions: &mut Vec<Action>,
+        modal_open: bool,
+    ) {
+        let Some(index) = self.docs.iter().position(|d| d.id == id) else {
+            return;
+        };
+        let active = index == self.active;
+        if active && self.search.open {
+            Frame::new()
+                .fill(pal.base)
+                .inner_margin(Margin::symmetric(10, 8))
+                .stroke(Stroke::new(1.0, pal.border))
+                .show(ui, |ui| self.search_bar(ui, pal, actions));
+        }
+        let look = &self.settings.look;
+        let (wrap, font_size, line_spacing) =
+            (self.settings.wrap, look.font_size, look.line_spacing);
+        if active {
+            let idle = !self.search.open
+                && !self.terminal.focused
+                && ui.ctx().memory(|m| m.focused().is_none());
+            let focus = (std::mem::take(&mut self.focus_editor) || idle) && !modal_open;
+            editor::show(
+                ui,
+                &mut self.docs[index],
+                &mut self.search,
+                editor::View {
+                    syn: &self.syntaxes,
+                    pal,
+                    focus,
+                    wrap,
+                    font_size,
+                    line_spacing,
+                    complete: &mut self.complete,
+                },
+            );
+            return;
+        }
+        let mut search = SearchState::default();
+        let mut complete = Completion::default();
+        editor::show(
+            ui,
+            &mut self.docs[index],
+            &mut search,
+            editor::View {
+                syn: &self.syntaxes,
+                pal,
+                focus: false,
+                wrap,
+                font_size,
+                line_spacing,
+                complete: &mut complete,
+            },
+        );
+        if ui.memory(|m| m.has_focus(editor::editor_id(id))) {
+            actions.push(Action::Activate(index));
+        }
+    }
+
+    fn log_pane(&mut self, ui: &mut Ui, pal: &Palette) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(8.0);
+                if ui.add(Button::new("Очистить").fill(pal.surface)).clicked() {
+                    self.remote.log.clear();
+                }
+                if ui.add(Button::new("Копировать всё").fill(pal.surface)).clicked() {
+                    let text: Vec<&str> = self.remote.log.iter().map(|(t, _)| t.as_str()).collect();
+                    ui.ctx().copy_text(text.join("\n"));
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new("Сырой обмен с сервером: команды и ответы FTP, этапы SSH/SFTP, запросы к базе")
+                                .size(12.0)
+                                .color(pal.faint),
+                        )
+                        .truncate(),
+                    );
+                });
+            });
+        });
+        ui.add_space(2.0);
+        let rect = ui.available_rect_before_wrap();
+        ui.painter().rect_filled(rect, 0.0, pal.base);
+        let font = FontId::monospace(12.5);
+        let row_h = ui.fonts_mut(|f| f.row_height(&font));
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ScrollArea::both()
+            .id_salt("tror_log")
+            .auto_shrink(false)
+            .stick_to_bottom(true)
+            .show_rows(ui, row_h, self.remote.log.len(), |ui, range| {
+                for (text, error) in &self.remote.log[range] {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("  {text}"))
+                                .font(font.clone())
+                                .color(if *error { pal.warn } else { pal.subtext }),
+                        )
+                        .extend(),
+                    );
+                }
+            });
+    }
+}
+
+struct Viewer<'a> {
+    app: &'a mut TrorApp,
+    pal: Palette,
+    actions: &'a mut Vec<Action>,
+    modal_open: bool,
+}
+
+impl TabViewer for Viewer<'_> {
+    type Tab = Pane;
+
+    fn id(&mut self, tab: &mut Pane) -> egui::Id {
+        egui::Id::unique(*tab)
+    }
+
+    fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
+        let Pane::Doc(id) = *tab else {
+            return tab.title().into();
+        };
+        let Some(index) = self.app.docs.iter().position(|d| d.id == id) else {
+            return "".into();
+        };
+        let doc = &self.app.docs[index];
+        let pal = &self.pal;
+        let active = index == self.app.active;
+        let title = doc.title();
+        let color = if doc.missing {
+            pal.warn
+        } else if active {
+            pal.text
+        } else {
+            pal.subtext
+        };
+        let family = if active {
+            theme::medium()
+        } else {
+            egui::FontFamily::Proportional
+        };
+        let size = self.app.settings.look.ui_size - 0.5;
+        let mut job = egui::text::LayoutJob::default();
+        let dot = crate::remote_ui::kind_color(&title, pal);
+        job.append(
+            "● ",
+            0.0,
+            egui::TextFormat {
+                font_id: FontId::proportional(size - 4.0),
+                color: if active { dot } else { dot.gamma_multiply(0.7) },
+                valign: Align::Center,
+                ..Default::default()
+            },
+        );
+        job.append(
+            &title,
+            0.0,
+            egui::TextFormat {
+                font_id: FontId::new(size, family),
+                color,
+                valign: Align::Center,
+                strikethrough: if doc.missing {
+                    Stroke::new(1.0, pal.warn)
+                } else {
+                    Stroke::NONE
+                },
+                ..Default::default()
+            },
+        );
+        if doc.dirty() {
+            job.append(
+                " ●",
+                0.0,
+                egui::TextFormat {
+                    font_id: FontId::proportional(size - 4.0),
+                    color: pal.accent,
+                    valign: Align::Center,
+                    ..Default::default()
+                },
+            );
+        }
+        job.into()
+    }
+
+    fn ui(&mut self, ui: &mut Ui, tab: &mut Pane) {
+        let pal = self.pal;
+        let app = &mut *self.app;
+        let look = &app.settings.look;
+        let (dark, font_size) = (look.dark, look.font_size);
+        let side = Frame::new().inner_margin(Margin::symmetric(8, 0));
+        match *tab {
+            Pane::Welcome => app.welcome(ui, &pal, self.actions),
+            Pane::Doc(id) => app.doc_pane(ui, id, &pal, self.actions, self.modal_open),
+            Pane::Hosts => {
+                side.show(ui, |ui| app.remote.ui(ui, &pal));
+            }
+            Pane::Console => {
+                app.console_shown = true;
+                let (profile, known) = match app.remote.selected_profile() {
+                    Some((profile, known)) => (Some(profile.clone()), known),
+                    None => (None, None),
+                };
+                side.show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| app.terminal.header(ui, &pal, profile.as_ref(), known));
+                    ui.add_space(2.0);
+                    app.terminal.body(ui, &pal, dark, font_size);
+                });
+            }
+            Pane::Log => app.log_pane(ui, &pal),
+            Pane::ServerSearch => {
+                side.show(ui, |ui| app.remote.search_ui(ui, &pal));
+            }
+            Pane::Settings => {
+                let note = prefs::ui(ui, &pal, &mut app.settings.look, &mut app.settings.wrap);
+                if let Some(text) = note {
+                    let now = ui.input(|i| i.time);
+                    app.notify(text, now);
+                }
+            }
+            Pane::Diff => {
+                if let Some((id, line)) = app.diff.ui(ui, &pal, &app.docs, dark, font_size) {
+                    self.actions.push(Action::Goto(id, line));
+                }
+            }
+            Pane::Db => app.db.ui(ui, &pal, &mut app.remote.store, font_size),
+        }
+    }
+
+    fn on_tab_button(&mut self, tab: &mut Pane, response: &egui::Response) {
+        let Pane::Doc(id) = *tab else {
+            return;
+        };
+        let Some(index) = self.app.docs.iter().position(|d| d.id == id) else {
+            return;
+        };
+        if response.middle_clicked() {
+            self.actions.push(Action::CloseTab(index));
+        }
+        if let Some(location) = self.app.docs[index].location() {
+            response.clone().on_hover_text(location);
+        }
+    }
+
+    fn on_close(&mut self, tab: &mut Pane) -> egui_stack::tab_viewer::OnCloseResponse {
+        if let Pane::Doc(id) = *tab {
+            if let Some(index) = self.app.docs.iter().position(|d| d.id == id) {
+                self.actions.push(Action::CloseTab(index));
+            }
+            return egui_stack::tab_viewer::OnCloseResponse::Ignore;
+        }
+        egui_stack::tab_viewer::OnCloseResponse::Close
+    }
+
+    fn is_closeable(&self, tab: &Pane) -> bool {
+        *tab != Pane::Welcome
+    }
+
+    fn scroll_bars(&self, _tab: &Pane) -> [bool; 2] {
+        [false, false]
+    }
+}
+
 impl eframe::App for TrorApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let started = std::time::Instant::now();
         let ctx = ui.ctx().clone();
-        let look = (self.settings.dark, self.settings.accent);
-        if self.applied_theme != Some(look) {
-            theme::apply(&ctx, look.0, look.1);
-            self.applied_theme = Some(look);
-        }
+        self.apply_look(&ctx);
         let pal = self.palette();
         let mut actions = Vec::new();
 
@@ -1609,6 +1760,7 @@ impl eframe::App for TrorApp {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.confirm = Some(Confirm::Quit);
         }
+        self.remote.visible = dock::has(&self.dock, Pane::Hosts);
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -1629,16 +1781,16 @@ impl eframe::App for TrorApp {
         }
         self.check_missing(&ctx);
         let modal_open = self.goto.is_some()
-            || self.settings_open
             || self.confirm.is_some()
             || self.remote.modal_open()
-            || self.terminal.modal_open();
+            || self.terminal.modal_open()
+            || self.db.modal_open();
         if std::mem::take(&mut self.remote.want_search) {
-            self.terminal.visible = true;
-            self.bottom_tab = BottomTab::Search;
+            dock::show(&mut self.dock, Pane::ServerSearch);
         }
         let events = self.remote.poll();
         self.remote_events(&ctx, events);
+        self.db.poll();
         for event in self.terminal.poll() {
             let TermEvent::Trust { host, fingerprint } = event;
             if let Err(e) = self.remote.trust(host, fingerprint) {
@@ -1658,158 +1810,51 @@ impl eframe::App for TrorApp {
                 left: 10,
                 right: 8,
                 top: 5,
-                bottom: 1,
+                bottom: 3,
             }))
-            .show_separator_line(false)
+            .show_separator_line(true)
             .show(ui, |ui| self.menu(ui, &pal, &mut actions));
-        if !self.docs.is_empty() {
-            Panel::top("tror_tabs")
-                .frame(bar.inner_margin(Margin {
-                    left: 8,
-                    right: 8,
-                    top: 0,
-                    bottom: 0,
-                }))
-                .show_separator_line(true)
-                .show(ui, |ui| self.tabs(ui, &pal, &mut actions));
-        }
         Panel::bottom("tror_status")
             .frame(bar.inner_margin(Margin::symmetric(10, 4)))
             .show_separator_line(true)
             .show(ui, |ui| self.status_bar(ui, &pal));
-        if self.search.open && !self.docs.is_empty() {
-            Panel::top("tror_search")
-                .frame(
-                    Frame::new()
-                        .fill(pal.base)
-                        .inner_margin(Margin::symmetric(10, 8))
-                        .stroke(Stroke::new(1.0, pal.border)),
-                )
-                .show_separator_line(false)
-                .show(ui, |ui| self.search_bar(ui, &pal, &mut actions));
-        }
 
-        if self.terminal.visible {
-            let (profile, known) = match self.remote.selected_profile() {
-                Some((profile, known)) => (Some(profile.clone()), known),
-                None => (None, None),
+        let ids: Vec<u64> = self.docs.iter().map(|d| d.id).collect();
+        dock::sync(&mut self.dock, &ids);
+        if self.focus_editor
+            && let Some(doc) = self.docs.get(self.active)
+            && let Some(path) = self.dock.find_tab(&Pane::Doc(doc.id))
+        {
+            let _ = self.dock.focus_tab(path);
+        }
+        let mut dock = std::mem::replace(&mut self.dock, DockState::new(Vec::new()));
+        let style = dock::style(&pal, ui.style(), self.settings.look.radius);
+        self.console_shown = false;
+        CentralPanel::no_frame().show(ui, |ui| {
+            let mut viewer = Viewer {
+                app: self,
+                pal,
+                actions: &mut actions,
+                modal_open,
             };
-            let profile = profile.as_ref();
-            Panel::bottom("tror_terminal")
-                .frame(bar.inner_margin(Margin::symmetric(8, 0)))
-                .resizable(true)
-                .default_size(240.0)
-                .min_size(90.0)
-                .show(ui, |ui| {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        for (tab, label) in
-                            [
-                                (BottomTab::Console, "SSH-консоль"),
-                                (BottomTab::Log, "Журнал"),
-                                (BottomTab::Search, "Поиск на сервере"),
-                            ]
-                        {
-                            let active = self.bottom_tab == tab;
-                            let text = RichText::new(label).size(12.5).color(if active {
-                                pal.text
-                            } else {
-                                pal.subtext
-                            });
-                            let mut button = Button::new(text);
-                            if active {
-                                button = button.fill(pal.surface);
-                            }
-                            if ui.add(button).clicked() {
-                                self.bottom_tab = tab;
-                            }
-                        }
-                        match self.bottom_tab {
-                            BottomTab::Console => self.terminal.header(ui, &pal, profile, known),
-                            BottomTab::Search => {}
-                            BottomTab::Log => {
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.add(Button::new("Очистить").fill(pal.surface)).clicked() {
-                                        self.remote.log.clear();
-                                    }
-                                });
-                            }
-                        }
-                    });
-                    ui.add_space(2.0);
-                    match self.bottom_tab {
-                        BottomTab::Console => {
-                            self.terminal
-                                .body(ui, &pal, self.settings.dark, self.settings.font_size)
-                        }
-                        BottomTab::Search => {
-                            self.terminal.focused = false;
-                            self.remote.search_ui(ui, &pal);
-                        }
-                        BottomTab::Log => {
-                            self.terminal.focused = false;
-                            let rect = ui.available_rect_before_wrap();
-                            ui.painter().rect_filled(rect, 0.0, pal.base);
-                            ScrollArea::vertical()
-                                .auto_shrink(false)
-                                .stick_to_bottom(true)
-                                .show(ui, |ui| {
-                                    ui.add_space(4.0);
-                                    if self.remote.log.is_empty() {
-                                        ui.label(
-                                            RichText::new("  Здесь появятся сообщения о подключении и операциях с сервером.")
-                                                .color(pal.faint)
-                                                .size(12.5),
-                                        );
-                                    }
-                                    for (text, error) in &self.remote.log {
-                                        ui.label(
-                                            RichText::new(format!("  {text}"))
-                                                .monospace()
-                                                .size(12.5)
-                                                .color(if *error { pal.warn } else { pal.subtext }),
-                                        );
-                                    }
-                                });
-                        }
-                    }
-                });
-        } else {
+            DockArea::new(&mut dock)
+                .style(style)
+                .show_leaf_close_all_buttons(false)
+                .show_leaf_collapse_buttons(false)
+                .show_inside(ui, &mut viewer);
+        });
+        if let Some((_, Pane::Doc(id))) = dock.find_active_focused()
+            && let Some(index) = self.docs.iter().position(|d| d.id == *id)
+            && index != self.active
+        {
+            self.active = index;
+            self.complete.close();
+        }
+        self.dock = dock;
+        self.focus_editor = false;
+        if !self.console_shown {
             self.terminal.focused = false;
         }
-        if self.remote.visible {
-            Panel::left("tror_remote")
-                .frame(bar.inner_margin(Margin::symmetric(8, 0)))
-                .resizable(true)
-                .default_size(270.0)
-                .min_size(200.0)
-                .show(ui, |ui| self.remote.ui(ui, &pal));
-        }
-
-        CentralPanel::no_frame().show(ui, |ui| {
-            let idle = !self.search.open
-                && !self.terminal.focused
-                && ctx.memory(|m| m.focused().is_none());
-            let focus = (std::mem::take(&mut self.focus_editor) || idle) && !modal_open;
-            match self.docs.get_mut(self.active) {
-                Some(doc) => editor::show(
-                    ui,
-                    doc,
-                    &mut self.search,
-                    editor::View {
-                        syn: &self.syntaxes,
-                        pal: &pal,
-                        dark: self.settings.dark,
-                        focus,
-                        wrap: self.settings.wrap,
-                        font_size: self.settings.font_size,
-                        line_spacing: self.settings.line_spacing,
-                        complete: &mut self.complete,
-                    },
-                ),
-                None => self.welcome(ui, &pal, &mut actions),
-            }
-        });
 
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             let screen = ctx.content_rect();
@@ -1834,11 +1879,11 @@ impl eframe::App for TrorApp {
         }
 
         self.goto_modal(&ctx, &pal);
-        self.settings_modal(&ctx, &pal);
         self.confirm_modal(&ctx);
         let events = self.remote.dialogs(&ctx, &pal);
         self.remote_events(&ctx, events);
         self.terminal.dialogs(&ctx, &pal);
+        self.db.dialogs(&ctx, &pal, &mut self.remote.store);
 
         for action in actions {
             self.run(action, &ctx);
@@ -1862,11 +1907,14 @@ impl eframe::App for TrorApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        self.settings.remote_panel = self.remote.visible;
-        self.settings.terminal_panel = self.terminal.visible;
-        self.settings.session = self.docs.iter().filter_map(|d| d.path.clone()).collect();
+        self.settings.open = self
+            .docs
+            .iter()
+            .filter_map(|d| Some((d.id, d.path.clone()?)))
+            .collect();
         self.settings.active = self.active;
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);
+        eframe::set_value(storage, DOCK_KEY, &self.dock);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

@@ -1,0 +1,552 @@
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use eframe::egui::{self, Button, Color32, ComboBox, RichText, ScrollArea, Sense, Stroke, Ui};
+use serde::{Deserialize, Serialize};
+
+use crate::highlight::{self, SYNTAX_PARTS};
+use crate::theme::{self, PARTS, Palette};
+
+type Colors = BTreeMap<String, [u8; 3]>;
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct Look {
+    pub dark: bool,
+    pub accent: usize,
+    pub colors_dark: Colors,
+    pub colors_light: Colors,
+    pub syntax_dark: String,
+    pub syntax_light: String,
+    pub code_dark: Colors,
+    pub code_light: Colors,
+    pub ui_font: Option<PathBuf>,
+    pub code_font: Option<PathBuf>,
+    pub ui_size: f32,
+    pub font_size: f32,
+    pub line_spacing: f32,
+    pub radius: u8,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            dark: true,
+            accent: 0,
+            colors_dark: Colors::new(),
+            colors_light: Colors::new(),
+            syntax_dark: highlight::DEFAULT_DARK.into(),
+            syntax_light: highlight::DEFAULT_LIGHT.into(),
+            code_dark: Colors::new(),
+            code_light: Colors::new(),
+            ui_font: None,
+            code_font: None,
+            ui_size: 13.5,
+            font_size: 14.0,
+            line_spacing: 1.5,
+            radius: 7,
+        }
+    }
+}
+
+impl Look {
+    pub fn palette(&self) -> Palette {
+        let colors = if self.dark {
+            &self.colors_dark
+        } else {
+            &self.colors_light
+        };
+        theme::palette(self.dark, self.accent, colors)
+    }
+
+    pub fn syntax(&self) -> (&str, &Colors) {
+        if self.dark {
+            (&self.syntax_dark, &self.code_dark)
+        } else {
+            (&self.syntax_light, &self.code_light)
+        }
+    }
+
+    pub fn clamp(&mut self) {
+        self.ui_size = self.ui_size.clamp(10.0, 20.0);
+        self.font_size = self.font_size.clamp(8.0, 40.0);
+        self.line_spacing = self.line_spacing.clamp(1.0, 3.0);
+        self.radius = self.radius.min(16);
+        self.accent = self.accent.min(theme::ACCENTS.len() - 1);
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub look: Look,
+    pub wrap: bool,
+    pub recent: Vec<PathBuf>,
+    pub open: Vec<(u64, PathBuf)>,
+    pub active: usize,
+    migrated: bool,
+    session: Vec<PathBuf>,
+    dark: bool,
+    accent: usize,
+    font_size: f32,
+    line_spacing: f32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        let look = Look::default();
+        Self {
+            wrap: false,
+            recent: Vec::new(),
+            open: Vec::new(),
+            active: 0,
+            migrated: false,
+            session: Vec::new(),
+            dark: look.dark,
+            accent: look.accent,
+            font_size: look.font_size,
+            line_spacing: look.line_spacing,
+            look,
+        }
+    }
+}
+
+impl Settings {
+    pub fn migrate(&mut self) {
+        if !self.migrated {
+            self.migrated = true;
+            self.look.dark = self.dark;
+            self.look.accent = self.accent;
+            self.look.font_size = self.font_size;
+            self.look.line_spacing = self.line_spacing;
+            for (i, path) in std::mem::take(&mut self.session).into_iter().enumerate() {
+                self.open.push((i as u64 + 1, path));
+            }
+        }
+        self.look.clamp();
+    }
+}
+
+pub fn parse_color(text: &str) -> Option<[u8; 3]> {
+    let text = text.trim();
+    let lower = text.to_ascii_lowercase();
+    if let Some(body) = lower
+        .strip_prefix("rgb(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let parts: Vec<u8> = body
+            .split([',', ' '])
+            .filter(|p| !p.is_empty())
+            .map(|p| p.parse::<u8>())
+            .collect::<Result<_, _>>()
+            .ok()?;
+        return <[u8; 3]>::try_from(parts).ok();
+    }
+    let hex = lower.strip_prefix('#').unwrap_or(&lower);
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let value = |s: &str| u8::from_str_radix(s, 16).ok();
+    match hex.len() {
+        3 => {
+            let mut out = [0; 3];
+            for (i, c) in hex.chars().enumerate() {
+                out[i] = value(&format!("{c}{c}"))?;
+            }
+            Some(out)
+        }
+        6 => Some([value(&hex[0..2])?, value(&hex[2..4])?, value(&hex[4..6])?]),
+        _ => None,
+    }
+}
+
+fn color_field(ui: &mut Ui, key: &str, color: &mut [u8; 3]) -> bool {
+    let mut changed = ui.color_edit_button_srgb(color).changed();
+    let id = ui.scope_id().with(("tror_hex", key));
+    let mut text = ui
+        .data(|d| d.get_temp::<String>(id))
+        .unwrap_or_else(|| format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]));
+    let field = ui
+        .add(
+            egui::TextEdit::singleline(&mut text)
+                .desired_width(92.0)
+                .font(egui::TextStyle::Monospace),
+        )
+        .on_hover_text("#rrggbb, #rgb или rgb(r, g, b)");
+    if field.changed()
+        && let Some(parsed) = parse_color(&text)
+    {
+        *color = parsed;
+        changed = true;
+    }
+    if field.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, text));
+    } else {
+        ui.data_mut(|d| d.remove::<String>(id));
+    }
+    changed
+}
+
+fn heading(ui: &mut Ui, pal: &Palette, text: &str, hint: &str) {
+    ui.add_space(18.0);
+    ui.label(RichText::new(text).family(theme::medium()).size(15.5));
+    if !hint.is_empty() {
+        ui.label(RichText::new(hint).size(12.0).color(pal.faint));
+    }
+    ui.add_space(6.0);
+}
+
+fn font_row(ui: &mut Ui, pal: &Palette, label: &str, builtin: &str, font: &mut Option<PathBuf>) {
+    ui.label(label);
+    ui.horizontal(|ui| {
+        let name = font
+            .as_deref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("{builtin} (встроенный)"));
+        ui.label(RichText::new(name).color(pal.subtext));
+        if ui
+            .add(Button::new("Выбрать файл…").fill(pal.surface))
+            .clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("Шрифты", &["ttf", "otf", "ttc"])
+                .pick_file()
+        {
+            *font = Some(path);
+        }
+        if font.is_some() && ui.button("Сбросить").clicked() {
+            *font = None;
+        }
+    });
+    ui.end_row();
+}
+
+pub fn ui(ui: &mut Ui, pal: &Palette, look: &mut Look, wrap: &mut bool) -> Option<String> {
+    let mut note = None;
+    let ctx = ui.ctx().clone();
+    ScrollArea::vertical()
+        .id_salt("tror_prefs")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(22, 4))
+                .show(ui, |ui| {
+                    ui.set_max_width(680.0);
+                    body(ui, pal, look, wrap, &ctx, &mut note);
+                    ui.add_space(24.0);
+                });
+        });
+    note
+}
+
+fn body(
+    ui: &mut Ui,
+    pal: &Palette,
+    look: &mut Look,
+    wrap: &mut bool,
+    ctx: &egui::Context,
+    note: &mut Option<String>,
+) {
+    let dark = look.dark;
+    let mode = if dark {
+        "тёмной"
+    } else {
+        "светлой"
+    };
+
+    heading(ui, pal, "Тема", "");
+    egui::Grid::new("tror_prefs_theme")
+        .num_columns(2)
+        .spacing([22.0, 10.0])
+        .show(ui, |ui| {
+            ui.label("Режим");
+            ui.horizontal(|ui| {
+                for (value, label) in [(true, "Тёмная"), (false, "Светлая")] {
+                    let mut button = Button::new(label);
+                    if look.dark == value {
+                        button = button.fill(pal.surface);
+                    }
+                    if ui.add(button).clicked() {
+                        look.dark = value;
+                    }
+                }
+            });
+            ui.end_row();
+            ui.label("Готовые акценты");
+            ui.horizontal(|ui| {
+                for (i, (name, on_dark, on_light)) in theme::ACCENTS.iter().enumerate() {
+                    let hex = if dark { *on_dark } else { *on_light };
+                    let color = Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::click());
+                    ui.painter().circle_filled(rect.center(), 9.0, color);
+                    let colors = if dark {
+                        &mut look.colors_dark
+                    } else {
+                        &mut look.colors_light
+                    };
+                    if look.accent == i && !colors.contains_key("accent") {
+                        ui.painter()
+                            .circle_stroke(rect.center(), 12.0, Stroke::new(1.5, pal.text));
+                    }
+                    if response.on_hover_text(*name).clicked() {
+                        look.accent = i;
+                        colors.remove("accent");
+                    }
+                }
+            });
+            ui.end_row();
+        });
+
+    heading(
+        ui,
+        pal,
+        "Цвета интерфейса",
+        &format!(
+            "Настраиваются отдельно для {mode} темы. Цвет можно выбрать в палитре или ввести: #rrggbb, #rgb, rgb(r, g, b)."
+        ),
+    );
+    let mut current = *pal;
+    let colors = if dark {
+        &mut look.colors_dark
+    } else {
+        &mut look.colors_light
+    };
+    egui::Grid::new("tror_prefs_colors")
+        .num_columns(2)
+        .spacing([22.0, 7.0])
+        .show(ui, |ui| {
+            for (index, (key, label)) in PARTS.iter().enumerate() {
+                ui.label(*label);
+                ui.horizontal(|ui| {
+                    let c = *current.part(index);
+                    let mut value = [c.r(), c.g(), c.b()];
+                    if color_field(ui, key, &mut value) {
+                        colors.insert((*key).to_owned(), value);
+                    }
+                    if colors.contains_key(*key)
+                        && ui.button("↺").on_hover_text("Вернуть цвет темы").clicked()
+                    {
+                        colors.remove(*key);
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    if !colors.is_empty() && ui.button("Сбросить все цвета интерфейса").clicked()
+    {
+        colors.clear();
+    }
+
+    heading(
+        ui,
+        pal,
+        "Подсветка кода",
+        &format!("Схема и собственные цвета для {mode} темы."),
+    );
+    let (scheme, code) = if dark {
+        (&mut look.syntax_dark, &mut look.code_dark)
+    } else {
+        (&mut look.syntax_light, &mut look.code_light)
+    };
+    egui::Grid::new("tror_prefs_code")
+        .num_columns(2)
+        .spacing([22.0, 7.0])
+        .show(ui, |ui| {
+            ui.label("Цветовая схема");
+            ComboBox::from_id_salt("tror_prefs_scheme")
+                .width(240.0)
+                .selected_text(scheme.as_str())
+                .show_ui(ui, |ui| {
+                    for name in highlight::theme_names() {
+                        ui.selectable_value(scheme, name.to_owned(), name);
+                    }
+                });
+            ui.end_row();
+            for (key, label) in SYNTAX_PARTS {
+                ui.label(label);
+                ui.horizontal(|ui| match code.get(key).copied() {
+                    Some(mut value) => {
+                        if color_field(ui, &format!("code:{key}"), &mut value) {
+                            code.insert(key.to_owned(), value);
+                        }
+                        if ui.button("↺").on_hover_text("Как в схеме").clicked() {
+                            code.remove(key);
+                        }
+                    }
+                    None => {
+                        ui.label(RichText::new("как в схеме").color(pal.faint));
+                        if ui.button("Задать цвет").clicked() {
+                            code.insert(key.to_owned(), [pal.text.r(), pal.text.g(), pal.text.b()]);
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+        });
+
+    heading(
+        ui,
+        pal,
+        "Шрифты и размеры",
+        "Подойдёт любой файл TTF или OTF. Для кода лучше моноширинный шрифт.",
+    );
+    egui::Grid::new("tror_prefs_fonts")
+        .num_columns(2)
+        .spacing([22.0, 10.0])
+        .show(ui, |ui| {
+            font_row(ui, pal, "Шрифт интерфейса", "Inter", &mut look.ui_font);
+            font_row(ui, pal, "Шрифт кода", "JetBrains Mono", &mut look.code_font);
+            ui.label("Размер текста интерфейса");
+            ui.add(
+                egui::Slider::new(&mut look.ui_size, 11.0..=18.0)
+                    .step_by(0.5)
+                    .suffix(" px"),
+            );
+            ui.end_row();
+            ui.label("Размер шрифта кода");
+            ui.add(
+                egui::Slider::new(&mut look.font_size, 9.0..=28.0)
+                    .step_by(1.0)
+                    .suffix(" px"),
+            );
+            ui.end_row();
+            ui.label("Межстрочный интервал");
+            ui.add(egui::Slider::new(&mut look.line_spacing, 1.1..=2.2).step_by(0.05));
+            ui.end_row();
+            ui.label("Масштаб всего окна");
+            let mut zoom = ctx.zoom_factor();
+            if ui
+                .add(egui::Slider::new(&mut zoom, 0.7..=2.0).step_by(0.05))
+                .changed()
+            {
+                ctx.set_zoom_factor(zoom);
+            }
+            ui.end_row();
+            ui.label("Скругление углов");
+            ui.add(egui::Slider::new(&mut look.radius, 0..=14).suffix(" px"));
+            ui.end_row();
+        });
+
+    heading(ui, pal, "Редактор", "");
+    ui.checkbox(wrap, "Переносить длинные строки (Alt+Z)");
+
+    heading(
+        ui,
+        pal,
+        "Панели",
+        "Любую панель можно перетащить за заголовок: к краю окна или другой панели — она прилипнет и разделит место, \
+         на заголовок — станет соседней вкладкой, в сторону — превратится в отдельное окно. Расположение запоминается.",
+    );
+
+    heading(ui, pal, "Оформление целиком", "");
+    ui.horizontal(|ui| {
+        if ui
+            .add(Button::new("Экспорт в файл…").fill(pal.surface))
+            .clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .set_file_name("tror-theme.json")
+                .save_file()
+        {
+            let result = serde_json::to_string_pretty(look)
+                .map_err(|e| e.to_string())
+                .and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string()));
+            *note = Some(match result {
+                Ok(()) => format!("Оформление сохранено: {}", path.display()),
+                Err(e) => format!("Не удалось сохранить оформление: {e}"),
+            });
+        }
+        if ui
+            .add(Button::new("Импорт из файла…").fill(pal.surface))
+            .clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("Оформление Tror", &["json"])
+                .pick_file()
+        {
+            let loaded = std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|text| serde_json::from_str::<Look>(&text).map_err(|e| e.to_string()));
+            *note = Some(match loaded {
+                Ok(mut loaded) => {
+                    loaded.clamp();
+                    *look = loaded;
+                    "Оформление загружено".to_owned()
+                }
+                Err(e) => format!("Не удалось прочитать оформление: {e}"),
+            });
+        }
+        if ui
+            .add(Button::new("Сбросить всё оформление").fill(pal.surface))
+            .clicked()
+        {
+            *look = Look {
+                dark: look.dark,
+                ..Look::default()
+            };
+            ctx.set_zoom_factor(1.0);
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colors_parse_from_hex_and_rgb() {
+        assert_eq!(parse_color("#8ea6ff"), Some([0x8e, 0xa6, 0xff]));
+        assert_eq!(parse_color("8EA6FF"), Some([0x8e, 0xa6, 0xff]));
+        assert_eq!(parse_color("#fa0"), Some([0xff, 0xaa, 0x00]));
+        assert_eq!(parse_color("rgb(12, 200,7)"), Some([12, 200, 7]));
+        assert_eq!(parse_color("RGB(1 2 3)"), Some([1, 2, 3]));
+        assert_eq!(parse_color("rgb(1,2)"), None);
+        assert_eq!(parse_color("rgb(1,2,300)"), None);
+        assert_eq!(parse_color("#12"), None);
+        assert_eq!(parse_color("#ggg"), None);
+        assert_eq!(parse_color("#ёёё"), None);
+    }
+
+    #[test]
+    fn overrides_change_palette_and_look_roundtrips() {
+        let mut look = Look::default();
+        let before = look.palette();
+        look.colors_dark.insert("base".into(), [1, 2, 3]);
+        look.colors_dark.insert("accent".into(), [9, 8, 7]);
+        look.colors_light.insert("base".into(), [200, 200, 200]);
+        let after = look.palette();
+        assert_eq!(after.base, Color32::from_rgb(1, 2, 3));
+        assert_eq!(after.accent, Color32::from_rgb(9, 8, 7));
+        assert_eq!(after.text, before.text);
+        look.dark = false;
+        assert_eq!(look.palette().base, Color32::from_rgb(200, 200, 200));
+        let text = serde_json::to_string(&look).unwrap();
+        assert!(serde_json::from_str::<Look>(&text).unwrap() == look);
+    }
+
+    #[test]
+    fn old_flat_settings_are_migrated() {
+        let old = r#"(dark:false,accent:3,font_size:17.0,line_spacing:1.8,wrap:true,remote_panel:true,terminal_panel:false,recent:["/tmp/r.css"],session:["/tmp/a.php","/tmp/b.js"],active:1)"#;
+        let mut settings: Settings = ron::from_str(old).unwrap();
+        settings.migrate();
+        assert!(!settings.look.dark && settings.wrap);
+        assert_eq!(settings.look.accent, 3);
+        assert_eq!(settings.look.font_size, 17.0);
+        assert_eq!(settings.look.line_spacing, 1.8);
+        assert_eq!(settings.recent, [PathBuf::from("/tmp/r.css")]);
+        assert_eq!(settings.open.len(), 2);
+        assert_eq!(settings.open[1], (2, PathBuf::from("/tmp/b.js")));
+
+        settings.look.dark = true;
+        settings.look.colors_dark.insert("base".into(), [1, 2, 3]);
+        settings.look.ui_font = Some(PathBuf::from("/fonts/My.ttf"));
+        let saved = ron::ser::to_string(&settings).unwrap();
+        let mut again: Settings = ron::from_str(&saved).unwrap();
+        again.migrate();
+        assert!(again.look == settings.look);
+        assert_eq!(again.open, settings.open);
+
+        let mut fresh = Settings::default();
+        fresh.migrate();
+        assert!(fresh.look == Look::default());
+    }
+}

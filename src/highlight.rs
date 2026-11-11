@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -16,11 +17,37 @@ const WINDOW_WARMUP: usize = 200;
 const WINDOW_MARGIN: usize = 250;
 const WINDOW_SLACK: usize = 60;
 
+pub const SYNTAX_PARTS: [(&str, &str); 12] = [
+    ("", "Обычный текст кода"),
+    ("comment", "Комментарии"),
+    ("string", "Строки"),
+    ("constant", "Константы"),
+    ("constant.numeric", "Числа"),
+    ("keyword", "Ключевые слова"),
+    ("storage", "Типы и модификаторы"),
+    ("entity.name.function", "Имена функций"),
+    ("entity.name.tag", "Теги"),
+    ("entity.other.attribute-name", "Атрибуты"),
+    ("variable", "Переменные"),
+    ("support", "Встроенные функции и классы"),
+];
+
+pub const DEFAULT_DARK: &str = "Catppuccin Mocha";
+pub const DEFAULT_LIGHT: &str = "Catppuccin Latte";
+
 pub struct Syntaxes {
     pub set: SyntaxSet,
-    dark: Theme,
-    light: Theme,
+    themes: two_face::theme::EmbeddedLazyThemeSet,
+    theme: Theme,
+    pub generation: u64,
     pub names: Vec<String>,
+}
+
+pub fn theme_names() -> Vec<&'static str> {
+    two_face::theme::EmbeddedLazyThemeSet::theme_names()
+        .iter()
+        .map(|name| name.as_name())
+        .collect()
 }
 
 impl Syntaxes {
@@ -37,14 +64,63 @@ impl Syntaxes {
         names.dedup();
         Self {
             set,
-            dark: themes.get(EmbeddedThemeName::CatppuccinMocha).clone(),
-            light: themes.get(EmbeddedThemeName::CatppuccinLatte).clone(),
+            theme: themes.get(EmbeddedThemeName::CatppuccinMocha).clone(),
+            themes,
+            generation: 0,
             names,
         }
     }
 
-    fn theme(&self, dark: bool) -> &Theme {
-        if dark { &self.dark } else { &self.light }
+    pub fn set_theme(&mut self, name: &str, colors: &BTreeMap<String, [u8; 3]>) {
+        let found = two_face::theme::EmbeddedLazyThemeSet::theme_names()
+            .iter()
+            .find(|theme| theme.as_name() == name)
+            .copied()
+            .unwrap_or(EmbeddedThemeName::CatppuccinMocha);
+        let mut theme = self.themes.get(found).clone();
+        let mut parts: Vec<(&String, &[u8; 3])> = colors.iter().collect();
+        parts.sort_by_key(|(prefix, _)| prefix.len());
+        for (prefix, [r, g, b]) in parts {
+            let color = syntect::highlighting::Color {
+                r: *r,
+                g: *g,
+                b: *b,
+                a: 255,
+            };
+            if prefix.is_empty() {
+                theme.settings.foreground = Some(color);
+                continue;
+            }
+            let matches = |scope: &syntect::parsing::Scope| {
+                let name = scope.build_string();
+                name == *prefix
+                    || name
+                        .strip_prefix(prefix.as_str())
+                        .is_some_and(|rest| rest.starts_with('.'))
+            };
+            for item in &mut theme.scopes {
+                let hit = item
+                    .scope
+                    .selectors
+                    .iter()
+                    .any(|s| s.path.as_slice().last().is_some_and(&matches));
+                if hit && item.style.foreground.is_some() {
+                    item.style.foreground = Some(color);
+                }
+            }
+            if let Ok(scope) = prefix.parse() {
+                theme.scopes.push(syntect::highlighting::ThemeItem {
+                    scope,
+                    style: syntect::highlighting::StyleModifier {
+                        foreground: Some(color),
+                        background: None,
+                        font_style: None,
+                    },
+                });
+            }
+        }
+        self.theme = theme;
+        self.generation += 1;
     }
 
     pub fn detect(&self, path: Option<&Path>, text: &str) -> String {
@@ -65,6 +141,13 @@ impl Syntaxes {
                 .or_else(|| self.set.find_syntax_by_extension(ext))
                 .or_else(|| self.set.find_syntax_by_extension(&lower))
         });
+        if path
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("log") || e.eq_ignore_ascii_case("txt"))
+        {
+            return "Plain Text".into();
+        }
         by_path
             .or_else(|| {
                 self.set
@@ -111,7 +194,7 @@ struct Builder {
 
 #[derive(Default)]
 pub struct Highlighter {
-    style: Option<(String, bool, bool)>,
+    style: Option<(String, u64, bool)>,
     entries: Vec<Entry>,
     dirty: Option<(usize, usize)>,
     shown: Option<Window>,
@@ -237,12 +320,12 @@ impl Highlighter {
         syn: &Syntaxes,
         rope: &Rope,
         syntax: &str,
-        dark: bool,
         version: u64,
         visible: Range<usize>,
         budget: Option<Duration>,
     ) -> bool {
-        let theme = syn.theme(dark);
+        let theme = &syn.theme;
+        let generation = syn.generation;
         let c = theme
             .settings
             .foreground
@@ -250,10 +333,10 @@ impl Highlighter {
         self.default_color = Color32::from_rgb(c.r, c.g, c.b);
         let full = rope.len_bytes() <= FULL_LIMIT;
         let lines = rope.len_lines();
-        let stale = !matches!(&self.style, Some((s, d, f)) if s == syntax && *d == dark && *f == full)
+        let stale = !matches!(&self.style, Some((s, g, f)) if s == syntax && *g == generation && *f == full)
             || (full && syntax != "Plain Text" && self.entries.len() != lines);
         if stale {
-            self.style = Some((syntax.to_owned(), dark, full));
+            self.style = Some((syntax.to_owned(), generation, full));
             self.entries.clear();
             self.dirty = None;
             self.shown = None;
@@ -400,7 +483,7 @@ mod tests {
     use super::*;
 
     fn run(h: &mut Highlighter, syn: &Syntaxes, rope: &Rope, syntax: &str) {
-        h.process(syn, rope, syntax, true, 0, 0..50, None);
+        h.process(syn, rope, syntax, 0, 0..50, None);
     }
 
     fn all(h: &Highlighter, rope: &Rope) -> Vec<Vec<Span>> {
@@ -411,6 +494,39 @@ mod tests {
         let mut h = Highlighter::default();
         run(&mut h, syn, rope, syntax);
         all(&h, rope)
+    }
+
+    #[test]
+    fn schemes_and_own_colors_change_spans() {
+        let mut syn = Syntaxes::new();
+        let rope = Rope::from_str("<?php\n// note\n$a = 'text';\n");
+        let base = reference(&syn, &rope, "PHP");
+        syn.set_theme("Dracula", &BTreeMap::new());
+        let dracula = reference(&syn, &rope, "PHP");
+        assert_ne!(base, dracula);
+        let mut colors = BTreeMap::new();
+        colors.insert("comment".to_owned(), [1, 2, 3]);
+        colors.insert("string".to_owned(), [4, 5, 6]);
+        colors.insert(String::new(), [7, 8, 9]);
+        syn.set_theme("Dracula", &colors);
+        let mut h = Highlighter::default();
+        run(&mut h, &syn, &rope, "PHP");
+        assert!(
+            h.spans(1)
+                .iter()
+                .all(|s| s.color == Color32::from_rgb(1, 2, 3))
+        );
+        assert!(
+            h.spans(2)
+                .iter()
+                .any(|s| s.color == Color32::from_rgb(4, 5, 6))
+        );
+        assert_eq!(h.default_color, Color32::from_rgb(7, 8, 9));
+        assert!(theme_names().contains(&DEFAULT_DARK) && theme_names().contains(&DEFAULT_LIGHT));
+        let plain = |name: &str| syn.detect(Some(Path::new(name)), "<?php");
+        assert_eq!(plain("/var/log/app.log"), "Plain Text");
+        assert_eq!(plain("notes.TXT"), "Plain Text");
+        assert_eq!(plain("index.php"), "PHP");
     }
 
     #[test]
@@ -526,7 +642,7 @@ mod tests {
         let mut passes = 0;
         while doc
             .hl
-            .process(&syn, &doc.rope, "PHP", true, 0, 0..50, Some(Duration::ZERO))
+            .process(&syn, &doc.rope, "PHP", 0, 0..50, Some(Duration::ZERO))
         {
             passes += 1;
             if passes == 3 {
@@ -551,13 +667,13 @@ mod tests {
         }
         let rope = Rope::from_str(&text);
         let mut h = Highlighter::default();
-        h.process(&syn, &rope, "SQL", true, 1, 20_000..20_050, None);
+        h.process(&syn, &rope, "SQL", 1, 20_000..20_050, None);
         assert!(h.spans(20_010).len() > 3);
         assert!(h.spans(100).is_empty());
         assert!(h.entries.is_empty());
-        assert!(!h.process(&syn, &rope, "SQL", true, 1, 20_020..20_070, None));
+        assert!(!h.process(&syn, &rope, "SQL", 1, 20_020..20_070, None));
         assert!(h.shown.as_ref().unwrap().start == 20_000 - WINDOW_WARMUP);
-        h.process(&syn, &rope, "SQL", true, 2, 0..50, None);
+        h.process(&syn, &rope, "SQL", 2, 0..50, None);
         assert!(h.spans(10).len() > 3);
     }
 
@@ -638,7 +754,7 @@ mod tests {
                 let budget = (next(3) == 0).then_some(Duration::ZERO);
                 if next(4) != 0 {
                     doc.hl
-                        .process(&syn, &doc.rope, "PHP", true, doc.version, 0..50, budget);
+                        .process(&syn, &doc.rope, "PHP", doc.version, 0..50, budget);
                 }
             }
             run(&mut doc.hl, &syn, &doc.rope, "PHP");

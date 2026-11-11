@@ -25,7 +25,6 @@ pub fn editor_id(doc_id: u64) -> Id {
 pub struct View<'a> {
     pub syn: &'a Syntaxes,
     pub pal: &'a Palette,
-    pub dark: bool,
     pub focus: bool,
     pub wrap: bool,
     pub font_size: f32,
@@ -533,7 +532,6 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     let View {
         syn,
         pal,
-        dark,
         focus,
         wrap,
         font_size,
@@ -843,7 +841,6 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         syn,
         &doc.rope,
         &doc.syntax,
-        dark,
         doc.version,
         first..last,
         Some(FRAME_BUDGET),

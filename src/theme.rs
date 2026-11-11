@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use eframe::egui::{self, Color32, CornerRadius, Stroke, Visuals};
 
 #[derive(Clone, Copy)]
@@ -19,6 +22,46 @@ pub struct Palette {
     pub warn: Color32,
 }
 
+pub const PARTS: [(&str, &str); 15] = [
+    ("base", "Фон редактора"),
+    ("mantle", "Фон панелей и меню"),
+    ("crust", "Фон заголовков и наведения"),
+    ("surface", "Кнопки и поля"),
+    ("surface_hover", "Кнопки при наведении"),
+    ("border", "Границы и разделители"),
+    ("text", "Основной текст"),
+    ("subtext", "Вторичный текст"),
+    ("faint", "Номера строк и подсказки"),
+    ("accent", "Акцент"),
+    ("current_line", "Текущая строка"),
+    ("selection", "Выделение"),
+    ("match_bg", "Найденные совпадения"),
+    ("match_current", "Текущее совпадение"),
+    ("warn", "Предупреждения"),
+];
+
+impl Palette {
+    pub fn part(&mut self, index: usize) -> &mut Color32 {
+        match index {
+            0 => &mut self.base,
+            1 => &mut self.mantle,
+            2 => &mut self.crust,
+            3 => &mut self.surface,
+            4 => &mut self.surface_hover,
+            5 => &mut self.border,
+            6 => &mut self.text,
+            7 => &mut self.subtext,
+            8 => &mut self.faint,
+            9 => &mut self.accent,
+            10 => &mut self.current_line,
+            11 => &mut self.selection,
+            12 => &mut self.match_bg,
+            13 => &mut self.match_current,
+            _ => &mut self.warn,
+        }
+    }
+}
+
 const fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
@@ -31,10 +74,15 @@ pub const ACCENTS: [(&str, u32, u32); 5] = [
     ("Зелень", 0x8fd694, 0x2f9e44),
 ];
 
-pub fn palette(dark: bool, accent: usize) -> Palette {
+pub fn palette(dark: bool, accent: usize, colors: &BTreeMap<String, [u8; 3]>) -> Palette {
     let (_, on_dark, on_light) = ACCENTS[accent.min(ACCENTS.len() - 1)];
     let mut palette = base_palette(dark);
     palette.accent = rgb(if dark { on_dark } else { on_light });
+    for (index, (key, _)) in PARTS.iter().enumerate() {
+        if let Some([r, g, b]) = colors.get(*key) {
+            *palette.part(index) = Color32::from_rgb(*r, *g, *b);
+        }
+    }
     palette
 }
 
@@ -82,9 +130,41 @@ pub fn medium() -> egui::FontFamily {
     egui::FontFamily::Name("medium".into())
 }
 
-pub fn install_fonts(ctx: &egui::Context) {
+pub fn install_fonts(
+    ctx: &egui::Context,
+    ui_font: Option<&Path>,
+    code_font: Option<&Path>,
+) -> Result<(), String> {
     use egui::{FontData, FontDefinitions, FontFamily};
     let mut fonts = FontDefinitions::default();
+    let mut failed = None;
+    let mut custom = |name: &str, path: Option<&Path>, fonts: &mut FontDefinitions| {
+        let Some(path) = path else {
+            return false;
+        };
+        match std::fs::read(path) {
+            Ok(bytes)
+                if bytes.len() > 4
+                    && matches!(&bytes[..4], [0, 1, 0, 0] | b"OTTO" | b"true" | b"ttcf") =>
+            {
+                fonts.font_data.insert(
+                    name.to_owned(),
+                    std::sync::Arc::new(FontData::from_owned(bytes)),
+                );
+                true
+            }
+            Ok(_) => {
+                failed = Some(format!("{} — не файл шрифта TTF/OTF", path.display()));
+                false
+            }
+            Err(e) => {
+                failed = Some(format!("{}: {e}", path.display()));
+                false
+            }
+        }
+    };
+    let own_ui = custom("user-ui", ui_font, &mut fonts);
+    let own_code = custom("user-code", code_font, &mut fonts);
     let mut add = |name: &str, bytes: &'static [u8]| {
         fonts.font_data.insert(
             name.to_owned(),
@@ -110,20 +190,37 @@ pub fn install_fonts(ctx: &egui::Context) {
         list.extend(fallback.iter().cloned());
         fonts.families.insert(family, list);
     };
-    with(FontFamily::Proportional, &["inter"]);
-    with(medium(), &["inter-medium", "inter"]);
-    with(FontFamily::Monospace, &["jbmono", "Hack"]);
+    if own_ui {
+        with(FontFamily::Proportional, &["user-ui", "inter"]);
+        with(medium(), &["user-ui", "inter"]);
+    } else {
+        with(FontFamily::Proportional, &["inter"]);
+        with(medium(), &["inter-medium", "inter"]);
+    }
+    if own_code {
+        with(FontFamily::Monospace, &["user-code", "jbmono", "Hack"]);
+    } else {
+        with(FontFamily::Monospace, &["jbmono", "Hack"]);
+    }
     ctx.set_fonts(fonts);
+    failed.map_or(Ok(()), Err)
 }
 
-pub fn apply(ctx: &egui::Context, dark: bool, accent: usize) {
-    let p = palette(dark, accent);
+pub fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
+
+pub fn apply(ctx: &egui::Context, p: &Palette, dark: bool, radius: u8, ui_size: f32) {
     let mut v = if dark {
         Visuals::dark()
     } else {
         Visuals::light()
     };
-    let radius = CornerRadius::same(7);
+    let window_radius = CornerRadius::same(radius.saturating_add(3));
+    let menu_radius = CornerRadius::same(radius.saturating_add(1));
+    let radius = CornerRadius::same(radius);
+    let grip = blend(p.border, p.accent, 0.45);
 
     v.panel_fill = p.mantle;
     v.window_fill = p.mantle;
@@ -134,8 +231,10 @@ pub fn apply(ctx: &egui::Context, dark: bool, accent: usize) {
     v.hyperlink_color = p.accent;
     v.warn_fg_color = p.warn;
     v.window_stroke = Stroke::new(1.0, p.border);
-    v.window_corner_radius = CornerRadius::same(10);
-    v.menu_corner_radius = CornerRadius::same(8);
+    v.window_corner_radius = window_radius;
+    v.menu_corner_radius = menu_radius;
+    v.window_shadow.color = Color32::from_black_alpha(if dark { 110 } else { 45 });
+    v.popup_shadow.color = Color32::from_black_alpha(if dark { 90 } else { 35 });
     v.selection.bg_fill = p.selection;
     v.selection.stroke = Stroke::new(1.0, p.accent);
     v.text_cursor.stroke = Stroke::new(2.0, p.accent);
@@ -155,14 +254,14 @@ pub fn apply(ctx: &egui::Context, dark: bool, accent: usize) {
     v.widgets.hovered.bg_fill = p.surface_hover;
     v.widgets.hovered.weak_bg_fill = p.surface;
     v.widgets.hovered.bg_stroke = Stroke::NONE;
-    v.widgets.hovered.fg_stroke = Stroke::new(1.0, p.text);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, grip);
     v.widgets.hovered.corner_radius = radius;
     v.widgets.hovered.expansion = 0.0;
 
     v.widgets.active.bg_fill = p.surface_hover;
     v.widgets.active.weak_bg_fill = p.surface_hover;
     v.widgets.active.bg_stroke = Stroke::NONE;
-    v.widgets.active.fg_stroke = Stroke::new(1.0, p.text);
+    v.widgets.active.fg_stroke = Stroke::new(1.5, p.accent);
     v.widgets.active.corner_radius = radius;
     v.widgets.active.expansion = 0.0;
 
@@ -179,11 +278,11 @@ pub fn apply(ctx: &egui::Context, dark: bool, accent: usize) {
         s.spacing.menu_margin = egui::Margin::same(6);
         s.spacing.interact_size.y = 26.0;
         for (style, size) in [
-            (egui::TextStyle::Body, 13.5),
-            (egui::TextStyle::Button, 13.5),
-            (egui::TextStyle::Small, 11.5),
-            (egui::TextStyle::Heading, 18.0),
-            (egui::TextStyle::Monospace, 13.0),
+            (egui::TextStyle::Body, ui_size),
+            (egui::TextStyle::Button, ui_size),
+            (egui::TextStyle::Small, ui_size - 2.0),
+            (egui::TextStyle::Heading, ui_size + 4.5),
+            (egui::TextStyle::Monospace, ui_size - 0.5),
         ] {
             let family = if style == egui::TextStyle::Monospace {
                 egui::FontFamily::Monospace

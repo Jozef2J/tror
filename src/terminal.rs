@@ -101,7 +101,6 @@ pub enum TermEvent {
 }
 
 pub struct Terminal {
-    pub visible: bool,
     pub focused: bool,
     shell: Option<Shell>,
     connected: bool,
@@ -115,9 +114,8 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    pub fn new(visible: bool) -> Self {
+    pub fn new() -> Self {
         Self {
-            visible,
             focused: false,
             shell: None,
             connected: false,
@@ -283,7 +281,7 @@ impl Terminal {
                         }
                         None => {
                             ui.label(
-                                RichText::new("создайте профиль в панели удалённых файлов (F8)")
+                                RichText::new("создайте профиль в панели «Удалённые хосты» (F8)")
                                     .color(pal.faint)
                                     .size(12.5),
                             );
@@ -507,7 +505,7 @@ mod tests {
 
     #[test]
     fn output_is_parsed_into_cells_with_colors() {
-        let mut t = Terminal::new(true);
+        let mut t = Terminal::new();
         t.parser.process(b"ok \x1b[31mred\x1b[0m\r\n$ ");
         let screen = t.parser.screen();
         assert_eq!(screen.cell(0, 0).unwrap().contents(), "o");

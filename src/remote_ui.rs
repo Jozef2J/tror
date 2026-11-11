@@ -54,7 +54,7 @@ struct Saver {
 pub struct RemotePanel {
     pub visible: bool,
     pub log: Vec<(String, bool)>,
-    store: Store,
+    pub store: Store,
     selected: usize,
     conn: Option<Connection>,
     connected: bool,
@@ -261,13 +261,12 @@ impl RemotePanel {
     }
 
     fn push_log(&mut self, text: String, error: bool) {
-        if text.is_empty() {
-            return;
-        }
-        self.log.push((text, error));
-        if self.log.len() > MAX_LOG {
-            self.log.drain(..MAX_LOG / 4);
-        }
+        crate::trace::line(text, error);
+    }
+
+    pub fn site_url(&self, profile: &str, path: &str) -> Option<String> {
+        let profile = self.store.profiles.iter().find(|p| p.name == profile)?;
+        crate::preview::remote_url(&profile.url, &profile.directory, path)
     }
 
     fn send(&mut self, cmd: Cmd, busy: impl Into<String>) {
@@ -441,6 +440,10 @@ impl RemotePanel {
     }
 
     pub fn poll(&mut self) -> Vec<PanelEvent> {
+        self.log.extend(crate::trace::take());
+        if self.log.len() > MAX_LOG {
+            self.log.drain(..MAX_LOG / 4);
+        }
         let mut out = Vec::new();
         self.poll_saver(&mut out);
         if let Some(job) = &self.search_job {
@@ -616,7 +619,7 @@ impl RemotePanel {
             let button_w = 96.0;
             ui.add_enabled_ui(!active, |ui| {
                 ComboBox::from_id_salt("tror_profile")
-                    .width((ui.available_width() - button_w - 8.0).max(60.0))
+                    .width((ui.available_width() - button_w - 30.0).max(60.0))
                     .selected_text(self.store.profiles[self.selected].name.clone())
                     .show_ui(ui, |ui| {
                         for (i, profile) in self.store.profiles.iter().enumerate() {
@@ -1411,6 +1414,13 @@ impl RemotePanel {
                             ui.add(
                                 TextEdit::singleline(&mut p.directory)
                                     .hint_text("домашняя папка")
+                                    .desired_width(wide),
+                            );
+                            ui.end_row();
+                            ui.label("Адрес сайта");
+                            ui.add(
+                                TextEdit::singleline(&mut p.url)
+                                    .hint_text("https://example.ru — для предпросмотра (F12)")
                                     .desired_width(wide),
                             );
                             ui.end_row();

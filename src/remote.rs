@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::trace;
+
 const MASK: &[u8] = b"tror-profile-mask";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
 const IO_TIMEOUT_MS: u32 = 30_000;
@@ -37,7 +39,7 @@ impl Protocol {
     }
 }
 
-mod masked {
+pub mod masked {
     use super::MASK;
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -85,6 +87,7 @@ pub struct Profile {
     pub password: String,
     pub key_file: String,
     pub directory: String,
+    pub url: String,
 }
 
 impl Profile {
@@ -96,7 +99,7 @@ impl Profile {
         }
     }
 
-    fn address(&self) -> String {
+    pub fn address(&self) -> String {
         format!("{}:{}", self.host.trim(), self.port)
     }
 }
@@ -109,6 +112,7 @@ pub struct Store {
     pub hide_size: bool,
     pub show_date: bool,
     pub search_excludes: Option<String>,
+    pub databases: Vec<crate::db::DbProfile>,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -261,25 +265,60 @@ fn open_session(
     session
         .handshake()
         .map_err(|e| format!("ошибка SSH: {e}"))?;
+    if let Some(banner) = session.banner() {
+        trace::line(format!("[SSH] remote version: {}", banner.trim()), false);
+    }
+    let method = |kind| session.methods(kind).unwrap_or("-").to_owned();
+    trace::line(
+        format!(
+            "[SSH] kex: {}; host key: {}; cipher: {} / {}; mac: {} / {}",
+            method(ssh2::MethodType::Kex),
+            method(ssh2::MethodType::HostKey),
+            method(ssh2::MethodType::CryptCs),
+            method(ssh2::MethodType::CryptSc),
+            method(ssh2::MethodType::MacCs),
+            method(ssh2::MethodType::MacSc),
+        ),
+        false,
+    );
     let print = fingerprint(&session).ok_or("сервер не прислал ключ")?;
     let mut accepted = None;
-    if known != Some(print.as_str()) {
+    if known == Some(print.as_str()) {
+        trace::line(format!("[SSH] host key SHA256:{print} (known)"), false);
+    } else {
+        let state = if known.is_some() { "CHANGED" } else { "new" };
+        trace::line(
+            format!("[SSH] host key SHA256:{print} ({state}), waiting for confirmation"),
+            known.is_some(),
+        );
         if !confirm(&print, known.is_some()) {
+            trace::line("[SSH] host key rejected", true);
             return Err("ключ сервера не подтверждён".into());
         }
+        trace::line("[SSH] host key accepted", false);
         accepted = Some(print);
     }
     let user = profile.user.trim();
+    if let Ok(methods) = session.auth_methods(user) {
+        trace::line(format!("[SSH] auth methods: {methods}"), false);
+    }
     let key = profile.key_file.trim();
     let auth = if !key.is_empty() {
+        trace::line(format!("[SSH] userauth publickey ({key}) as {user}"), false);
         let phrase = (!profile.password.is_empty()).then_some(profile.password.as_str());
         session.userauth_pubkey_file(user, None, Path::new(key), phrase)
     } else if !profile.password.is_empty() {
+        trace::line(format!("[SSH] userauth password as {user}"), false);
         session.userauth_password(user, &profile.password)
     } else {
+        trace::line(format!("[SSH] userauth agent as {user}"), false);
         session.userauth_agent(user)
     };
+    if let Err(e) = &auth {
+        trace::line(format!("[SSH] {e}"), true);
+    }
     auth.map_err(|e| format!("вход не выполнен: {e}"))?;
+    trace::line("[SSH] authenticated", false);
     Ok((session, accepted))
 }
 
@@ -365,6 +404,13 @@ fn run_shell(
     channel
         .shell()
         .map_err(|e| format!("сервер не запустил оболочку: {e}"))?;
+    trace::line(
+        format!(
+            "[SSH] channel session: pty xterm-256color {}x{}, shell started",
+            size.0, size.1
+        ),
+        false,
+    );
     let _ = events.send(ShellEvent::Connected { fingerprint });
     wake();
     session.set_blocking(false);
@@ -599,12 +645,18 @@ impl Backend {
 fn describe(cmd: &Cmd) -> String {
     match cmd {
         Cmd::TrustHost(_) => String::new(),
-        Cmd::List(path) => format!("Чтение каталога {path}"),
-        Cmd::Download(path) => format!("Скачивание {path}"),
-        Cmd::Upload { path, data, .. } => format!("Загрузка {path} ({} байт)", data.len()),
-        Cmd::Mkdir(path) => format!("Создание папки {path}"),
-        Cmd::Rename(from, to) => format!("Перемещение {from} → {to}"),
-        Cmd::Delete { path, .. } => format!("Удаление {path}"),
+        Cmd::List(path) => format!("[SFTP] opendir/readdir {path}"),
+        Cmd::Download(path) => format!("[SFTP] open (read) {path}"),
+        Cmd::Upload { path, data, .. } => {
+            format!(
+                "[SFTP] open (write, create, trunc) {path}, {} bytes",
+                data.len()
+            )
+        }
+        Cmd::Mkdir(path) => format!("[SFTP] mkdir {path}"),
+        Cmd::Rename(from, to) => format!("[SFTP] rename {from} -> {to}"),
+        Cmd::Delete { path, dir: true } => format!("[SFTP] rmdir (recursive) {path}"),
+        Cmd::Delete { path, .. } => format!("[SFTP] unlink {path}"),
     }
 }
 
@@ -613,7 +665,7 @@ fn execute(backend: &mut Backend, cmd: &Cmd) -> Result<(Event, String), String> 
         Cmd::TrustHost(_) => (Event::Log(String::new(), false), String::new()),
         Cmd::List(path) => {
             let entries = backend.list(path)?;
-            let summary = format!("объектов: {}", entries.len());
+            let summary = format!("{} entries", entries.len());
             (
                 Event::Listing {
                     path: path.clone(),
@@ -624,7 +676,7 @@ fn execute(backend: &mut Backend, cmd: &Cmd) -> Result<(Event, String), String> 
         }
         Cmd::Download(path) => {
             let data = backend.download(path)?;
-            let summary = format!("получено байт: {}", data.len());
+            let summary = format!("{} bytes read", data.len());
             (
                 Event::Downloaded {
                     path: path.clone(),
@@ -640,24 +692,21 @@ fn execute(backend: &mut Backend, cmd: &Cmd) -> Result<(Event, String), String> 
                     path: path.clone(),
                     doc: *doc,
                 },
-                "файл записан".into(),
+                "written".into(),
             )
         }
         Cmd::Mkdir(path) => {
             backend.mkdir(path)?;
-            (Event::Changed(parent(path)), "готово".into())
+            (Event::Changed(parent(path)), "ok".into())
         }
         Cmd::Rename(from, to) => {
             backend.rename(from, to)?;
-            (Event::Changed(parent(to)), "готово".into())
+            (Event::Changed(parent(to)), "ok".into())
         }
         Cmd::Delete { path, dir } => {
             let mut removed = 0;
             backend.delete_tree(path, *dir, &mut removed)?;
-            (
-                Event::Changed(parent(path)),
-                format!("удалено объектов: {removed}"),
-            )
+            (Event::Changed(parent(path)), format!("{removed} removed"))
         }
     })
 }
@@ -673,7 +722,12 @@ fn serve(
         let _ = events.send(event);
         wake();
     };
-    let log = |text: String, error: bool| send(Event::Log(text, error));
+    let log = |text: String, error: bool| {
+        trace::line(text, error);
+        wake();
+    };
+    let sftp = profile.protocol == Protocol::Sftp;
+    let tag = if sftp { "[SFTP]" } else { "[FTP]" };
     let mut known = known;
     let open = |known: Option<&str>| match profile.protocol {
         Protocol::Sftp => connect_sftp(&profile, known, &events, &cmds, wake),
@@ -681,9 +735,8 @@ fn serve(
     };
     log(
         format!(
-            "Подключение к {} ({}, пользователь {})",
+            "{tag} connecting to {} as {}",
             profile.address(),
-            profile.protocol.label(),
             profile.user.trim()
         ),
         false,
@@ -691,7 +744,7 @@ fn serve(
     let (mut backend, home, fingerprint) = match open(known.as_deref()) {
         Ok(ok) => ok,
         Err(e) => {
-            log(format!("Не удалось подключиться: {e}"), true);
+            log(format!("{tag} connection failed: {e}"), true);
             send(Event::Closed(e));
             return;
         }
@@ -699,7 +752,7 @@ fn serve(
     if fingerprint.is_some() {
         known = fingerprint.clone();
     }
-    log(format!("Подключено, домашняя папка {home}"), false);
+    log(format!("{tag} connected, home directory {home}"), false);
     let start = profile.directory.trim();
     send(Event::Connected {
         home: if start.is_empty() {
@@ -716,7 +769,7 @@ fn serve(
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if alive && backend.ping().is_err() {
                     alive = false;
-                    log("Сервер закрыл простаивающее соединение".into(), false);
+                    log(format!("{tag} idle connection closed by server"), false);
                 }
                 continue;
             }
@@ -725,14 +778,19 @@ fn serve(
         if matches!(cmd, Cmd::TrustHost(_)) {
             continue;
         }
-        log(describe(&cmd), false);
+        if sftp {
+            log(describe(&cmd), false);
+        }
         let mut result = if alive {
             execute(&mut backend, &cmd)
         } else {
-            Err("соединение закрыто".into())
+            Err("connection closed".into())
         };
         if result.is_err() && (!alive || backend.ping().is_err()) {
-            log("Соединение потеряно, подключаюсь заново".into(), false);
+            if let Err(e) = &result {
+                log(format!("{tag} {e}"), true);
+            }
+            log(format!("{tag} connection lost, reconnecting"), false);
             match open(known.as_deref()) {
                 Ok((fresh, _, fingerprint)) => {
                     backend = fresh;
@@ -740,11 +798,14 @@ fn serve(
                     if fingerprint.is_some() {
                         known = fingerprint;
                     }
-                    log("Подключено заново, повторяю операцию".into(), false);
+                    log(format!("{tag} reconnected, retrying"), false);
+                    if sftp {
+                        log(describe(&cmd), false);
+                    }
                     result = execute(&mut backend, &cmd);
                 }
                 Err(e) => {
-                    log(format!("Не удалось подключиться заново: {e}"), true);
+                    log(format!("{tag} reconnect failed: {e}"), true);
                     send(Event::Closed(e));
                     return;
                 }
@@ -752,16 +813,18 @@ fn serve(
         }
         match result {
             Ok((event, summary)) => {
-                log(summary, false);
+                if sftp {
+                    log(format!("[SFTP] {summary}"), false);
+                }
                 send(event);
             }
             Err(e) => {
-                log(format!("Ошибка: {e}"), true);
+                log(format!("{tag} {e}"), true);
                 send(Event::Error(e));
             }
         }
     }
-    log("Отключено".into(), false);
+    log(format!("{tag} disconnected"), false);
 }
 
 pub struct SearchParams {
@@ -881,7 +944,9 @@ fn search_remote_shell(
     let Ok(mut channel) = session.channel_session() else {
         return Ok(None);
     };
-    if channel.exec(&search_command(params)).is_err() {
+    let command = search_command(params);
+    trace::line(format!("[SSH] exec: {command}"), false);
+    if channel.exec(&command).is_err() {
         return Ok(None);
     }
     session.set_blocking(false);
@@ -1080,6 +1145,138 @@ pub fn search(
     SearchJob { rx, cancel }
 }
 
+pub struct Tunnel {
+    pub port: u16,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Tunnel {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+fn forward(
+    session: &ssh2::Session,
+    mut stream: TcpStream,
+    host: &str,
+    port: u16,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    session.set_blocking(true);
+    let mut channel = session
+        .channel_direct_tcpip(host, port, None)
+        .map_err(|e| e.to_string())?;
+    session.set_blocking(false);
+    stream.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let limit = 1024 * 1024;
+    let (mut up, mut down): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
+    let mut buf = [0u8; 32 * 1024];
+    let mut pinged = std::time::Instant::now();
+    let blocked = |e: &std::io::Error| e.kind() == std::io::ErrorKind::WouldBlock;
+    let result = loop {
+        if stop.load(Ordering::Relaxed) {
+            break Ok(());
+        }
+        let mut active = false;
+        if up.len() < limit {
+            match stream.read(&mut buf) {
+                Ok(0) => break Ok(()),
+                Ok(n) => {
+                    up.extend_from_slice(&buf[..n]);
+                    active = true;
+                }
+                Err(e) if blocked(&e) => {}
+                Err(e) => break Err(e.to_string()),
+            }
+        }
+        if !up.is_empty() {
+            match channel.write(&up) {
+                Ok(n) => {
+                    up.drain(..n);
+                    active |= n > 0;
+                }
+                Err(e) if blocked(&e) => {}
+                Err(e) => break Err(e.to_string()),
+            }
+        }
+        if down.len() < limit {
+            match channel.read(&mut buf) {
+                Ok(0) if channel.eof() => break Ok(()),
+                Ok(n) => {
+                    down.extend_from_slice(&buf[..n]);
+                    active |= n > 0;
+                }
+                Err(e) if blocked(&e) => {}
+                Err(e) => break Err(e.to_string()),
+            }
+        }
+        if !down.is_empty() {
+            match stream.write(&down) {
+                Ok(n) => {
+                    down.drain(..n);
+                    active |= n > 0;
+                }
+                Err(e) if blocked(&e) => {}
+                Err(e) => break Err(e.to_string()),
+            }
+        }
+        if !active {
+            if pinged.elapsed() > KEEPALIVE {
+                pinged = std::time::Instant::now();
+                let _ = session.keepalive_send();
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    session.set_blocking(true);
+    let _ = channel.close();
+    result
+}
+
+pub fn tunnel(
+    profile: &Profile,
+    known: Option<&str>,
+    host: &str,
+    port: u16,
+) -> Result<Tunnel, String> {
+    let (session, _) = open_session(profile, known, &|_, _| false).map_err(|e| {
+        format!("{e} (для туннеля сначала подключитесь к хосту «{}» в панели хостов и подтвердите его ключ)", profile.name)
+    })?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let local = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let host = host.to_owned();
+    trace::line(
+        format!("[SSH] direct-tcpip tunnel 127.0.0.1:{local} -> {host}:{port}"),
+        false,
+    );
+    std::thread::spawn(move || {
+        let mut pinged = std::time::Instant::now();
+        while !flag.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    if let Err(e) = forward(&session, stream, &host, port, &flag) {
+                        trace::line(format!("[SSH] tunnel: {e}"), true);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if pinged.elapsed() > KEEPALIVE {
+                        pinged = std::time::Instant::now();
+                        let _ = session.keepalive_send();
+                    }
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+                Err(_) => break,
+            }
+        }
+        trace::line(format!("[SSH] tunnel 127.0.0.1:{local} closed"), false);
+    });
+    Ok(Tunnel { port: local, stop })
+}
+
 pub fn connect(
     profile: &Profile,
     known: Option<String>,
@@ -1126,6 +1323,7 @@ mod tests {
             password: "s3cret пароль".into(),
             key_file: String::new(),
             directory: "/www".into(),
+            url: "https://example.org".into(),
         });
         store
             .known_hosts
@@ -1183,6 +1381,7 @@ mod tests {
             password: "secret".into(),
             key_file: String::new(),
             directory: String::new(),
+            url: String::new(),
         };
         let conn = connect(&profile, None, || {});
         let next = || loop {

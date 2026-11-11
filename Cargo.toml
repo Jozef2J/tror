@@ -1,6 +1,6 @@
 [package]
 name = "tror"
-version = "0.8.0"
+version = "0.9.0"
 description = "Быстрый компактный редактор кода"
 edition = "2024"
 
@@ -8,12 +8,16 @@ edition = "2024"
 chardetng = "1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "glow", "persistence", "wayland", "x11"] }
+egui_stack = { version = "0.25.8", features = ["serde"] }
 encoding_rs = "0.8.44"
+log = "0.4.35"
+mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust"] }
 regex = "1.13.1"
 rfd = "0.18.0"
 ropey = { version = "1", default-features = false, features = ["simd"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+similar = "3.2.1"
 ssh2 = { version = "0.9.7", features = ["vendored-openssl"] }
 suppaftp = "12.2.1"
 syntect = { version = "5.3.0", default-features = false, features = ["default-onig"] }
@@ -29,3 +33,6 @@ strip = true
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+[dev-dependencies]
+ron = "0.12.3"

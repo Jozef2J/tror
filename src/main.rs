@@ -2,14 +2,20 @@
 
 mod app;
 mod complete;
+mod db;
+mod diff;
+mod dock;
 mod document;
 mod editor;
 mod highlight;
+mod prefs;
+mod preview;
 mod remote;
 mod remote_ui;
 mod search;
 mod terminal;
 mod theme;
+mod trace;
 
 use eframe::egui;
 
