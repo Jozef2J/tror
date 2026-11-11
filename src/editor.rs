@@ -495,6 +495,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     }
     ui.data_mut(|d| d.insert_temp(id, state));
 
+    let lines = doc.line_count();
     let max_y = (lines as f64 * row - view_h + row * 3.0).max(0.0);
     let cw = char_w as f64;
     let view_w = m.view_w as f64;

@@ -585,4 +585,69 @@ mod tests {
         let edit = t.elapsed();
         println!("lines={} full={full:?} edit={edit:?}", doc.line_count());
     }
+
+    #[test]
+    fn random_edits_undo_redo_never_panic_and_stay_consistent() {
+        let syn = Syntaxes::new();
+        let mut seed = 0x2545F4914F6CDD1Du64;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n.max(1) as u64) as usize
+        };
+        let pieces = [
+            "x",
+            "\n",
+            "<?php\n$a = 1;\n",
+            "/* ",
+            " */",
+            "'str",
+            "\n\n\n",
+            "function f() {\n\treturn 1;\n}\n",
+            "привет",
+            "<div class=\"a\">\n</div>",
+            "?>\n",
+            "\t",
+        ];
+        for round in 0..40 {
+            let mut doc = crate::document::Document::from_text("<?php\necho 1;\n");
+            doc.syntax = "PHP".into();
+            for step in 0..120 {
+                match next(10) {
+                    0..=3 => {
+                        let at = next(doc.len() + 1);
+                        doc.move_to(at, false);
+                        doc.insert_text(pieces[next(pieces.len())]);
+                    }
+                    4 => {
+                        let a = next(doc.len() + 1);
+                        let b = next(doc.len() + 1);
+                        doc.move_to(a, false);
+                        doc.move_to(b, true);
+                        doc.insert_text(pieces[next(pieces.len())]);
+                    }
+                    5 => doc.backspace(next(2) == 0),
+                    6 => doc.delete(next(2) == 0),
+                    7 | 8 => doc.undo(),
+                    _ => doc.redo(),
+                }
+                assert!(
+                    doc.sel.0 <= doc.len() && doc.sel.1 <= doc.len(),
+                    "{round}/{step}"
+                );
+                let budget = (next(3) == 0).then_some(Duration::ZERO);
+                if next(4) != 0 {
+                    doc.hl
+                        .process(&syn, &doc.rope, "PHP", true, doc.version, 0..50, budget);
+                }
+            }
+            run(&mut doc.hl, &syn, &doc.rope, "PHP");
+            assert_eq!(
+                all(&doc.hl, &doc.rope),
+                reference(&syn, &doc.rope, "PHP"),
+                "round {round}"
+            );
+        }
+    }
 }
