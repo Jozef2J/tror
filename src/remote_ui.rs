@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
-use eframe::egui::{
-    self, Align, Button, ComboBox, Key, Layout, RichText, ScrollArea, Sense, TextEdit, Ui,
-};
+use eframe::egui::{self, Button, ComboBox, Key, RichText, ScrollArea, Sense, TextEdit, Ui};
 
 use crate::app::{dialog, dialog_button, size_label};
 use crate::remote::{self, Cmd, Connection, Entry, Event, Profile, Protocol, Store};
@@ -31,6 +29,7 @@ enum Prompt {
 struct ProfileEditor {
     drafts: Vec<Profile>,
     index: usize,
+    reveal: bool,
 }
 
 pub struct RemotePanel {
@@ -253,24 +252,14 @@ impl RemotePanel {
         self.editor = Some(ProfileEditor {
             index: self.selected.min(drafts.len() - 1),
             drafts,
+            reveal: false,
         });
     }
 
     pub fn ui(&mut self, ui: &mut Ui, pal: &Palette) {
         let ctx = ui.ctx().clone();
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("Удалённые файлы")
-                    .color(pal.subtext)
-                    .size(12.5),
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button("Профили").clicked() {
-                    self.open_editor();
-                }
-            });
-        });
+        ui.take_available_width();
+        ui.add_space(8.0);
         if self.store.profiles.is_empty() {
             ui.add_space(12.0);
             ui.label(RichText::new("Подключений пока нет.").color(pal.subtext));
@@ -284,6 +273,7 @@ impl RemotePanel {
         }
         self.selected = self.selected.min(self.store.profiles.len() - 1);
         let active = self.conn.is_some();
+        let mut edit = false;
         ui.horizontal(|ui| {
             let label = if active {
                 "Отключить"
@@ -300,6 +290,10 @@ impl RemotePanel {
                             let text = format!("{}  ·  {}", profile.name, profile.protocol.label());
                             ui.selectable_value(&mut self.selected, i, text);
                         }
+                        ui.separator();
+                        if ui.button("Настроить профили…").clicked() {
+                            edit = true;
+                        }
                     });
             });
             if ui
@@ -313,6 +307,10 @@ impl RemotePanel {
                 }
             }
         });
+
+        if edit {
+            self.open_editor();
+        }
 
         if self.connected {
             ui.horizontal(|ui| {
@@ -719,11 +717,20 @@ impl RemotePanel {
                             ui.add(TextEdit::singleline(&mut p.user).desired_width(wide));
                             ui.end_row();
                             ui.label("Пароль");
-                            ui.add(
-                                TextEdit::singleline(&mut p.password)
-                                    .password(true)
-                                    .desired_width(wide),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    TextEdit::singleline(&mut p.password)
+                                        .password(!editor.reveal)
+                                        .desired_width(wide - 88.0),
+                                );
+                                let label = if editor.reveal { "Скрыть" } else { "Показать" };
+                                if ui
+                                    .add_sized([80.0, 22.0], Button::new(label))
+                                    .clicked()
+                                {
+                                    editor.reveal = !editor.reveal;
+                                }
+                            });
                             ui.end_row();
                             if p.protocol == Protocol::Sftp {
                                 ui.label("Файл ключа");

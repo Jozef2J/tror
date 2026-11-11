@@ -1267,6 +1267,28 @@ impl eframe::App for TrorApp {
             }
         });
 
+        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
+            let screen = ctx.content_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::unique("tror_drop"),
+            ));
+            painter.rect_filled(screen, 0.0, pal.crust.gamma_multiply(0.85));
+            painter.rect_stroke(
+                screen.shrink(14.0),
+                14.0,
+                Stroke::new(2.0, pal.accent),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                "Отпустите, чтобы открыть файл",
+                FontId::proportional(22.0),
+                pal.text,
+            );
+        }
+
         self.goto_modal(&ctx, &pal);
         self.confirm_modal(&ctx);
         self.remote.dialogs(&ctx, &pal);
