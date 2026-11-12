@@ -20,9 +20,10 @@ pub struct Palette {
     pub match_bg: Color32,
     pub match_current: Color32,
     pub warn: Color32,
+    pub smart: Color32,
 }
 
-pub const PARTS: [(&str, &str); 15] = [
+pub const PARTS: [(&str, &str); 16] = [
     ("base", "Фон редактора"),
     ("mantle", "Фон панелей и меню"),
     ("crust", "Фон заголовков и наведения"),
@@ -38,6 +39,7 @@ pub const PARTS: [(&str, &str); 15] = [
     ("match_bg", "Найденные совпадения"),
     ("match_current", "Текущее совпадение"),
     ("warn", "Предупреждения"),
+    ("smart", "Совпадения с выделенным"),
 ];
 
 impl Palette {
@@ -57,7 +59,8 @@ impl Palette {
             11 => &mut self.selection,
             12 => &mut self.match_bg,
             13 => &mut self.match_current,
-            _ => &mut self.warn,
+            14 => &mut self.warn,
+            _ => &mut self.smart,
         }
     }
 }
@@ -104,6 +107,7 @@ fn base_palette(dark: bool) -> Palette {
             match_bg: rgb(0x4a4326),
             match_current: rgb(0x8a6a1f),
             warn: rgb(0xf2c46d),
+            smart: rgb(0x29473a),
         }
     } else {
         Palette {
@@ -122,6 +126,7 @@ fn base_palette(dark: bool) -> Palette {
             match_bg: rgb(0xfbe9a8),
             match_current: rgb(0xf5c542),
             warn: rgb(0xc9811a),
+            smart: rgb(0xc9efcf),
         }
     }
 }

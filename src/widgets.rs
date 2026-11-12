@@ -2,6 +2,19 @@ use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, TextEdit,
 
 use crate::theme::Palette;
 
+pub fn wrapped_row<R>(ui: &mut Ui, margin: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(margin as i8, 0))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                add(ui)
+            })
+            .inner
+        })
+        .inner
+}
+
 pub fn port_field(ui: &mut Ui, port: &mut u16, width: f32) -> egui::Response {
     let id = ui.scope_id().with(("tror_port", port as *const u16 as usize));
     let mut text = ui

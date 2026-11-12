@@ -641,6 +641,139 @@ fn handle_events(ui: &Ui, doc: &mut Document, m: &Metrics) -> Typed {
     typed
 }
 
+fn copy_selection(ui: &Ui, doc: &mut Document, cut: bool) {
+    let text = if doc.multi() {
+        let text = doc.texts().join("\n");
+        remember_block(Some(text.clone()));
+        text
+    } else {
+        remember_block(None);
+        doc.selected_text()
+    };
+    ui.ctx().copy_text(text);
+    if cut {
+        doc.insert_text("");
+    }
+}
+
+fn sentence_case(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut start = true;
+    for c in text.chars() {
+        if start && c.is_alphabetic() {
+            out.extend(c.to_uppercase());
+            start = false;
+        } else {
+            out.extend(c.to_lowercase());
+        }
+        if matches!(c, '.' | '!' | '?' | '\n') {
+            start = true;
+        }
+    }
+    out
+}
+
+fn title_case(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut start = true;
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            if start {
+                out.extend(c.to_uppercase());
+            } else {
+                out.extend(c.to_lowercase());
+            }
+            start = false;
+        } else {
+            out.push(c);
+            start = true;
+        }
+    }
+    out
+}
+
+fn invert_case(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            if c.is_uppercase() {
+                c.to_lowercase().collect::<Vec<_>>()
+            } else {
+                c.to_uppercase().collect::<Vec<_>>()
+            }
+        })
+        .collect()
+}
+
+fn context_items(ui: &mut Ui, doc: &mut Document, id: Id) {
+    ui.set_min_width(250.0);
+    let cmd = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
+    let keys = |k: &str| format!("{cmd}{k}");
+    let selected = doc.cursors().iter().any(|(a, h)| a != h);
+    let item = |ui: &mut Ui, text: &str, shortcut: String, enabled: bool| {
+        let clicked = ui
+            .add_enabled(enabled, egui::Button::new(text).shortcut_text(shortcut))
+            .clicked();
+        if clicked {
+            ui.close();
+        }
+        clicked
+    };
+    if item(ui, "Вырезать", keys("X"), selected) {
+        copy_selection(ui, doc, true);
+    }
+    if item(ui, "Копировать", keys("C"), selected) {
+        copy_selection(ui, doc, false);
+    }
+    if item(ui, "Вставить", keys("V"), true) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+        ui.memory_mut(|mem| mem.request_focus(id));
+    }
+    if item(ui, "Удалить", "Delete".into(), true) {
+        if selected {
+            doc.insert_text("");
+        } else {
+            doc.delete(false);
+        }
+    }
+    ui.separator();
+    if item(ui, "Выделить всё", keys("A"), true) {
+        doc.select_all();
+    }
+    ui.separator();
+    if item(ui, "Закомментировать / раскомментировать", keys("/"), true) {
+        doc.toggle_comment();
+    }
+    if item(ui, "Дублировать строку", String::new(), true) {
+        doc.duplicate_lines();
+    }
+    if item(ui, "Удалить строку", String::new(), true) {
+        doc.delete_lines();
+    }
+    if item(ui, "Увеличить отступ", "Tab".into(), true) {
+        doc.indent();
+    }
+    if item(ui, "Уменьшить отступ", "Shift+Tab".into(), true) {
+        doc.outdent();
+    }
+    ui.separator();
+    ui.menu_button("Регистр", |ui| {
+        ui.set_min_width(220.0);
+        let cases: [(&str, fn(&str) -> String); 5] = [
+            ("ПРОПИСНЫЕ", |t| t.to_uppercase()),
+            ("строчные", |t| t.to_lowercase()),
+            ("Как в предложении", sentence_case),
+            ("Каждое Слово С Заглавной", title_case),
+            ("иНВЕРСИЯ рЕГИСТРА", invert_case),
+        ];
+        for (label, f) in cases {
+            if ui.button(label).clicked() {
+                doc.transform(f);
+                ui.close();
+            }
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scrollbar(
     ui: &Ui,
@@ -954,6 +1087,22 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         state.block = None;
     }
     ui.data_mut(|d| d.insert_temp(id, state));
+    if response.secondary_clicked()
+        && let Some(p) = pointer
+    {
+        let pos = char_at(ui, doc, p);
+        let inside = doc.cursors().iter().any(|(a, h)| {
+            let (lo, hi) = (*a.min(h), *a.max(h));
+            lo < hi && pos >= lo && pos <= hi
+        });
+        if !inside {
+            doc.clear_extra();
+            doc.move_to(pos, false);
+        }
+        complete.close();
+        ui.memory_mut(|mem| mem.request_focus(id));
+    }
+    response.context_menu(|ui| context_items(ui, doc, id));
 
     let lines = doc.line_count();
     let cw = char_w as f64;
@@ -1132,6 +1281,9 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         .map(|(a, h)| (*a.min(h), *a.max(h)))
         .collect();
     let extra_heads: Vec<usize> = doc.extra.iter().map(|c| c.1).collect();
+    let smart = (!doc.multi() && !sel.is_empty() && sel.len() <= 200)
+        .then(|| doc.selected_text())
+        .filter(|t| !t.contains('\n') && !t.trim().is_empty());
 
     for (line, offset) in visible {
         let top64 = origin_y as f64 + offset;
@@ -1200,6 +1352,23 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                         pal.match_bg
                     };
                     fill(a, b, 0.0, 2.0, color);
+                }
+            }
+        }
+        if let Some(needle) = &smart
+            && layout.len >= needle.chars().count()
+            && layout.len <= 20_000
+        {
+            let text: String = doc.rope.slice(line_start..line_end).to_string();
+            let width = needle.chars().count();
+            let mut chars_before = 0;
+            let mut last_byte = 0;
+            for (byte, _) in text.match_indices(needle.as_str()) {
+                chars_before += text[last_byte..byte].chars().count();
+                last_byte = byte;
+                let a = chars_before;
+                if line_start + a != sel.start {
+                    fill(a, a + width, 0.0, 2.0, pal.smart);
                 }
             }
         }

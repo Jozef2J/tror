@@ -227,8 +227,7 @@ impl DiffPanel {
         self.refresh(docs);
         let mut open = None;
         ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.add_space(8.0);
+        crate::widgets::wrapped_row(ui, 8.0, |ui| {
             let name = |id: Option<u64>| {
                 id.and_then(|id| docs.iter().find(|d| d.id == id))
                     .map(|d| d.title())

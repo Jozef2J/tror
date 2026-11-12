@@ -286,7 +286,7 @@ impl egui_stack::DockPainter for TabPainter {
 
 pub static TAB_PAINTER: TabPainter = TabPainter;
 
-fn leaf_min(tabs: &[Pane]) -> egui::Vec2 {
+pub fn leaf_min(tabs: &[Pane]) -> egui::Vec2 {
     tabs.iter().fold(egui::Vec2::ZERO, |acc, tab| {
         let (w, h) = tab.min_size();
         acc.max(egui::vec2(w, h + 34.0))
@@ -357,29 +357,6 @@ pub fn enforce_min(dock: &mut DockState<Pane>) {
                     }
                     break;
                 }
-            }
-        }
-    }
-    let windows: Vec<SurfaceIndex> = dock
-        .iter_surfaces_indexed()
-        .map(|(i, _)| i)
-        .filter(|s| *s != SurfaceIndex::main())
-        .collect();
-    for surface in windows {
-        let Some(tree) = dock.get_surface(surface).and_then(|s| s.node_tree()) else {
-            continue;
-        };
-        let min = tree
-            .iter()
-            .filter_map(|node| node.get_leaf())
-            .fold(egui::Vec2::ZERO, |acc, leaf| acc.max(leaf_min(leaf.tabs())));
-        if let Some(window) = dock.get_window_state_mut(surface) {
-            let rect = window.rect();
-            if rect.is_finite()
-                && rect.width() > 1.0
-                && (rect.width() + 1.0 < min.x || rect.height() + 1.0 < min.y)
-            {
-                window.set_size(rect.size().max(min));
             }
         }
     }

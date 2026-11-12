@@ -1,0 +1,25 @@
+egui_stack continues egui_dock (https://github.com/anhosh/egui_dock, formerly
+https://github.com/Adanos020/egui_dock), a docking system for egui released
+under the MIT licence.
+
+egui_dock was originally created by lain-dono and developed by Adam Gąsior
+(Adanos020), later maintained by anhosh, with contributions from many people
+whose names are kept in this repository's Git history.
+
+egui_stack was forked from egui_dock's main branch after its 0.21.1 release
+(tag egui_dock-0.21.1 in this repository). The move to egui 0.37 started from
+an upstream pull request by crumblingstatue (egui_dock #354), its commits kept
+with their author.
+
+The sections module (src/sections) comes from egui-pop
+(https://github.com/quazardous/egui-pop), released under MIT OR Apache-2.0
+by the same maintainers and taken here under MIT.
+
+The n-ary linear nodes of the tree (src/dock_state/tree), children with
+shares in a row or a column, follow the model of egui_tiles
+(https://github.com/rerun-io/egui_crates, crate egui_tiles), released under
+MIT OR Apache-2.0 by Rerun Technologies AB. No code was copied from it.
+
+The grid nodes of the tree (src/dock_state/tree/node/grid.rs) follow the
+automatic grid of egui_tiles too: by default as many columns as the square
+root of the number of children, rounded up. No code was copied from it.

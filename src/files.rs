@@ -362,7 +362,9 @@ impl ProjectPanel {
                 refresh = true;
             }
             let dots = dots_button(ui, pal).on_hover_text("Ещё");
-            egui::Popup::menu(&dots).show(|ui| {
+            egui::Popup::menu(&dots)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
                 ui.set_min_width(230.0);
                 if ui.button("Открыть другую папку…").clicked() {
                     ui.close();
@@ -619,6 +621,31 @@ impl ProjectPanel {
         let _ = area;
         if blank.clicked() {
             self.marked.clear();
+        }
+        if ui.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(outer) {
+            ui.memory_mut(|m| m.request_focus(blank.id));
+        }
+        if ui.memory(|m| m.has_focus(blank.id)) && self.prompt.is_none() {
+            let chosen: Vec<PathBuf> = rows
+                .iter()
+                .filter(|r| r.entry.is_some() && self.marked.contains(&r.path))
+                .map(|r| r.path.clone())
+                .collect();
+            let (delete, rename) = ui.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Delete),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::F2),
+                )
+            });
+            if delete && !chosen.is_empty() {
+                self.prompt = Some(Prompt::Delete(chosen));
+            } else if rename && chosen.len() == 1 {
+                let name = chosen[0]
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt::Rename(chosen[0].clone(), name));
+            }
         }
         let dir = if tree {
             self.root.clone().unwrap_or_default()

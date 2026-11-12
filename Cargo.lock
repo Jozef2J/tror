@@ -1096,8 +1096,6 @@ dependencies = [
 [[package]]
 name = "egui_stack"
 version = "0.25.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26c39ced9b6b174fd71e0eb2b3063a1b0fee080b779cd1c24cda38576d4cf418"
 dependencies = [
  "duplicate",
  "egui",
@@ -4734,7 +4732,7 @@ dependencies = [
 
 [[package]]
 name = "tror"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "aes",
  "base64 0.23.1",

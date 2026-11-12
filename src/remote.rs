@@ -107,6 +107,9 @@ pub struct Profile {
     pub directory: String,
     pub url: String,
     pub insecure_tls: bool,
+    pub term_theme: String,
+    pub term_font: String,
+    pub term_font_size: f32,
 }
 
 impl Profile {
@@ -217,6 +220,8 @@ pub struct TermProfile {
     pub mosh_server: String,
     pub mosh_ports: String,
     pub startup: String,
+    #[serde(skip)]
+    pub origin: Option<String>,
 }
 
 impl Default for TermProfile {
@@ -236,6 +241,7 @@ impl Default for TermProfile {
             mosh_server: String::new(),
             mosh_ports: String::new(),
             startup: String::new(),
+            origin: None,
         }
     }
 }
@@ -269,6 +275,10 @@ impl TermProfile {
             password: profile.password.clone(),
             key_file: profile.key_file.clone(),
             passphrase: profile.passphrase.clone(),
+            theme: profile.term_theme.clone(),
+            font: profile.term_font.clone(),
+            font_size: profile.term_font_size,
+            origin: Some(profile.name.clone()),
             ..Default::default()
         }
     }
@@ -2102,6 +2112,7 @@ mod tests {
             directory: "/www".into(),
             url: "https://example.org".into(),
             insecure_tls: false,
+            ..Default::default()
         });
         store
             .known_hosts
@@ -2166,6 +2177,7 @@ mod tests {
             directory: String::new(),
             url: String::new(),
             insecure_tls: protocol == Protocol::Ftps,
+            ..Default::default()
         };
         let conn = connect(&profile, None, || {});
         let next = || loop {

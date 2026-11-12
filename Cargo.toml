@@ -1,6 +1,6 @@
 [package]
 name = "tror"
-version = "0.12.0"
+version = "0.13.0"
 description = "Быстрый компактный редактор кода"
 edition = "2024"
 
@@ -53,3 +53,6 @@ webview = ["dep:wry", "dep:gtk"]
 
 [dev-dependencies]
 ron = "0.12.3"
+
+[patch.crates-io]
+egui_stack = { path = "vendor/egui_stack" }

@@ -873,6 +873,88 @@ impl Document {
         self.reveal = true;
     }
 
+    pub fn transform(&mut self, f: impl Fn(&str) -> String) {
+        if !self.multi() && !self.has_selection() {
+            self.select_word_at(self.sel.1);
+            if !self.has_selection() {
+                return;
+            }
+        }
+        let mut ranges: Vec<(usize, usize, bool)> = self
+            .cursors()
+            .into_iter()
+            .map(|(a, h)| (a.min(h), a.max(h), h >= a))
+            .filter(|(lo, hi, _)| hi > lo)
+            .collect();
+        if ranges.is_empty() {
+            return;
+        }
+        ranges.sort();
+        self.checkpoint(EditKind::Other);
+        let mut shift: isize = 0;
+        let mut sels = Vec::with_capacity(ranges.len());
+        for (lo, hi, forward) in ranges {
+            let start = (lo as isize + shift) as usize;
+            let end = (hi as isize + shift) as usize;
+            let old = self.rope.slice(start..end).to_string();
+            let new = f(&old);
+            let n = new.chars().count();
+            if new != old {
+                self.apply(start..end, &new);
+            }
+            shift += n as isize - (end - start) as isize;
+            sels.push(if forward { (start, start + n) } else { (start + n, start) });
+        }
+        self.block = None;
+        self.set_cursors(sels, 0);
+        self.reveal = true;
+    }
+
+    fn line_span(&self) -> (usize, usize) {
+        let range = self.selection();
+        let first = self.rope.char_to_line(range.start);
+        let mut last = self.rope.char_to_line(range.end);
+        if range.end > range.start && last > first && self.rope.line_to_char(last) == range.end {
+            last -= 1;
+        }
+        let start = self.rope.line_to_char(first);
+        let end = if last + 1 < self.rope.len_lines() {
+            self.rope.line_to_char(last + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        (start, end)
+    }
+
+    pub fn duplicate_lines(&mut self) {
+        self.clear_extra();
+        let (start, end) = self.line_span();
+        let text = self.rope.slice(start..end).to_string();
+        let insert = if text.ends_with('\n') {
+            text
+        } else {
+            format!("\n{text}")
+        };
+        let sel = self.sel;
+        self.checkpoint(EditKind::Other);
+        self.apply(end..end, &insert);
+        self.sel = sel;
+        self.reveal = true;
+    }
+
+    pub fn delete_lines(&mut self) {
+        self.clear_extra();
+        let (mut start, end) = self.line_span();
+        let text = self.rope.slice(start..end).to_string();
+        if !text.ends_with('\n') && start > 0 {
+            start -= 1;
+        }
+        self.replace(start..end, "", EditKind::Other);
+        let line = self.rope.char_to_line(self.sel.1.min(self.len()));
+        let at = self.rope.line_to_char(line);
+        self.sel = (at, at);
+    }
+
     pub fn move_each(&mut self, extend: bool, f: impl Fn(&Self, (usize, usize)) -> usize) {
         let cursors: Vec<(usize, usize)> = self
             .cursors()
@@ -1328,6 +1410,30 @@ mod tests {
         doc.move_to(2, false);
         doc.block_paste("12\n34\n56");
         assert_eq!(text(&doc), "ab12cd\nx 34\n  56");
+    }
+
+    #[test]
+    fn case_and_line_tools() {
+        let mut doc = Document::from_text("one two\nthree\n");
+        doc.sel = (0, 3);
+        doc.transform(|t| t.to_uppercase());
+        assert_eq!(doc.rope.to_string(), "ONE two\nthree\n");
+        assert_eq!(doc.sel, (0, 3));
+        doc.sel = (5, 5);
+        doc.transform(|t| t.to_uppercase());
+        assert_eq!(doc.rope.to_string(), "ONE TWO\nthree\n");
+        doc.sel = (9, 9);
+        doc.duplicate_lines();
+        assert_eq!(doc.rope.to_string(), "ONE TWO\nthree\nthree\n");
+        doc.sel = (0, 0);
+        doc.delete_lines();
+        assert_eq!(doc.rope.to_string(), "three\nthree\n");
+        let mut tail = Document::from_text("a\nb");
+        tail.sel = (3, 3);
+        tail.duplicate_lines();
+        assert_eq!(tail.rope.to_string(), "a\nb\nb");
+        tail.delete_lines();
+        assert_eq!(tail.rope.to_string(), "a\nb");
     }
 
     #[test]

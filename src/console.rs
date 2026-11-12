@@ -164,6 +164,7 @@ impl ConsolePanel {
             .iter()
             .chain(self.sessions.iter().map(|s| &s.profile))
             .map(|p| p.font.trim())
+            .chain(self.store.profiles.iter().map(|p| p.term_font.trim()))
             .filter(|f| !f.is_empty())
             .map(PathBuf::from)
             .collect();
@@ -378,6 +379,7 @@ impl ConsolePanel {
         let mut disconnect = false;
         let mut clear = false;
         let mut activate = None;
+        let mut look: Option<(String, f32)> = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let reserve = 96.0;
@@ -461,17 +463,54 @@ impl ConsolePanel {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let dots = crate::widgets::dots_button(ui, pal).on_hover_text("Ещё");
-                egui::Popup::menu(&dots).show(|ui| {
+                egui::Popup::menu(&dots)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
                     ui.set_min_width(220.0);
                     let has = !self.sessions.is_empty();
                     if ui.add_enabled(has, Button::new("Переподключить")).clicked() {
                         reconnect = true;
+                        ui.close();
                     }
                     if ui.add_enabled(has, Button::new("Отключить")).clicked() {
                         disconnect = true;
+                        ui.close();
                     }
                     if ui.add_enabled(has, Button::new("Очистить экран")).clicked() {
                         clear = true;
+                        ui.close();
+                    }
+                    if let Some(session) = self.sessions.get(self.active) {
+                        let current = session.profile.theme.clone();
+                        let size = session.profile.font_size;
+                        ui.menu_button("Оформление сеанса", |ui| {
+                            ui.set_min_width(220.0);
+                            ui.label(RichText::new("Цветовая схема").size(12.0).color(pal.faint));
+                            ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                                if ui.selectable_label(current.is_empty(), "Как в редакторе").clicked() {
+                                    look = Some((String::new(), size));
+                                }
+                                for scheme in terminal::SCHEMES {
+                                    if ui.selectable_label(current == scheme.name, scheme.name).clicked() {
+                                        look = Some((scheme.name.to_owned(), size));
+                                    }
+                                }
+                            });
+                            ui.separator();
+                            let base = if size > 0.0 { size } else { font_size.round() };
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Шрифт: {base:.0} px"));
+                                if ui.small_button(" − ").clicked() {
+                                    look = Some((current.clone(), (base - 1.0).max(8.0)));
+                                }
+                                if ui.small_button(" + ").clicked() {
+                                    look = Some((current.clone(), (base + 1.0).min(28.0)));
+                                }
+                                if size > 0.0 && ui.small_button("как в редакторе").clicked() {
+                                    look = Some((current.clone(), 0.0));
+                                }
+                            });
+                        });
                     }
                     ui.separator();
                     ui.label(RichText::new("Разделение экрана").size(12.0).color(pal.faint));
@@ -483,6 +522,7 @@ impl ConsolePanel {
                     ui.separator();
                     if ui.button("Настроить подключения…").clicked() {
                         self.open_editor(false);
+                        ui.close();
                     }
                 });
                 if split_icon(ui, pal, self.split, "Разделить экран между сеансами").clicked() {
@@ -494,6 +534,9 @@ impl ConsolePanel {
         });
         if toggle_split {
             self.split = self.split.next();
+        }
+        if let Some((theme, size)) = look {
+            self.restyle(theme, size);
         }
         if let Some(index) = activate {
             self.active = index;
@@ -568,7 +611,9 @@ impl ConsolePanel {
                 );
             }
             let (cols, rows) = session.screen.grid(&font, ui, body);
-            if session.screen.resize(cols, rows)
+            let dragging = ui.input(|i| i.pointer.primary_down());
+            if !dragging
+                && session.screen.resize(cols, rows)
                 && let Some(shell) = &session.shell
             {
                 let _ = shell.tx.send(ShellCmd::Resize(cols, rows));
@@ -611,6 +656,31 @@ impl ConsolePanel {
         self.focused = focused;
     }
 
+    fn restyle(&mut self, theme: String, size: f32) {
+        let Some(session) = self.sessions.get_mut(self.active) else {
+            return;
+        };
+        session.profile.theme = theme.clone();
+        session.profile.font_size = size;
+        let name = session.profile.name.clone();
+        let saved = match session.profile.origin.clone() {
+            Some(host) => self.store.profiles.iter_mut().find(|p| p.name == host).map(|p| {
+                p.term_theme = theme;
+                p.term_font_size = size;
+            }),
+            None => self.store.terminals.iter_mut().find(|p| p.name == name).map(|p| {
+                p.theme = theme;
+                p.font_size = size;
+            }),
+        };
+        if saved.is_some() {
+            if let Err(e) = self.store.save() {
+                crate::trace::popup(format!("Оформление не сохранено: {e}"), false);
+            }
+            self.store_seen = Store::generation();
+        }
+    }
+
     fn focus_active(&mut self) {
         if let Some(session) = self.sessions.get_mut(self.active) {
             session.screen.grab_focus = true;
@@ -619,9 +689,9 @@ impl ConsolePanel {
 
     fn empty(&mut self, ui: &mut Ui, rect: Rect, pal: &Palette, ctx: &egui::Context) {
         ui.painter().rect_filled(rect, 0.0, pal.base);
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(16.0)));
-        child.vertical(|ui| {
-            ui.add_space(8.0);
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(16.0, 4.0))));
+        ScrollArea::vertical().id_salt("tror_console_empty").auto_shrink(false).show(&mut child, |ui| {
+            ui.add_space(12.0);
             ui.label(RichText::new("Нет открытых сеансов").color(pal.subtext));
             ui.add_space(6.0);
             let mut open = None;
@@ -654,6 +724,7 @@ impl ConsolePanel {
             if let Some(profile) = open {
                 self.open(profile, ctx);
             }
+            ui.add_space(12.0);
         });
     }
 
@@ -849,68 +920,27 @@ impl ConsolePanel {
                                 ui.add(TextEdit::singleline(&mut p.startup).hint_text("например: cd /var/www && ls").desired_width(wide));
                                 ui.end_row();
                             }
-                            ui.label("Цветовая схема");
-                            ComboBox::from_id_salt("tror_term_theme")
-                                .width(wide)
-                                .selected_text(if p.theme.is_empty() { "Как в редакторе" } else { p.theme.as_str() })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut p.theme, String::new(), "Как в редакторе");
-                                    for scheme in terminal::SCHEMES {
-                                        ui.selectable_value(&mut p.theme, scheme.name.to_owned(), scheme.name);
-                                    }
-                                });
-                            ui.end_row();
                             ui.label("");
-                            let colors = terminal::colors(&p.theme, pal, true);
-                            let (rect, _) = ui.allocate_exact_size(egui::vec2(wide, 22.0), Sense::hover());
-                            ui.painter().rect_filled(rect, 4.0, colors.bg);
-                            for (i, color) in colors.ansi.iter().take(8).enumerate() {
-                                ui.painter().circle_filled(
-                                    egui::pos2(rect.left() + 14.0 + i as f32 * 18.0, rect.center().y),
-                                    5.5,
-                                    *color,
-                                );
-                            }
-                            ui.painter().text(
-                                egui::pos2(rect.left() + 162.0, rect.center().y),
-                                egui::Align2::LEFT_CENTER,
-                                "user@host:~$ ls",
-                                FontId::monospace(12.0),
-                                colors.fg,
-                            );
-                            ui.end_row();
-                            ui.label("Шрифт");
-                            ui.horizontal(|ui| {
-                                let name = if p.font.trim().is_empty() {
-                                    "как в редакторе".to_owned()
-                                } else {
-                                    std::path::Path::new(p.font.trim())
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| p.font.clone())
-                                };
-                                ui.label(RichText::new(name).color(pal.subtext));
-                                if ui.button("Выбрать…").clicked()
-                                    && let Some(path) = rfd::FileDialog::new().add_filter("Шрифты", &["ttf", "otf", "ttc"]).pick_file()
-                                {
-                                    p.font = path.display().to_string();
+                            ui.vertical(|ui| {
+                                ui.set_max_width(wide);
+                                if editor.probe.is_some() {
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(RichText::new("проверка…").color(pal.subtext));
+                                    });
+                                } else if ui.add(Button::new("Проверить подключение").fill(pal.surface)).clicked() {
+                                    test = true;
                                 }
-                                if !p.font.is_empty() && ui.button("Сбросить").clicked() {
-                                    p.font.clear();
+                                if let Some(result) = &editor.result {
+                                    let (text, color) = match result {
+                                        Ok(text) => (format!("Работает: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
+                                        Err(e) => (format!("Ошибка: {e}"), pal.warn),
+                                    };
+                                    ui.label(RichText::new(text).size(12.5).color(color));
                                 }
                             });
                             ui.end_row();
-                            ui.label("Размер шрифта");
-                            ui.horizontal(|ui| {
-                                let mut custom = p.font_size > 0.0;
-                                if ui.checkbox(&mut custom, "свой").changed() {
-                                    p.font_size = if custom { 14.0 } else { 0.0 };
-                                }
-                                if custom {
-                                    ui.add(egui::Slider::new(&mut p.font_size, 8.0..=28.0).step_by(1.0).suffix(" px"));
-                                }
-                            });
-                            ui.end_row();
+                            appearance_rows(ui, pal, &mut p.theme, &mut p.font, &mut p.font_size, wide);
                         });
                     ui.add_space(4.0);
                     let note = match p.protocol {
@@ -920,13 +950,6 @@ impl ConsolePanel {
                     };
                     let color = if p.protocol == TermProtocol::Telnet { pal.warn } else { pal.subtext };
                     ui.label(RichText::new(note).size(12.0).color(color));
-                    if let Some(result) = &editor.result {
-                        let (text, color) = match result {
-                            Ok(text) => (format!("Работает: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
-                            Err(e) => (format!("Ошибка: {e}"), pal.warn),
-                        };
-                        ui.label(RichText::new(text).size(12.5).color(color));
-                    }
                 });
             });
             ui.add_space(10.0);
@@ -937,12 +960,6 @@ impl ConsolePanel {
                 if dialog_button(ui, pal, "Сохранить и подключиться", false) {
                     save = true;
                     connect = true;
-                }
-                let testing = editor.probe.is_some();
-                if testing {
-                    ui.spinner();
-                } else if dialog_button(ui, pal, "Проверить", false) {
-                    test = true;
                 }
                 if dialog_button(ui, pal, "Отмена", false) {
                     cancel = true;
@@ -972,6 +989,71 @@ impl ConsolePanel {
             self.editor = None;
         }
     }
+}
+
+pub fn appearance_rows(ui: &mut Ui, pal: &Palette, theme: &mut String, font: &mut String, font_size: &mut f32, wide: f32) {
+    ui.label("Цветовая схема");
+    ComboBox::from_id_salt("tror_term_theme")
+        .width(wide)
+        .selected_text(if theme.is_empty() { "Как в редакторе" } else { theme.as_str() })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(theme, String::new(), "Как в редакторе");
+            for scheme in terminal::SCHEMES {
+                ui.selectable_value(theme, scheme.name.to_owned(), scheme.name);
+            }
+        });
+    ui.end_row();
+    ui.label("");
+    let colors = terminal::colors(theme, pal, true);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(wide, 22.0), Sense::hover());
+    ui.painter().rect_filled(rect, 4.0, colors.bg);
+    for (i, color) in colors.ansi.iter().take(8).enumerate() {
+        ui.painter().circle_filled(
+            egui::pos2(rect.left() + 14.0 + i as f32 * 18.0, rect.center().y),
+            5.5,
+            *color,
+        );
+    }
+    ui.painter().text(
+        egui::pos2(rect.left() + 162.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "user@host:~$ ls",
+        FontId::monospace(12.0),
+        colors.fg,
+    );
+    ui.end_row();
+    ui.label("Шрифт");
+    ui.horizontal(|ui| {
+        let name = if font.trim().is_empty() {
+            "как в редакторе".to_owned()
+        } else {
+            std::path::Path::new(font.trim())
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| font.clone())
+        };
+        ui.label(RichText::new(name).color(pal.subtext));
+        if ui.button("Выбрать…").clicked()
+            && let Some(path) = rfd::FileDialog::new().add_filter("Шрифты", &["ttf", "otf", "ttc"]).pick_file()
+        {
+            *font = path.display().to_string();
+        }
+        if !font.is_empty() && ui.button("Сбросить").clicked() {
+            font.clear();
+        }
+    });
+    ui.end_row();
+    ui.label("Размер шрифта");
+    ui.horizontal(|ui| {
+        let mut custom = *font_size > 0.0;
+        if ui.checkbox(&mut custom, "свой").changed() {
+            *font_size = if custom { 14.0 } else { 0.0 };
+        }
+        if custom {
+            ui.add(egui::Slider::new(font_size, 8.0..=28.0).step_by(1.0).suffix(" px"));
+        }
+    });
+    ui.end_row();
 }
 
 fn layout(rect: Rect, split: Split, count: usize) -> Vec<Rect> {

@@ -500,6 +500,23 @@ fn open_engine(profile: &DbProfile, host: String, port: u16) -> Result<(Engine, 
     }
 }
 
+fn test_profile(profile: DbProfile, ssh: Option<(Profile, Option<String>)>) -> Result<String, String> {
+    let mut host = profile.host.trim().to_owned();
+    let mut port = profile.port;
+    let mut _tunnel = None;
+    if profile.kind != DbKind::Sqlite
+        && let Some((ssh, known)) = ssh
+    {
+        let tunnel = remote::tunnel(&ssh, known.as_deref(), &host, port)?;
+        host = "127.0.0.1".into();
+        port = tunnel.port;
+        _tunnel = Some(tunnel);
+    }
+    let (mut engine, version) = open_engine(&profile, host, port)?;
+    engine.query("SELECT 1")?;
+    Ok(version)
+}
+
 fn serve(
     profile: DbProfile,
     ssh: Option<(Profile, Option<String>)>,
@@ -605,6 +622,8 @@ struct Editor {
     profile: DbProfile,
     index: Option<usize>,
     show_password: bool,
+    probe: Option<Receiver<Result<String, String>>>,
+    result: Option<Result<String, String>>,
 }
 
 #[derive(Default)]
@@ -889,8 +908,7 @@ impl DbPanel {
         self.poll();
         ui.add_space(8.0);
         if store.databases.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                ui.add_space(8.0);
+            crate::widgets::wrapped_row(ui, 8.0, |ui| {
                 ui.label(RichText::new("Подключений к базам пока нет.").color(pal.subtext));
                 if ui
                     .add(Button::new("Создать подключение").fill(pal.surface))
@@ -903,8 +921,7 @@ impl DbPanel {
         }
         self.selected = self.selected.min(store.databases.len() - 1);
         let active = self.conn.is_some();
-        ui.horizontal_wrapped(|ui| {
-            ui.add_space(8.0);
+        crate::widgets::wrapped_row(ui, 8.0, |ui| {
             let mut edit = false;
             let combo_w = (ui.available_width() - 150.0).clamp(120.0, 240.0);
             ui.add_enabled_ui(!active, |ui| {
@@ -1658,12 +1675,16 @@ impl DbPanel {
                 },
                 index: None,
                 show_password: false,
+                probe: None,
+                result: None,
             }
         } else {
             Editor {
                 profile: store.databases[self.selected].clone(),
                 index: Some(self.selected),
                 show_password: false,
+                probe: None,
+                result: None,
             }
         });
     }
@@ -1678,6 +1699,20 @@ impl DbPanel {
         let mut delete = false;
         let mut switch = None;
         let mut create = false;
+        let mut test = false;
+        if let Some(rx) = &editor.probe
+            && let Ok(result) = rx.try_recv()
+        {
+            crate::trace::popup(
+                match &result {
+                    Ok(text) => format!("Подключение работает: {text}"),
+                    Err(e) => format!("Не удалось подключиться: {e}"),
+                },
+                result.is_ok(),
+            );
+            editor.result = Some(result);
+            editor.probe = None;
+        }
         let modal = dialog("tror_db_editor", pal).show(ctx, |ui| {
             ui.set_width(460.0);
             ui.label(
@@ -1797,6 +1832,22 @@ impl DbPanel {
                     ui.add(TextEdit::singleline(&mut p.database).desired_width(wide));
                     ui.end_row();
                 });
+            ui.add_space(4.0);
+            if editor.probe.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("проверка…").color(pal.subtext));
+                });
+            } else if ui.add(Button::new("Проверить подключение").fill(pal.surface)).clicked() {
+                test = true;
+            }
+            if let Some(result) = &editor.result {
+                let (text, color) = match result {
+                    Ok(text) => (format!("Работает: {text}"), egui::Color32::from_rgb(0x3f, 0xc2, 0x6e)),
+                    Err(e) => (format!("Ошибка: {e}"), pal.warn),
+                };
+                ui.label(RichText::new(text).size(12.5).color(color));
+            }
             ui.add_space(6.0);
             if p.kind == DbKind::Sqlite {
                 ui.label(
@@ -1851,6 +1902,27 @@ impl DbPanel {
                 }
             });
         });
+        if test {
+            let profile = editor.profile.clone();
+            let ssh = (!profile.tunnel.is_empty() && profile.kind != DbKind::Sqlite)
+                .then(|| store.profiles.iter().find(|p| p.name == profile.tunnel))
+                .flatten()
+                .map(|host| {
+                    let key = format!("{}:{}", host.host.trim(), host.port);
+                    (host.clone(), store.known_hosts.get(&key).cloned())
+                });
+            let (tx, rx) = channel();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(test_profile(profile, ssh));
+                ctx.request_repaint();
+            });
+            editor.probe = Some(rx);
+            editor.result = None;
+        }
+        if editor.probe.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         if let Some(i) = switch {
             self.selected = i;
             self.open_editor(store, false);

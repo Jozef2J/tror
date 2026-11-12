@@ -212,6 +212,10 @@ impl RemotePanel {
         self.connected
     }
 
+    pub fn in_use(&self) -> bool {
+        self.conn.is_some() || self.saver.is_some() || self.pending > 0
+    }
+
     pub fn can_upload(&self) -> bool {
         self.visible && self.connected
     }
@@ -460,6 +464,40 @@ impl RemotePanel {
 
     pub fn cwd(&self) -> &str {
         &self.cwd
+    }
+
+    pub fn reopen(&mut self, ctx: &egui::Context, profile: &str, path: &str) -> Result<(), String> {
+        let cmd = Cmd::Download(path.to_owned());
+        let busy = format!("Скачивание {}…", remote::file_name(path));
+        if self.serves(profile) {
+            if self.connected {
+                self.send(cmd, busy);
+            } else {
+                self.queue.push(cmd);
+            }
+            return Ok(());
+        }
+        if self.conn.is_some() {
+            return Err(format!("панель подключена к другому серверу, а файл лежит на «{profile}»"));
+        }
+        let index = self
+            .store
+            .profiles
+            .iter()
+            .position(|p| p.name == profile)
+            .ok_or_else(|| format!("профиль «{profile}» не найден"))?;
+        self.selected = index;
+        self.connect(ctx);
+        self.queue.push(cmd);
+        Ok(())
+    }
+
+    pub fn rename_file(&mut self, profile: &str, from: &str, to: &str) -> Result<(), String> {
+        if !self.serves(profile) || !self.connected {
+            return Err(format!("сначала подключитесь к «{profile}»"));
+        }
+        self.send(Cmd::Rename(from.to_owned(), to.to_owned()), "Переименование…");
+        Ok(())
     }
 
     pub fn serves(&self, profile: &str) -> bool {
@@ -915,7 +953,9 @@ impl RemotePanel {
                     }
                 }
                 let dots = dots_button(ui, pal).on_hover_text("Ещё");
-                egui::Popup::menu(&dots).show(|ui| {
+                egui::Popup::menu(&dots)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
                     ui.set_min_width(230.0);
                     if ui.button("Поиск на сервере…").clicked() {
                         self.want_search = true;
@@ -1043,8 +1083,7 @@ impl RemotePanel {
             return;
         }
         let mut start = false;
-        ui.horizontal_wrapped(|ui| {
-            ui.add_space(6.0);
+        crate::widgets::wrapped_row(ui, 6.0, |ui| {
             let field_w = (ui.available_width() - 20.0).clamp(80.0, 280.0);
             let field = ui.add(
                 TextEdit::singleline(&mut self.search_query)
@@ -1081,8 +1120,7 @@ impl RemotePanel {
                     .size(12.5),
             );
         });
-        ui.horizontal_wrapped(|ui| {
-            ui.add_space(6.0);
+        crate::widgets::wrapped_row(ui, 6.0, |ui| {
             ui.label(
                 RichText::new("Не искать в папках:")
                     .color(pal.subtext)
@@ -1515,6 +1553,32 @@ impl RemotePanel {
         let inner = area.inner_rect;
         if blank.clicked() {
             self.marked.clear();
+        }
+        let keys_area = Rect::from_min_size(outer.min, egui::vec2(outer.width(), height));
+        if ui.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(keys_area) {
+            ui.memory_mut(|m| m.request_focus(blank.id));
+        }
+        if ui.memory(|m| m.has_focus(blank.id)) && self.prompt.is_none() {
+            let chosen: Vec<(String, bool)> = rows
+                .iter()
+                .filter(|r| r.entry.is_some() && self.marked.contains(&r.path))
+                .map(|r| (r.path.clone(), r.entry.as_ref().is_some_and(|e| e.is_dir)))
+                .collect();
+            let (delete, rename) = ui.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Delete),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::F2),
+                )
+            });
+            if delete && !chosen.is_empty() {
+                self.prompt = Some(Prompt::Delete(chosen.clone()));
+            } else if rename && chosen.len() == 1 {
+                let from = chosen[0].0.clone();
+                self.prompt = Some(Prompt::Rename {
+                    name: remote::file_name(&from).to_owned(),
+                    from,
+                });
+            }
         }
         let cwd = self.cwd.clone();
         egui::Popup::context_menu(&blank).show(|ui| {
@@ -2112,6 +2176,29 @@ impl RemotePanel {
                                 ui.checkbox(&mut p.insecure_tls, "не проверять (самоподписанный)");
                                 ui.end_row();
                             }
+                            ui.label("");
+                            ui.vertical(|ui| {
+                                ui.set_max_width(wide);
+                                if editor.probe.is_some() {
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(RichText::new("проверка…").color(pal.subtext));
+                                    });
+                                } else if ui
+                                    .add(Button::new("Проверить подключение").fill(pal.surface))
+                                    .clicked()
+                                {
+                                    test = true;
+                                }
+                                if let Some(result) = &editor.result {
+                                    let (text, color) = match result {
+                                        Ok(text) => (format!("Работает: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
+                                        Err(e) => (format!("Ошибка: {e}"), pal.warn),
+                                    };
+                                    ui.label(RichText::new(text).size(12.5).color(color));
+                                }
+                            });
+                            ui.end_row();
                             ui.label("Начальная папка");
                             ui.add(
                                 TextEdit::singleline(&mut p.directory)
@@ -2126,6 +2213,19 @@ impl RemotePanel {
                                     .desired_width(wide),
                             );
                             ui.end_row();
+                            if p.protocol == Protocol::Sftp {
+                                ui.label("");
+                                ui.label(RichText::new("Консоль по этому профилю").color(pal.subtext).size(12.0));
+                                ui.end_row();
+                                crate::console::appearance_rows(
+                                    ui,
+                                    pal,
+                                    &mut p.term_theme,
+                                    &mut p.term_font,
+                                    &mut p.term_font_size,
+                                    wide,
+                                );
+                            }
                         });
                     ui.add_space(4.0);
                     let (text, color) = match p.protocol {
@@ -2149,14 +2249,6 @@ impl RemotePanel {
                         ),
                     };
                     ui.label(RichText::new(text).color(color).size(12.0));
-                    if let Some(result) = &editor.result {
-                        let (text, color) = match result {
-                            Ok(text) => (format!("Работает: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
-                            Err(e) => (format!("Ошибка: {e}"), pal.warn),
-                        };
-                        ui.add_space(4.0);
-                        ui.label(RichText::new(text).size(12.5).color(color));
-                    }
                 });
             });
             ui.add_space(10.0);
@@ -2171,13 +2263,6 @@ impl RemotePanel {
             ui.horizontal(|ui| {
                 if dialog_button(ui, pal, "Сохранить", true) {
                     save = true;
-                }
-                if editor.probe.is_some() {
-                    ui.add_space(6.0);
-                    ui.spinner();
-                    ui.label(RichText::new("проверка…").color(pal.subtext));
-                } else if dialog_button(ui, pal, "Проверить", false) {
-                    test = true;
                 }
                 if dialog_button(ui, pal, "Отмена", false) {
                     cancel = true;

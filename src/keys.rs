@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers};
 
-pub const COMMANDS: [(&str, &str, &str, bool); 25] = [
+pub const COMMANDS: [(&str, &str, &str, bool); 26] = [
     ("new", "Новый файл", "Ctrl+N", true),
     ("open", "Открыть файл", "Ctrl+O", true),
     ("open_folder", "Открыть папку", "Ctrl+Shift+O", true),
@@ -10,6 +10,7 @@ pub const COMMANDS: [(&str, &str, &str, bool); 25] = [
     ("save_as", "Сохранить как", "Ctrl+Shift+S", true),
     ("save_all", "Сохранить все", "", true),
     ("close_tab", "Закрыть вкладку", "Ctrl+W", true),
+    ("reopen", "Открыть закрытую вкладку", "Ctrl+Shift+T", true),
     ("next_tab", "Следующая вкладка", "Ctrl+Tab", true),
     ("prev_tab", "Предыдущая вкладка", "Ctrl+Shift+Tab", true),
     ("find", "Найти", "Ctrl+F", true),

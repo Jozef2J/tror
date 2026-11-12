@@ -76,6 +76,8 @@ enum Action {
     Activate(usize),
     CloseTab(usize),
     CloseAll,
+    Reopen,
+    TabCmd(u64, TabCmd),
     Quit,
     Find,
     Replace,
@@ -98,6 +100,35 @@ enum Action {
     PluginsReload,
     NextTab,
     PrevTab,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TabCmd {
+    Close,
+    CloseOthers,
+    CloseLeft,
+    CloseRight,
+    Save,
+    SaveAs,
+    Rename,
+    Color(Option<u8>),
+    NewGroup(egui_stack::Split),
+    OtherGroup,
+    Reveal,
+}
+
+pub const TAB_COLORS: [(&str, u32); 6] = [
+    ("Жёлтый", 0xe0b84c),
+    ("Зелёный", 0x5fb865),
+    ("Синий", 0x4f8fe6),
+    ("Оранжевый", 0xe8873a),
+    ("Розовый", 0xd9609b),
+    ("Фиолетовый", 0x9a6fe0),
+];
+
+fn tab_color(index: u8) -> Color32 {
+    let (_, hex) = TAB_COLORS[(index as usize).min(TAB_COLORS.len() - 1)];
+    Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
 pub(crate) fn size_label(bytes: usize) -> String {
@@ -224,6 +255,10 @@ pub struct TrorApp {
     console: ConsolePanel,
     term_fonts: Option<Vec<PathBuf>>,
     popups: Vec<(String, bool, f64)>,
+    closed: Vec<(Option<PathBuf>, Option<(String, String)>)>,
+    close_queue: std::collections::VecDeque<u64>,
+    rename: Option<(u64, String)>,
+    tab_orders: Vec<Vec<u64>>,
     dock: DockState<Pane>,
     diff: DiffPanel,
     db: DbPanel,
@@ -290,6 +325,10 @@ impl TrorApp {
             console: ConsolePanel::new(),
             term_fonts: None,
             popups: Vec::new(),
+            closed: Vec::new(),
+            close_queue: std::collections::VecDeque::new(),
+            rename: None,
+            tab_orders: Vec::new(),
             dock,
             diff: DiffPanel::default(),
             db: DbPanel::default(),
@@ -568,6 +607,22 @@ impl TrorApp {
         (0..self.remotes.len()).map(Pane::hosts).collect()
     }
 
+    fn host_shown(&self, index: usize) -> bool {
+        let pane = Pane::hosts(index);
+        dock::has(&self.dock, pane) || self.settings.detached.contains(&pane)
+    }
+
+    fn trim_hosts(&mut self) {
+        while self.remotes.len() > 1 {
+            let last = self.remotes.len() - 1;
+            if self.host_shown(last) || self.remotes[last].in_use() {
+                break;
+            }
+            self.remotes.pop();
+        }
+        self.settings.hosts = self.remotes.len();
+    }
+
     fn transfers(&mut self) {
         let count = self.remotes.len();
         for from in 0..count {
@@ -808,7 +863,15 @@ impl TrorApp {
         if index >= self.docs.len() {
             return;
         }
-        self.docs.remove(index);
+        let doc = self.docs.remove(index);
+        if doc.path.is_some() || doc.remote.is_some() {
+            let entry = (doc.path.clone(), doc.remote.clone());
+            self.closed.retain(|c| *c != entry);
+            self.closed.push(entry);
+            if self.closed.len() > 30 {
+                self.closed.remove(0);
+            }
+        }
         if self.active > index || self.active >= self.docs.len() {
             self.active = self.active.saturating_sub(1);
         }
@@ -857,9 +920,16 @@ impl TrorApp {
                 }
             }
             Action::AddHosts => {
-                if self.remotes.len() < 16 {
-                    let index = self.remotes.len();
-                    self.remotes.push(RemotePanel::new(index as u8));
+                let free = (1..self.remotes.len()).find(|i| !self.host_shown(*i) && !self.remotes[*i].in_use());
+                let index = match free {
+                    Some(index) => Some(index),
+                    None if self.remotes.len() < 16 => {
+                        self.remotes.push(RemotePanel::new(self.remotes.len() as u8));
+                        Some(self.remotes.len() - 1)
+                    }
+                    None => None,
+                };
+                if let Some(index) = index {
                     self.settings.hosts = self.remotes.len();
                     dock::show(&mut self.dock, Pane::hosts(index), &self.settings.floats);
                 }
@@ -881,6 +951,33 @@ impl TrorApp {
                 }
             }
             Action::CloseTab(i) => self.request_close(i),
+            Action::TabCmd(id, cmd) => self.tab_cmd(id, cmd, now),
+            Action::Reopen => {
+                if let Some((path, remote)) = self.closed.pop() {
+                    match remote {
+                        Some((profile, file)) => {
+                            let index = self
+                                .remotes
+                                .iter()
+                                .position(|r| r.serves(&profile))
+                                .or_else(|| self.remotes.iter().position(|r| !r.in_use()))
+                                .unwrap_or(0);
+                            if let Err(e) = self.remotes[index].reopen(ctx, &profile, &file) {
+                                self.notify(format!("Не удалось открыть {file}: {e}"), now);
+                            } else if !self.host_shown(index) {
+                                dock::show(&mut self.dock, Pane::hosts(index), &self.settings.floats);
+                            }
+                        }
+                        None => {
+                            if let Some(path) = path {
+                                self.open_path(&path, now);
+                            }
+                        }
+                    }
+                } else {
+                    self.notify("Закрытых вкладок нет", now);
+                }
+            }
             Action::CloseAll => {
                 if self.docs.iter().any(|d| d.dirty()) {
                     self.notify(
@@ -1067,6 +1164,7 @@ impl TrorApp {
                 "save_as" => Action::SaveAs,
                 "save_all" => Action::SaveAll,
                 "close_tab" => Action::CloseTab(self.active),
+                "reopen" => Action::Reopen,
                 "next_tab" => Action::NextTab,
                 "prev_tab" => Action::PrevTab,
                 "find" => Action::Find,
@@ -1165,6 +1263,9 @@ impl TrorApp {
                 if item(ui, "Закрыть все", "", has_doc) {
                     actions.push(Action::CloseAll);
                 }
+                if item(ui, "Открыть закрытую вкладку", &key("reopen"), !self.closed.is_empty()) {
+                    actions.push(Action::Reopen);
+                }
                 ui.separator();
                 if item(ui, "Настройки", &key("settings"), true) {
                     actions.push(Action::Show(Pane::Settings));
@@ -1216,6 +1317,10 @@ impl TrorApp {
                     .hosts_panes()
                     .into_iter()
                     .skip(1)
+                    .filter(|pane| {
+                        let i = pane.host_index().unwrap_or(0);
+                        self.host_shown(i) || self.remotes[i].in_use()
+                    })
                     .map(|pane| {
                         let n = pane.host_index().unwrap_or(0) + 1;
                         (
@@ -1799,6 +1904,204 @@ impl TrorApp {
         });
     }
 
+    fn doc_color(&self, doc: &Document) -> Option<Color32> {
+        let key = doc.location()?;
+        self.settings.tab_colors.get(&key).map(|c| tab_color(*c))
+    }
+
+    fn leaf_docs(&self, id: u64) -> Vec<u64> {
+        self.tab_orders
+            .iter()
+            .find(|order| order.contains(&id))
+            .cloned()
+            .unwrap_or_else(|| vec![id])
+    }
+
+    fn refresh_tab_orders(&mut self) {
+        self.tab_orders = self
+            .dock
+            .iter_leaves()
+            .map(|(_, leaf)| {
+                leaf.tabs()
+                    .iter()
+                    .filter_map(|t| match t {
+                        Pane::Doc(d) => Some(*d),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+    }
+
+    fn tab_cmd(&mut self, id: u64, cmd: TabCmd, now: f64) {
+        let Some(index) = self.docs.iter().position(|d| d.id == id) else {
+            return;
+        };
+        match cmd {
+            TabCmd::Close => self.close_queue.push_back(id),
+            TabCmd::CloseOthers | TabCmd::CloseLeft | TabCmd::CloseRight => {
+                let order = self.leaf_docs(id);
+                let at = order.iter().position(|d| *d == id).unwrap_or(0);
+                let ids: Vec<u64> = match cmd {
+                    TabCmd::CloseLeft => order[..at].to_vec(),
+                    TabCmd::CloseRight => order[at + 1..].to_vec(),
+                    _ => order.into_iter().filter(|d| *d != id).collect(),
+                };
+                self.close_queue.extend(ids);
+            }
+            TabCmd::Save => {
+                self.save(index, now);
+            }
+            TabCmd::SaveAs => {
+                self.save_as(index, now);
+            }
+            TabCmd::Rename => self.rename = Some((id, self.docs[index].title())),
+            TabCmd::Color(color) => {
+                if let Some(key) = self.docs[index].location() {
+                    match color {
+                        Some(c) => {
+                            self.settings.tab_colors.insert(key, c);
+                        }
+                        None => {
+                            self.settings.tab_colors.remove(&key);
+                        }
+                    }
+                }
+            }
+            TabCmd::NewGroup(split) => {
+                if let Some(path) = self.dock.find_tab(&Pane::Doc(id)) {
+                    let count = self.leaf_docs(id).len();
+                    if count > 1 {
+                        self.dock.move_tab(
+                            path,
+                            (path.node_path(), egui_stack::TabInsert::Split(split)),
+                        );
+                    }
+                }
+            }
+            TabCmd::OtherGroup => {
+                let Some(path) = self.dock.find_tab(&Pane::Doc(id)) else {
+                    return;
+                };
+                let target = self
+                    .dock
+                    .iter_leaves()
+                    .find(|(node, leaf)| {
+                        *node != path.node_path()
+                            && leaf.tabs().iter().any(|t| matches!(t, Pane::Doc(_) | Pane::Welcome))
+                    })
+                    .map(|(node, _)| node);
+                match target {
+                    Some(node) => self.dock.move_tab(path, (node, egui_stack::TabInsert::Append)),
+                    None if self.leaf_docs(id).len() > 1 => self.dock.move_tab(
+                        path,
+                        (path.node_path(), egui_stack::TabInsert::Split(egui_stack::Split::Right)),
+                    ),
+                    None => {}
+                }
+            }
+            TabCmd::Reveal => {
+                if let Some(dir) = self.docs[index].path.as_ref().and_then(|p| p.parent()) {
+                    let _ = preview::open_folder(dir);
+                }
+            }
+        }
+    }
+
+    fn drain_close_queue(&mut self) {
+        while self.confirm.is_none() {
+            let Some(id) = self.close_queue.pop_front() else {
+                break;
+            };
+            if let Some(index) = self.docs.iter().position(|d| d.id == id) {
+                self.request_close(index);
+            }
+        }
+    }
+
+    fn rename_modal(&mut self, ctx: &egui::Context, pal: &Palette) {
+        let Some((id, name)) = &mut self.rename else {
+            return;
+        };
+        let id = *id;
+        let mut done = false;
+        let mut go = false;
+        let modal = dialog("tror_rename_tab", pal).show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.label("Новое имя файла");
+            ui.add_space(4.0);
+            let field = ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY));
+            if !field.has_focus() && !ui.input(|i| i.pointer.any_down()) {
+                field.request_focus();
+            }
+            if ui.input(|i| i.key_pressed(Key::Enter)) {
+                go = true;
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if dialog_button(ui, pal, "Переименовать", true) {
+                    go = true;
+                }
+                if dialog_button(ui, pal, "Отмена", false) {
+                    done = true;
+                }
+            });
+        });
+        let now = ctx.input(|i| i.time);
+        if go {
+            let name = name.trim().to_owned();
+            done = true;
+            if let Some(index) = self.docs.iter().position(|d| d.id == id)
+                && !name.is_empty()
+                && !name.contains(['/', '\\'])
+                && name != self.docs[index].title()
+            {
+                let old_key = self.docs[index].location();
+                let result = match (self.docs[index].remote.clone(), self.docs[index].path.clone()) {
+                    (Some((profile, from)), _) => {
+                        let to = crate::remote::join(&crate::remote::parent(&from), &name);
+                        let panel = self.remotes.iter().position(|r| r.serves(&profile));
+                        match panel {
+                            Some(p) => self.remotes[p].rename_file(&profile, &from, &to).map(|()| {
+                                self.docs[index].remote = Some((profile, to));
+                            }),
+                            None => Err(format!("сначала подключитесь к «{profile}»")),
+                        }
+                    }
+                    (None, Some(path)) => {
+                        let to = path.with_file_name(&name);
+                        if to.exists() {
+                            Err("файл с таким именем уже есть".into())
+                        } else {
+                            std::fs::rename(&path, &to).map_err(|e| e.to_string()).map(|()| {
+                                let first = self.docs[index].first_line();
+                                self.docs[index].syntax = self.syntaxes.detect(Some(&to), &first);
+                                self.docs[index].path = Some(to.clone());
+                                self.remember(&to);
+                            })
+                        }
+                    }
+                    _ => Err("файл ещё не сохранён — используйте «Сохранить как»".into()),
+                };
+                match result {
+                    Ok(()) => {
+                        if let (Some(old), Some(new)) = (old_key, self.docs[index].location())
+                            && let Some(color) = self.settings.tab_colors.remove(&old)
+                        {
+                            self.settings.tab_colors.insert(new, color);
+                        }
+                        self.notify(format!("Переименовано в {name}"), now);
+                    }
+                    Err(e) => self.notify(format!("Не удалось переименовать: {e}"), now),
+                }
+            }
+        }
+        if done || modal.should_close() {
+            self.rename = None;
+            self.focus_editor = true;
+        }
+    }
+
     fn goto_modal(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(input) = &mut self.goto else {
             return;
@@ -2122,6 +2425,114 @@ struct Viewer<'a> {
     modal_open: bool,
 }
 
+impl Viewer<'_> {
+    fn tab_menu(&mut self, ui: &mut Ui, id: u64) {
+        let Some(doc) = self.app.docs.iter().find(|d| d.id == id) else {
+            return;
+        };
+        ui.set_min_width(250.0);
+        let keys = crate::keys::Keys::new(&self.app.settings.keys);
+        let key = |name: &str| keys.label(name);
+        let order = self.app.leaf_docs(id);
+        let at = order.iter().position(|d| *d == id).unwrap_or(0);
+        let location = doc.location();
+        let path = doc.path.clone();
+        let remote = doc.remote.clone();
+        let saved = path.is_some() || remote.is_some();
+        let color = location.as_ref().and_then(|k| self.app.settings.tab_colors.get(k)).copied();
+        let mut cmd = None;
+        let row = |ui: &mut Ui, text: &str, shortcut: String, enabled: bool| {
+            ui.add_enabled(enabled, Button::new(text).shortcut_text(shortcut)).clicked()
+        };
+        if row(ui, "Закрыть", key("close_tab"), true) {
+            cmd = Some(TabCmd::Close);
+        }
+        if row(ui, "Закрыть остальные", String::new(), order.len() > 1) {
+            cmd = Some(TabCmd::CloseOthers);
+        }
+        if row(ui, "Закрыть вкладки слева", String::new(), at > 0) {
+            cmd = Some(TabCmd::CloseLeft);
+        }
+        if row(ui, "Закрыть вкладки справа", String::new(), at + 1 < order.len()) {
+            cmd = Some(TabCmd::CloseRight);
+        }
+        ui.separator();
+        if row(ui, "Сохранить", key("save"), true) {
+            cmd = Some(TabCmd::Save);
+        }
+        if row(ui, "Сохранить как…", key("save_as"), true) {
+            cmd = Some(TabCmd::SaveAs);
+        }
+        if row(ui, "Переименовать…", String::new(), saved) {
+            cmd = Some(TabCmd::Rename);
+        }
+        ui.separator();
+        let full = match (&remote, &path) {
+            (Some((_, p)), _) => Some(p.clone()),
+            (None, Some(p)) => Some(p.display().to_string()),
+            _ => None,
+        };
+        let name = doc.title();
+        let dir = match (&remote, &path) {
+            (Some((_, p)), _) => Some(crate::remote::parent(p)),
+            (None, Some(p)) => p.parent().map(|d| d.display().to_string()),
+            _ => None,
+        };
+        if row(ui, "Копировать полный путь", String::new(), full.is_some())
+            && let Some(text) = &full
+        {
+            ui.ctx().copy_text(text.clone());
+        }
+        if row(ui, "Копировать имя файла", String::new(), true) {
+            ui.ctx().copy_text(name.clone());
+        }
+        if row(ui, "Копировать путь к папке", String::new(), dir.is_some())
+            && let Some(text) = &dir
+        {
+            ui.ctx().copy_text(text.clone());
+        }
+        if path.is_some() && remote.is_none() && row(ui, "Показать в папке", String::new(), true) {
+            cmd = Some(TabCmd::Reveal);
+        }
+        ui.separator();
+        ui.add_enabled_ui(location.is_some(), |ui| {
+            ui.menu_button("Цвет вкладки", |ui| {
+                ui.set_min_width(170.0);
+                for (i, (label, _)) in TAB_COLORS.iter().enumerate() {
+                    let swatch = tab_color(i as u8);
+                    let response = ui.selectable_label(color == Some(i as u8), format!("     {label}"));
+                    let r = response.rect;
+                    ui.painter().circle_filled(egui::pos2(r.left() + 12.0, r.center().y), 5.5, swatch);
+                    if response.clicked() {
+                        cmd = Some(TabCmd::Color(Some(i as u8)));
+                    }
+                }
+                ui.separator();
+                if ui.add_enabled(color.is_some(), Button::new("Без цвета")).clicked() {
+                    cmd = Some(TabCmd::Color(None));
+                }
+            });
+        });
+        ui.menu_button("Группа вкладок", |ui| {
+            ui.set_min_width(230.0);
+            let alone = order.len() < 2;
+            if ui.add_enabled(!alone, Button::new("Новая группа справа")).clicked() {
+                cmd = Some(TabCmd::NewGroup(egui_stack::Split::Right));
+            }
+            if ui.add_enabled(!alone, Button::new("Новая группа снизу")).clicked() {
+                cmd = Some(TabCmd::NewGroup(egui_stack::Split::Below));
+            }
+            if ui.button("Переместить в другую группу").clicked() {
+                cmd = Some(TabCmd::OtherGroup);
+            }
+        });
+        if let Some(cmd) = cmd {
+            self.actions.push(Action::TabCmd(id, cmd));
+            ui.close();
+        }
+    }
+}
+
 impl TabViewer for Viewer<'_> {
     type Tab = Pane;
 
@@ -2154,7 +2565,8 @@ impl TabViewer for Viewer<'_> {
         };
         let size = self.app.settings.look.ui_size - 0.5;
         let mut job = egui::text::LayoutJob::default();
-        let dot = crate::widgets::kind_color(&title, pal);
+        let tint = self.app.doc_color(doc);
+        let dot = tint.unwrap_or_else(|| crate::widgets::kind_color(&title, pal));
         job.append(
             "● ",
             0.0,
@@ -2204,11 +2616,6 @@ impl TabViewer for Viewer<'_> {
         let pane = *tab;
         let actions = &mut *self.actions;
         let modal_open = self.modal_open;
-        let min_width = match pane {
-            Pane::Db => 300.0,
-            Pane::Settings | Pane::Diff => 380.0,
-            _ => 0.0,
-        };
         let mut body = |ui: &mut Ui| match pane {
             Pane::Welcome => app.welcome(ui, &pal, actions),
             Pane::Doc(id) => app.doc_pane(ui, id, &pal, actions, modal_open),
@@ -2220,7 +2627,11 @@ impl TabViewer for Viewer<'_> {
             }
             Pane::Project => {
                 let recent = app.settings.recent_projects.clone();
+                app.project.show_size = app.settings.project_size;
+                app.project.show_date = app.settings.project_date;
                 side.show(ui, |ui| app.project.ui(ui, &pal, &recent));
+                app.settings.project_size = app.project.show_size;
+                app.settings.project_date = app.project.show_date;
             }
             Pane::Console => {
                 app.console_shown = true;
@@ -2246,13 +2657,23 @@ impl TabViewer for Viewer<'_> {
             Pane::Db => app.db.ui(ui, &pal, &mut app.remotes[0].store, font_size),
             Pane::Preview => app.preview_pane(ui, &pal),
         };
-        if ui.available_width() < min_width {
-            ScrollArea::horizontal()
+        let (min_w, min_h) = pane.min_size();
+        let room = ui.available_size();
+        let fixed = matches!(pane, Pane::Doc(_) | Pane::Welcome | Pane::Preview);
+        if !fixed && (room.x + 0.5 < min_w || room.y + 0.5 < min_h) {
+            let size = egui::vec2(room.x.max(min_w), room.y.max(min_h));
+            ScrollArea::both()
                 .id_salt(("tror_narrow", pane))
                 .auto_shrink(false)
                 .show(ui, |ui| {
-                    ui.set_width(min_width);
-                    body(ui);
+                    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+                    let mut inner = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(rect)
+                            .layout(Layout::top_down(Align::Min)),
+                    );
+                    inner.set_clip_rect(inner.clip_rect().intersect(ui.clip_rect()));
+                    body(&mut inner);
                 });
         } else {
             body(ui);
@@ -2260,6 +2681,10 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn context_menu(&mut self, ui: &mut Ui, tab: &mut Pane, _path: egui_stack::TabPath) {
+        if let Pane::Doc(id) = *tab {
+            self.tab_menu(ui, id);
+            ui.separator();
+        }
         if !matches!(*tab, Pane::Welcome | Pane::Preview)
             && ui.button("В отдельное окно системы").clicked()
         {
@@ -2291,6 +2716,37 @@ impl TabViewer for Viewer<'_> {
             return egui_stack::tab_viewer::OnCloseResponse::Ignore;
         }
         egui_stack::tab_viewer::OnCloseResponse::Close
+    }
+
+    fn tab_style_override(
+        &self,
+        tab: &Pane,
+        global: &egui_stack::TabStyle,
+    ) -> Option<egui_stack::TabStyle> {
+        let Pane::Doc(id) = *tab else {
+            return None;
+        };
+        let doc = self.app.docs.iter().find(|d| d.id == id)?;
+        let color = self.app.doc_color(doc)?;
+        let mut style = global.clone();
+        let mix = |base: Color32, amount: f32| theme::blend(base, color, amount);
+        style.inactive.bg_fill = mix(self.pal.mantle, 0.16);
+        style.hovered.bg_fill = mix(self.pal.crust, 0.24);
+        style.inactive_with_kb_focus.bg_fill = style.inactive.bg_fill;
+        for state in [
+            &mut style.active,
+            &mut style.focused,
+            &mut style.active_with_kb_focus,
+            &mut style.focused_with_kb_focus,
+        ] {
+            state.bg_fill = mix(state.bg_fill, 0.22);
+            state.outline_color = mix(state.outline_color, 0.5);
+        }
+        Some(style)
+    }
+
+    fn close_in_tab_menu(&self, tab: &Pane) -> bool {
+        !matches!(tab, Pane::Doc(_))
     }
 
     fn is_closeable(&self, tab: &Pane) -> bool {
@@ -2332,8 +2788,6 @@ impl eframe::App for TrorApp {
             }
         }
         self.project.tree = self.settings.project_tree;
-        self.project.show_size = self.settings.project_size;
-        self.project.show_date = self.settings.project_date;
         self.project.upload_target = self.remotes.iter().find_map(|r| r.peer_label());
         crate::complete::set_custom(&self.settings.dictionaries);
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -2361,6 +2815,7 @@ impl eframe::App for TrorApp {
         }
         self.check_missing(&ctx);
         let modal_open = self.goto.is_some()
+            || self.rename.is_some()
             || self.confirm.is_some()
             || self.remotes.iter().any(|r| r.modal_open())
             || self.console.modal_open()
@@ -2460,6 +2915,7 @@ impl eframe::App for TrorApp {
         {
             let _ = self.dock.focus_tab(path);
         }
+        self.refresh_tab_orders();
         let mut dock = std::mem::replace(&mut self.dock, DockState::new(Vec::new()));
         let style = dock::style(&pal, ui.style(), self.settings.look.radius);
         self.console_shown = false;
@@ -2477,6 +2933,7 @@ impl eframe::App for TrorApp {
                 .style(style)
                 .show_leaf_close_all_buttons(false)
                 .show_leaf_collapse_buttons(false)
+                .leaf_min_size(&|tabs: &[Pane]| dock::leaf_min(tabs) - egui::vec2(0.0, 34.0))
                 .show_inside(ui, &mut viewer);
         });
         if let Some((_, Pane::Doc(id))) = dock.find_active_focused()
@@ -2570,6 +3027,7 @@ impl eframe::App for TrorApp {
         }
 
         self.goto_modal(&ctx, &pal);
+        self.rename_modal(&ctx, &pal);
         self.confirm_modal(&ctx);
         let mut panes = self.hosts_panes();
         panes.extend([Pane::Console, Pane::Db, Pane::Project]);
@@ -2583,6 +3041,8 @@ impl eframe::App for TrorApp {
         for action in actions {
             self.run(action, &ctx);
         }
+        self.drain_close_queue();
+        self.trim_hosts();
 
         let title = match self.docs.get(self.active) {
             Some(doc) => format!(
