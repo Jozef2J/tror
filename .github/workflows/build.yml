@@ -18,7 +18,7 @@ jobs:
           - os: windows-latest
             artifact: tror-windows-x86_64
             path: target/release/tror.exe
-          - os: macos-15-intel
+          - os: macos-15
             artifact: tror-macos-universal
             path: Tror-macos.zip
     runs-on: ${{ matrix.os }}
