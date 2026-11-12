@@ -17,6 +17,8 @@ pub enum Pane {
     Diff,
     Db,
     Preview,
+    Project,
+    HostsN(u8),
 }
 
 #[derive(PartialEq)]
@@ -27,13 +29,52 @@ enum Zone {
 }
 
 impl Pane {
-    pub fn title(self) -> &'static str {
+    pub fn hosts(index: usize) -> Pane {
+        match index {
+            0 => Pane::Hosts,
+            1 => Pane::Hosts2,
+            n => Pane::HostsN(n.min(250) as u8),
+        }
+    }
+
+    pub fn host_index(self) -> Option<usize> {
+        match self {
+            Pane::Hosts => Some(0),
+            Pane::Hosts2 => Some(1),
+            Pane::HostsN(n) => Some(n as usize),
+            _ => None,
+        }
+    }
+
+    pub fn min_size(self) -> (f32, f32) {
+        match self {
+            Pane::Welcome | Pane::Doc(_) => (120.0, 60.0),
+            Pane::Hosts | Pane::Hosts2 | Pane::HostsN(_) | Pane::Project => (170.0, 120.0),
+            Pane::Log => (200.0, 80.0),
+            Pane::Console => (240.0, 100.0),
+            Pane::ServerSearch => (240.0, 100.0),
+            Pane::Db => (300.0, 160.0),
+            Pane::Settings | Pane::Diff => (320.0, 160.0),
+            Pane::Preview => (200.0, 120.0),
+        }
+    }
+
+    pub fn title(self) -> String {
+        match self {
+            Pane::Hosts2 => "Подключение 2".into(),
+            Pane::HostsN(n) => format!("Подключение {}", n as usize + 1),
+            other => other.label().into(),
+        }
+    }
+
+    fn label(self) -> &'static str {
         match self {
             Pane::Welcome => "Tror",
             Pane::Doc(_) => "",
             Pane::Hosts => "Удалённые хосты",
-            Pane::Hosts2 => "Второе подключение",
-            Pane::Console => "SSH-консоль",
+            Pane::Hosts2 | Pane::HostsN(_) => "",
+            Pane::Project => "Проект",
+            Pane::Console => "Консоль",
             Pane::Log => "Журнал",
             Pane::ServerSearch => "Поиск на сервере",
             Pane::Settings => "Настройки",
@@ -45,7 +86,7 @@ impl Pane {
 
     fn zone(self) -> Zone {
         match self {
-            Pane::Hosts | Pane::Hosts2 => Zone::Left,
+            Pane::Hosts | Pane::Hosts2 | Pane::HostsN(_) | Pane::Project => Zone::Left,
             Pane::Console | Pane::Log | Pane::ServerSearch => Zone::Bottom,
             _ => Zone::Center,
         }
@@ -135,8 +176,11 @@ pub fn show(dock: &mut DockState<Pane>, pane: Pane, floats: &Floats) {
         return;
     }
     let twin = match pane {
-        Pane::Hosts => dock.find_tab(&Pane::Hosts2),
-        Pane::Hosts2 => dock.find_tab(&Pane::Hosts),
+        Pane::Hosts | Pane::Hosts2 | Pane::HostsN(_) => dock
+            .iter_all_tabs()
+            .map(|(_, tab)| *tab)
+            .find(|tab| tab.host_index().is_some() && *tab != pane)
+            .and_then(|tab| dock.find_tab(&tab)),
         _ => None,
     };
     let beside = (pane == Pane::Preview)
@@ -213,6 +257,134 @@ pub fn sync_with(dock: &mut DockState<Pane>, docs: &[u64], welcome: bool) {
     }
 }
 
+pub struct TabPainter;
+
+impl egui_stack::DockPainter for TabPainter {
+    fn tab(&self, painter: &egui::Painter, tab: &egui_stack::TabPaint<'_>) {
+        egui_stack::DockPainter::tab(&egui_stack::StylePainter, painter, tab);
+        let Some(close) = tab.close else {
+            return;
+        };
+        let lit = close.state.contains(egui_stack::PartState::HOVERED)
+            || close.state.contains(egui_stack::PartState::FOCUSED);
+        if !lit {
+            return;
+        }
+        let inner = egui::Rect::from_center_size(
+            close.rect.center(),
+            egui::vec2(18.0, 18.0).min(tab.rect.size() - egui::vec2(4.0, 6.0)),
+        )
+        .intersect(tab.rect.shrink2(egui::vec2(2.0, 3.0)));
+        painter.rect_filled(inner, 4.0, tab.style.buttons.add_tab_bg_fill);
+        let d = 4.0;
+        let c = inner.center();
+        let stroke = Stroke::new(1.2, tab.style.buttons.close_tab_active_color);
+        painter.line_segment([c + egui::vec2(-d, -d), c + egui::vec2(d, d)], stroke);
+        painter.line_segment([c + egui::vec2(d, -d), c + egui::vec2(-d, d)], stroke);
+    }
+}
+
+pub static TAB_PAINTER: TabPainter = TabPainter;
+
+fn leaf_min(tabs: &[Pane]) -> egui::Vec2 {
+    tabs.iter().fold(egui::Vec2::ZERO, |acc, tab| {
+        let (w, h) = tab.min_size();
+        acc.max(egui::vec2(w, h + 34.0))
+    })
+}
+
+pub fn enforce_min(dock: &mut DockState<Pane>) {
+    let surfaces: Vec<SurfaceIndex> = dock.iter_surfaces_indexed().map(|(i, _)| i).collect();
+    for surface in surfaces {
+        let Some(tree) = dock.get_surface_mut(surface).and_then(|s| s.node_tree_mut()) else {
+            continue;
+        };
+        let leaves: Vec<(NodeIndex, egui::Rect, egui::Vec2)> = tree
+            .iter()
+            .enumerate()
+            .filter_map(|(i, node)| {
+                let leaf = node.get_leaf()?;
+                Some((NodeIndex(i), leaf.rect(), leaf_min(leaf.tabs())))
+            })
+            .collect();
+        for (node, rect, min) in leaves {
+            if !rect.is_finite() || rect.width() <= 1.0 {
+                continue;
+            }
+            for (horizontal, have, need) in [
+                (true, rect.width(), min.x),
+                (false, rect.height(), min.y),
+            ] {
+                if have + 0.5 >= need {
+                    continue;
+                }
+                let mut child = node;
+                while let Some(parent) = tree.parent(child) {
+                    let Some(linear) = tree[parent].get_linear_mut() else {
+                        child = parent;
+                        continue;
+                    };
+                    let along = matches!(linear.dir, egui_stack::LinearDir::Horizontal) == horizontal;
+                    if !along || linear.len() < 2 {
+                        child = parent;
+                        continue;
+                    }
+                    let Some(index) = linear.position(child) else {
+                        break;
+                    };
+                    let span = if horizontal {
+                        linear.rect().width()
+                    } else {
+                        linear.rect().height()
+                    };
+                    if span <= need * 1.1 {
+                        break;
+                    }
+                    let shares = linear.shares().to_vec();
+                    let total: f32 = shares.iter().sum();
+                    let wanted = (need + 2.0) / span * total;
+                    let current = shares[index];
+                    if wanted > current {
+                        let rest = total - current;
+                        let left = (total - wanted).max(total * 0.1);
+                        let scale = if rest > 0.0 { left / rest } else { 1.0 };
+                        let updated: Vec<f32> = shares
+                            .iter()
+                            .enumerate()
+                            .map(|(i, s)| if i == index { total - left } else { s * scale })
+                            .collect();
+                        linear.set_shares(updated);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    let windows: Vec<SurfaceIndex> = dock
+        .iter_surfaces_indexed()
+        .map(|(i, _)| i)
+        .filter(|s| *s != SurfaceIndex::main())
+        .collect();
+    for surface in windows {
+        let Some(tree) = dock.get_surface(surface).and_then(|s| s.node_tree()) else {
+            continue;
+        };
+        let min = tree
+            .iter()
+            .filter_map(|node| node.get_leaf())
+            .fold(egui::Vec2::ZERO, |acc, leaf| acc.max(leaf_min(leaf.tabs())));
+        if let Some(window) = dock.get_window_state_mut(surface) {
+            let rect = window.rect();
+            if rect.is_finite()
+                && rect.width() > 1.0
+                && (rect.width() + 1.0 < min.x || rect.height() + 1.0 < min.y)
+            {
+                window.set_size(rect.size().max(min));
+            }
+        }
+    }
+}
+
 pub fn style(pal: &Palette, egui_style: &egui::Style, radius: u8) -> Style {
     let mut style = Style::from_egui(egui_style);
     let round = CornerRadius {
@@ -265,7 +437,8 @@ pub fn style(pal: &Palette, egui_style: &egui::Style, radius: u8) -> Style {
 
     style.buttons.close_tab_color = pal.faint;
     style.buttons.close_tab_active_color = pal.text;
-    style.buttons.close_tab_bg_fill = pal.surface;
+    style.buttons.close_tab_bg_fill = Color32::TRANSPARENT;
+    style.buttons.add_tab_bg_fill = pal.surface_hover;
 
     style.overlay.selection_color = pal.accent.gamma_multiply(0.22);
     style.overlay.button_color = pal.accent.gamma_multiply(0.6);

@@ -1,0 +1,87 @@
+setTimeout(handler, timeout, ...args): number
+setInterval(handler, timeout, ...args): number
+clearTimeout(id): void
+clearInterval(id): void
+addEventListener(type, listener, options): void
+removeEventListener(type, listener, options): void
+querySelector(selectors): Element | null
+querySelectorAll(selectors): NodeList
+getElementById(elementId): HTMLElement | null
+getElementsByClassName(classNames): HTMLCollection
+createElement(tagName, options): HTMLElement
+fetch(resource, options): Promise<Response>
+JSON.stringify(value, replacer, space): string
+JSON.parse(text, reviver): any
+parseInt(string, radix): number
+parseFloat(string): number
+encodeURIComponent(uriComponent): string
+decodeURIComponent(encodedURIComponent): string
+alert(message): void
+confirm(message): boolean
+prompt(message, defaultValue): string | null
+console.log(...data): void
+map(callbackFn(element, index, array), thisArg): Array
+filter(callbackFn(element, index, array), thisArg): Array
+forEach(callbackFn(element, index, array), thisArg): void
+reduce(callbackFn(accumulator, currentValue, index, array), initialValue): any
+find(callbackFn(element, index, array), thisArg): any
+findIndex(callbackFn(element, index, array), thisArg): number
+some(callbackFn(element, index, array), thisArg): boolean
+every(callbackFn(element, index, array), thisArg): boolean
+includes(searchElement, fromIndex): boolean
+indexOf(searchElement, fromIndex): number
+slice(start, end): Array | string
+splice(start, deleteCount, ...items): Array
+join(separator): string
+push(...items): number
+concat(...values): Array
+split(separator, limit): string[]
+replace(pattern, replacement): string
+replaceAll(pattern, replacement): string
+substring(indexStart, indexEnd): string
+startsWith(searchString, position): boolean
+endsWith(searchString, endPosition): boolean
+padStart(targetLength, padString): string
+toFixed(digits): string
+setAttribute(name, value): void
+getAttribute(name): string | null
+removeAttribute(name): void
+insertAdjacentHTML(position, text): void
+appendChild(aChild): Node
+insertBefore(newNode, referenceNode): Node
+closest(selectors): Element | null
+Object.keys(obj): string[]
+Object.values(obj): any[]
+Object.entries(obj): [string, any][]
+Object.assign(target, ...sources): object
+Promise.all(iterable): Promise
+$.ajax(url, settings): jqXHR
+$.get(url, data, success, dataType): jqXHR
+$.post(url, data, success, dataType): jqXHR
+$.getJSON(url, data, success): jqXHR
+on(events, selector, data, handler): jQuery
+off(events, selector, handler): jQuery
+one(events, selector, data, handler): jQuery
+attr(attributeName, value): string | jQuery
+prop(propertyName, value): any | jQuery
+css(propertyName, value): string | jQuery
+addClass(className): jQuery
+removeClass(className): jQuery
+toggleClass(className, state): jQuery
+data(key, value): any | jQuery
+val(value): any | jQuery
+html(htmlString): string | jQuery
+text(text): string | jQuery
+animate(properties, duration, easing, complete): jQuery
+fadeIn(duration, easing, complete): jQuery
+fadeOut(duration, easing, complete): jQuery
+slideToggle(duration, easing, complete): jQuery
+each(function(index, element)): jQuery
+trigger(eventType, extraParameters): jQuery
+append(content, ...content): jQuery
+prepend(content, ...content): jQuery
+BX.ajax.runAction(action, config): Promise — Битрикс
+BX.ajax.runComponentAction(component, action, config): Promise
+BX.bind(element, eventName, callback): void
+BX.ready(handler): void
+BX.message(key): string

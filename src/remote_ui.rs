@@ -1,14 +1,15 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 
 use eframe::egui::{
-    self, Button, Color32, ComboBox, Key, Pos2, Rect, RichText, ScrollArea, Sense, Stroke,
-    TextEdit, Ui,
+    self, Button, Color32, ComboBox, Key, Rect, RichText, ScrollArea, Sense, TextEdit, Ui,
 };
 
 use crate::app::{dialog, dialog_button, size_label};
-use crate::remote::{self, Cmd, Connection, Entry, Event, Profile, Protocol, Store};
+use crate::remote::{self, Attrs, Cmd, Connection, Entry, Event, Profile, Protocol, Store};
 use crate::theme::Palette;
+use crate::widgets::{self, chevron, date_label, dots_button, paint_icon, refresh_button};
 
 pub enum PanelEvent {
     Open {
@@ -29,6 +30,7 @@ pub enum PanelEvent {
     OpenLocal(Vec<PathBuf>),
     Toast(String),
     Relay {
+        target: u8,
         path: String,
         data: Vec<u8>,
     },
@@ -37,26 +39,41 @@ pub enum PanelEvent {
 enum Walk {
     Size,
     Download(PathBuf),
-    Relay(String),
+    Relay(u8, String),
 }
 
 #[derive(Clone)]
 pub struct Dragged {
-    panel: u8,
+    pub panel: u8,
     pub paths: Vec<(String, bool)>,
 }
 
 enum Prompt {
-    NewFolder(String),
-    NewFile(String),
+    NewFolder(String, String),
+    NewFile(String, String),
     Rename { from: String, name: String },
     Delete(Vec<(String, bool)>),
+}
+
+struct AttrsDialog {
+    items: Vec<(String, bool)>,
+    loaded: bool,
+    info: Option<Attrs>,
+    mode: u32,
+    octal: String,
+    recursive: bool,
+    dirs: bool,
+    files: bool,
+    mtime: String,
+    mtime_was: String,
 }
 
 struct ProfileEditor {
     drafts: Vec<Profile>,
     index: usize,
     reveal: bool,
+    probe: Option<Receiver<Result<String, String>>>,
+    result: Option<Result<String, String>>,
 }
 
 struct Saver {
@@ -65,13 +82,21 @@ struct Saver {
     queue: Vec<Cmd>,
 }
 
+struct Row {
+    path: String,
+    name: String,
+    depth: usize,
+    entry: Option<Entry>,
+}
+
 pub struct RemotePanel {
     pub visible: bool,
     pub id: u8,
-    pub peer: Option<String>,
-    pub outgoing: Option<Vec<(String, bool)>>,
+    pub tree: bool,
+    pub peers: Vec<(u8, String)>,
+    pub outgoing: Option<(u8, Vec<(String, bool)>)>,
     pub incoming: Option<Dragged>,
-    relay: HashMap<String, String>,
+    relay: HashMap<String, (u8, String)>,
     walks: HashMap<String, Walk>,
     pending: usize,
     progress: Option<(u64, u64)>,
@@ -85,10 +110,14 @@ pub struct RemotePanel {
     cwd: String,
     path_input: String,
     entries: Vec<Entry>,
+    children: HashMap<String, Vec<Entry>>,
+    expanded: BTreeSet<String>,
+    loading: HashSet<String>,
     marked: BTreeSet<String>,
-    anchor: Option<usize>,
+    anchor: Option<String>,
     busy: Option<String>,
     prompt: Option<Prompt>,
+    attrs: Option<AttrsDialog>,
     host_key: Option<(String, bool)>,
     editor: Option<ProfileEditor>,
     save_to: HashMap<String, PathBuf>,
@@ -105,115 +134,6 @@ pub struct RemotePanel {
 
 const DEFAULT_EXCLUDES: &str = "bitrix/cache, bitrix/managed_cache, bitrix/stack_cache, bitrix/backup, upload/resize_cache, node_modules, .git";
 
-fn date_label(secs: u64) -> String {
-    chrono::DateTime::from_timestamp(secs as i64, 0)
-        .map(|d| {
-            d.with_timezone(&chrono::Local)
-                .format("%d.%m.%Y %H:%M")
-                .to_string()
-        })
-        .unwrap_or_default()
-}
-
-pub fn kind_color(name: &str, pal: &Palette) -> Color32 {
-    let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
-    match ext.as_str() {
-        "php" | "phtml" | "twig" | "tpl" => Color32::from_rgb(0x9d, 0x8c, 0xf2),
-        "js" | "mjs" | "ts" | "json" => Color32::from_rgb(0xe5, 0xc0, 0x5a),
-        "css" | "scss" | "less" => Color32::from_rgb(0x5a, 0xa9, 0xf2),
-        "html" | "htm" | "xml" | "svg" => Color32::from_rgb(0xf0, 0x8a, 0x5d),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" => Color32::from_rgb(0x6c, 0xc7, 0x8a),
-        "zip" | "gz" | "tar" | "rar" | "7z" => Color32::from_rgb(0xc9, 0x8f, 0x6b),
-        _ => pal.faint,
-    }
-}
-
-fn paint_icon(painter: &egui::Painter, center: Pos2, is_dir: bool, name: &str, pal: &Palette) {
-    if is_dir {
-        let color = pal.accent.gamma_multiply(0.9);
-        let body = Rect::from_center_size(center + egui::vec2(0.0, 1.0), egui::vec2(14.0, 10.0));
-        let tab = Rect::from_min_size(body.left_top() - egui::vec2(0.0, 2.5), egui::vec2(6.5, 4.0));
-        painter.rect_filled(tab, 1.5, color.gamma_multiply(0.75));
-        painter.rect_filled(body, 2.0, color);
-        painter.line_segment(
-            [
-                body.left_top() + egui::vec2(1.0, 2.5),
-                body.right_top() + egui::vec2(-1.0, 2.5),
-            ],
-            Stroke::new(1.0, pal.mantle.gamma_multiply(0.35)),
-        );
-    } else {
-        let color = kind_color(name, pal);
-        let page = Rect::from_center_size(center, egui::vec2(10.5, 13.5));
-        let fold = 3.5;
-        let outline = vec![
-            page.left_top(),
-            page.right_top() - egui::vec2(fold, 0.0),
-            page.right_top() + egui::vec2(0.0, fold),
-            page.right_bottom(),
-            page.left_bottom(),
-        ];
-        painter.add(egui::Shape::closed_line(outline, Stroke::new(1.1, color)));
-        painter.line_segment(
-            [
-                page.right_top() - egui::vec2(fold, 0.0),
-                page.right_top() + egui::vec2(-fold, fold),
-            ],
-            Stroke::new(1.0, color),
-        );
-        painter.line_segment(
-            [
-                page.right_top() + egui::vec2(-fold, fold),
-                page.right_top() + egui::vec2(0.0, fold),
-            ],
-            Stroke::new(1.0, color),
-        );
-        for (i, w) in [5.5, 4.0].into_iter().enumerate() {
-            let y = page.center().y + 1.0 + i as f32 * 3.0;
-            painter.line_segment(
-                [
-                    egui::pos2(page.left() + 2.5, y),
-                    egui::pos2(page.left() + 2.5 + w, y),
-                ],
-                Stroke::new(1.0, color.gamma_multiply(0.7)),
-            );
-        }
-    }
-}
-
-fn refresh_button(ui: &mut Ui, pal: &Palette) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), Sense::click());
-    if response.hovered() {
-        ui.painter().rect_filled(rect, 5.0, pal.surface);
-    }
-    let color = if response.hovered() {
-        pal.text
-    } else {
-        pal.subtext
-    };
-    let c = rect.center();
-    let r = 5.5;
-    let points: Vec<Pos2> = (0..=20)
-        .map(|i| {
-            let a = -0.4 + i as f32 / 20.0 * 5.1;
-            c + egui::vec2(a.cos() * r, a.sin() * r)
-        })
-        .collect();
-    let tip = points[0];
-    ui.painter()
-        .add(egui::Shape::line(points, Stroke::new(1.5, color)));
-    ui.painter().add(egui::Shape::convex_polygon(
-        vec![
-            tip + egui::vec2(-3.2, -3.6),
-            tip + egui::vec2(2.6, -2.6),
-            tip + egui::vec2(-0.6, 2.2),
-        ],
-        color,
-        Stroke::NONE,
-    ));
-    response
-}
-
 impl RemotePanel {
     pub fn new(id: u8) -> Self {
         let path = eframe::storage_dir("Tror").map(|dir| dir.join("connections.json"));
@@ -221,7 +141,8 @@ impl RemotePanel {
         Self {
             visible: false,
             id,
-            peer: None,
+            tree: false,
+            peers: Vec::new(),
             outgoing: None,
             incoming: None,
             relay: HashMap::new(),
@@ -249,10 +170,14 @@ impl RemotePanel {
             cwd: String::new(),
             path_input: String::new(),
             entries: Vec::new(),
+            children: HashMap::new(),
+            expanded: BTreeSet::new(),
+            loading: HashSet::new(),
             marked: BTreeSet::new(),
             anchor: None,
             busy: None,
             prompt: None,
+            attrs: None,
             host_key: None,
             editor: None,
             save_to: HashMap::new(),
@@ -280,6 +205,11 @@ impl RemotePanel {
             || self.host_key.is_some()
             || self.editor.is_some()
             || self.dropped.is_some()
+            || self.attrs.is_some()
+    }
+
+    pub fn connected(&self) -> bool {
+        self.connected
     }
 
     pub fn can_upload(&self) -> bool {
@@ -317,7 +247,22 @@ impl RemotePanel {
     }
 
     fn list(&mut self, path: String) {
+        self.loading.remove(&path);
         self.send(Cmd::List(path), "Чтение каталога…");
+    }
+
+    fn load(&mut self, path: String) {
+        if self.loading.insert(path.clone()) {
+            self.send(Cmd::List(path), "Чтение каталога…");
+        }
+    }
+
+    fn refresh_dir(&mut self, dir: &str) {
+        if dir == self.cwd {
+            self.list(self.cwd.clone());
+        } else if self.tree && self.children.contains_key(dir) {
+            self.load(dir.to_owned());
+        }
     }
 
     fn disconnect(&mut self) {
@@ -325,6 +270,8 @@ impl RemotePanel {
         self.connected = false;
         self.queue.clear();
         self.entries.clear();
+        self.children.clear();
+        self.loading.clear();
         self.marked.clear();
         self.busy = None;
         self.pending = 0;
@@ -332,6 +279,7 @@ impl RemotePanel {
         self.relay.clear();
         self.walks.clear();
         self.host_key = None;
+        self.attrs = None;
     }
 
     fn connect(&mut self, ctx: &egui::Context) {
@@ -344,6 +292,8 @@ impl RemotePanel {
         }));
         self.connected = false;
         self.entries.clear();
+        self.children.clear();
+        self.expanded.clear();
         self.busy = Some("Подключение…".into());
     }
 
@@ -403,6 +353,11 @@ impl RemotePanel {
     }
 
     pub fn upload_local(&mut self, paths: Vec<PathBuf>) {
+        let dir = self.cwd.clone();
+        self.upload_local_to(paths, &dir);
+    }
+
+    pub fn upload_local_to(&mut self, paths: Vec<PathBuf>, dir: &str) {
         let mut files: Vec<(PathBuf, String)> = Vec::new();
         let mut stack: Vec<(PathBuf, String)> = paths
             .into_iter()
@@ -432,7 +387,7 @@ impl RemotePanel {
         for (local, relative) in files {
             match std::fs::read(&local) {
                 Ok(data) => {
-                    let path = remote::join(&self.cwd, &relative);
+                    let path = remote::join(dir, &relative);
                     self.send(
                         Cmd::Upload {
                             path,
@@ -511,17 +466,17 @@ impl RemotePanel {
         self.conn.as_ref().is_some_and(|c| c.profile == profile)
     }
 
-    pub fn relay(&mut self, items: Vec<(String, bool)>, target_dir: &str) {
+    pub fn relay(&mut self, items: Vec<(String, bool)>, target: u8, target_dir: &str) {
         for (path, dir) in items {
             let name = remote::file_name(&path).to_owned();
             if dir {
                 self.walks
-                    .insert(path.clone(), Walk::Relay(target_dir.to_owned()));
+                    .insert(path.clone(), Walk::Relay(target, target_dir.to_owned()));
                 self.send(Cmd::Walk(path), format!("Чтение папки {name}…"));
                 continue;
             }
             self.relay
-                .insert(path.clone(), remote::join(target_dir, &name));
+                .insert(path.clone(), (target, remote::join(target_dir, &name)));
             self.send(Cmd::Download(path), format!("Передача {name}…"));
         }
     }
@@ -547,6 +502,17 @@ impl RemotePanel {
                 .min(self.store.profiles.len().saturating_sub(1));
         }
         let mut out = Vec::new();
+        if let Some(editor) = &mut self.editor
+            && let Some(rx) = &editor.probe
+            && let Ok(result) = rx.try_recv()
+        {
+            editor.probe = None;
+            match &result {
+                Ok(text) => crate::trace::popup(format!("Подключение работает: {text}"), true),
+                Err(e) => crate::trace::popup(format!("Не удалось подключиться: {e}"), false),
+            }
+            editor.result = Some(result);
+        }
         self.poll_saver(&mut out);
         if let Some(job) = &self.search_job {
             let mut finished = false;
@@ -614,20 +580,52 @@ impl RemotePanel {
                         dir: path.clone(),
                         names: entries.iter().map(|e| e.name.clone()).collect(),
                     });
+                    let inside = |p: &str, dir: &str| {
+                        remote::parent(p) == dir
+                    };
+                    if self.loading.remove(&path) {
+                        self.marked.retain(|m| {
+                            !inside(m, &path)
+                                || entries.iter().any(|e| remote::join(&path, &e.name) == *m)
+                        });
+                        if path == self.cwd {
+                            self.entries = entries.clone();
+                        }
+                        self.children.insert(path, entries);
+                        continue;
+                    }
                     if path != self.cwd {
                         self.marked.clear();
                         self.anchor = None;
+                        self.expanded.clear();
+                        self.children.clear();
                     }
                     self.path_input = path.clone();
-                    self.cwd = path;
-                    self.marked
-                        .retain(|name| entries.iter().any(|e| &e.name == name));
+                    self.cwd = path.clone();
+                    self.marked.retain(|m| {
+                        !inside(m, &path)
+                            || entries.iter().any(|e| remote::join(&path, &e.name) == *m)
+                    });
+                    self.children.insert(path, entries.clone());
                     self.entries = entries;
+                    let stale: Vec<String> = self
+                        .expanded
+                        .iter()
+                        .filter(|dir| *dir != &self.cwd)
+                        .cloned()
+                        .collect();
+                    for dir in stale {
+                        self.load(dir);
+                    }
                 }
                 Event::Downloaded { path, data } => {
                     self.finished();
-                    if let Some(target) = self.relay.remove(&path) {
-                        out.push(PanelEvent::Relay { path: target, data });
+                    if let Some((target, to)) = self.relay.remove(&path) {
+                        out.push(PanelEvent::Relay {
+                            target,
+                            path: to,
+                            data,
+                        });
                         continue;
                     }
                     match self.save_to.remove(&path) {
@@ -652,7 +650,7 @@ impl RemotePanel {
                 }
                 Event::Uploaded { path, doc } => {
                     self.finished();
-                    let refresh = remote::parent(&path) == self.cwd;
+                    let dir = remote::parent(&path);
                     match doc {
                         Some(doc) => out.push(PanelEvent::Uploaded { doc, path }),
                         None => out.push(PanelEvent::Toast(format!(
@@ -660,8 +658,8 @@ impl RemotePanel {
                             remote::file_name(&path)
                         ))),
                     }
-                    if refresh {
-                        self.list(self.cwd.clone());
+                    if self.pending == 0 || dir != self.cwd {
+                        self.refresh_dir(&dir);
                     }
                 }
                 Event::Progress { done, total } => self.progress = Some((done, total)),
@@ -682,7 +680,7 @@ impl RemotePanel {
                             let text = format!(
                                 "Папка {name}: файлов {}, {}",
                                 files.len(),
-                                crate::app::size_label(bytes as usize)
+                                size_label(bytes as usize)
                             );
                             self.push_log(text.clone(), false);
                             out.push(PanelEvent::Toast(text));
@@ -698,13 +696,30 @@ impl RemotePanel {
                                 self.send(Cmd::Download(path), format!("Скачивание папки {name}…"));
                             }
                         }
-                        Some(Walk::Relay(target)) => {
+                        Some(Walk::Relay(target, dir)) => {
                             for (path, _) in files {
-                                self.relay
-                                    .insert(path.clone(), remote::join(&target, &relative(&path)));
+                                self.relay.insert(
+                                    path.clone(),
+                                    (target, remote::join(&dir, &relative(&path))),
+                                );
                                 self.send(Cmd::Download(path), format!("Передача папки {name}…"));
                             }
                         }
+                    }
+                }
+                Event::Stat { path, attrs } => {
+                    self.finished();
+                    if let Some(dialog) = &mut self.attrs
+                        && dialog.items.first().is_some_and(|(p, _)| *p == path)
+                    {
+                        dialog.loaded = true;
+                        if let Some(mode) = attrs.perm {
+                            dialog.mode = mode & 0o7777;
+                            dialog.octal = format!("{:03o}", dialog.mode);
+                        }
+                        dialog.mtime = attrs.mtime.map(date_label).unwrap_or_default();
+                        dialog.mtime_was = dialog.mtime.clone();
+                        dialog.info = Some(attrs);
                     }
                 }
                 Event::Changed(dir) => {
@@ -712,10 +727,14 @@ impl RemotePanel {
                     if dir != self.cwd {
                         self.push_log(format!("Изменён каталог {dir}"), false);
                     }
-                    self.list(self.cwd.clone());
+                    self.refresh_dir(&dir);
+                    if dir != self.cwd && !self.children.contains_key(&dir) {
+                        self.list(self.cwd.clone());
+                    }
                 }
                 Event::Error(e) => {
                     self.finished();
+                    self.loading.clear();
                     out.push(PanelEvent::Toast(format!("Ошибка сервера: {e}")));
                 }
                 Event::Closed(e) => {
@@ -739,7 +758,59 @@ impl RemotePanel {
             index: self.selected.min(drafts.len() - 1),
             drafts,
             reveal: false,
+            probe: None,
+            result: None,
         });
+    }
+
+    fn open_attrs(&mut self, items: Vec<(String, bool)>) {
+        let Some((first, _)) = items.first().cloned() else {
+            return;
+        };
+        let known = self
+            .entries
+            .iter()
+            .chain(self.children.values().flatten())
+            .find(|e| remote::join(&remote::parent(&first), &e.name) == first)
+            .and_then(|e| e.perm)
+            .unwrap_or(0o644);
+        let has_dirs = items.iter().any(|(_, dir)| *dir);
+        self.attrs = Some(AttrsDialog {
+            items,
+            loaded: false,
+            info: None,
+            mode: known,
+            octal: format!("{known:03o}"),
+            recursive: false,
+            dirs: has_dirs,
+            files: true,
+            mtime: String::new(),
+            mtime_was: String::new(),
+        });
+        self.send(Cmd::Stat(first), "Чтение свойств…");
+    }
+
+    fn menu_items(&mut self, ui: &mut Ui, dir: &str) {
+        if ui.button("Новый файл…").clicked() {
+            self.prompt = Some(Prompt::NewFile(dir.to_owned(), String::new()));
+            ui.close();
+        }
+        if ui.button("Новая папка…").clicked() {
+            self.prompt = Some(Prompt::NewFolder(dir.to_owned(), String::new()));
+            ui.close();
+        }
+        if ui.button("Загрузить файлы с компьютера…").clicked() {
+            ui.close();
+            if let Some(files) = rfd::FileDialog::new().pick_files() {
+                self.upload_local_to(files, dir);
+            }
+        }
+        if ui.button("Загрузить папку с компьютера…").clicked() {
+            ui.close();
+            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                self.upload_local_to(vec![folder], dir);
+            }
+        }
     }
 
     pub fn ui(&mut self, ui: &mut Ui, pal: &Palette) {
@@ -760,16 +831,23 @@ impl RemotePanel {
         self.selected = self.selected.min(self.store.profiles.len() - 1);
         let active = self.conn.is_some();
         let mut edit = false;
-        ui.horizontal(|ui| {
-            let label = if active {
-                "Отключить"
-            } else {
-                "Подключить"
-            };
-            let button_w = 96.0;
+        let label = if active { "Отключить" } else { "Подключить" };
+        let button_w = ui.fonts_mut(|f| {
+            f.layout_no_wrap(
+                label.to_owned(),
+                egui::TextStyle::Button.resolve(ui.style()),
+                pal.text,
+            )
+            .size()
+            .x
+        }) + 22.0;
+        let stacked = ui.available_width() < button_w + 110.0;
+        let mut toggle = false;
+        let mut combo = |ui: &mut Ui, width: f32| {
             ui.add_enabled_ui(!active, |ui| {
-                ComboBox::from_id_salt("tror_profile")
-                    .width((ui.available_width() - button_w - 30.0).max(60.0))
+                ComboBox::from_id_salt(("tror_profile", self.id))
+                    .width(width)
+                    .truncate()
                     .selected_text(self.store.profiles[self.selected].name.clone())
                     .show_ui(ui, |ui| {
                         for (i, profile) in self.store.profiles.iter().enumerate() {
@@ -782,17 +860,35 @@ impl RemotePanel {
                         }
                     });
             });
+        };
+        if stacked {
+            let width = (ui.available_width() - 4.0).max(20.0);
+            combo(ui, width);
             if ui
-                .add_sized([button_w, 24.0], Button::new(label).fill(pal.surface))
+                .add_sized([width, 24.0], Button::new(label).fill(pal.surface).truncate())
                 .clicked()
             {
-                if active {
-                    self.disconnect();
-                } else {
-                    self.connect(&ctx);
-                }
+                toggle = true;
             }
-        });
+        } else {
+            ui.horizontal(|ui| {
+                let width = (ui.available_width() - button_w - 10.0).max(40.0);
+                combo(ui, width);
+                if ui
+                    .add_sized([button_w, 24.0], Button::new(label).fill(pal.surface))
+                    .clicked()
+                {
+                    toggle = true;
+                }
+            });
+        }
+        if toggle {
+            if active {
+                self.disconnect();
+            } else {
+                self.connect(&ctx);
+            }
+        }
         if edit {
             self.open_editor();
         }
@@ -802,7 +898,7 @@ impl RemotePanel {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let field = ui.add(
                     TextEdit::singleline(&mut self.path_input)
-                        .desired_width((ui.available_width() - 84.0).max(40.0))
+                        .desired_width((ui.available_width() - 60.0).max(30.0))
                         .font(egui::TextStyle::Small),
                 );
                 if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -813,24 +909,35 @@ impl RemotePanel {
                     .clicked()
                 {
                     self.list(self.cwd.clone());
+                    let open: Vec<String> = self.expanded.iter().cloned().collect();
+                    for dir in open {
+                        self.load(dir);
+                    }
                 }
-                ui.menu_button("Ещё", |ui| {
+                let dots = dots_button(ui, pal).on_hover_text("Ещё");
+                egui::Popup::menu(&dots).show(|ui| {
+                    ui.set_min_width(230.0);
                     if ui.button("Поиск на сервере…").clicked() {
                         self.want_search = true;
+                        ui.close();
                     }
                     ui.separator();
-                    if ui.button("Новый файл…").clicked() {
-                        self.prompt = Some(Prompt::NewFile(String::new()));
-                    }
-                    if ui.button("Новая папка…").clicked() {
-                        self.prompt = Some(Prompt::NewFolder(String::new()));
-                    }
-                    if ui.button("Загрузить файлы с компьютера…").clicked()
-                        && let Some(files) = rfd::FileDialog::new().pick_files()
-                    {
-                        self.upload_local(files);
-                    }
+                    let cwd = self.cwd.clone();
+                    self.menu_items(ui, &cwd);
                     ui.separator();
+                    let mut tree = self.tree;
+                    ui.horizontal(|ui| {
+                        ui.label("Вид:");
+                        if ui.selectable_label(!tree, "список").clicked() {
+                            tree = false;
+                        }
+                        if ui.selectable_label(tree, "дерево").clicked() {
+                            tree = true;
+                        }
+                    });
+                    if tree != self.tree {
+                        crate::app::request_view(Some(tree), None);
+                    }
                     let mut size = !self.store.hide_size;
                     if ui.checkbox(&mut size, "Показывать размер").changed() {
                         self.store.hide_size = !size;
@@ -838,6 +945,12 @@ impl RemotePanel {
                     }
                     if ui
                         .checkbox(&mut self.store.show_date, "Показывать дату изменения")
+                        .changed()
+                    {
+                        let _ = self.store.save();
+                    }
+                    if ui
+                        .checkbox(&mut self.store.show_perm, "Показывать права")
                         .changed()
                     {
                         let _ = self.store.save();
@@ -858,7 +971,7 @@ impl RemotePanel {
                     Some((done, total)) if total > 0 => {
                         format!("  {}%", (done * 100 / total).min(100))
                     }
-                    Some((done, _)) => format!("  {}", crate::app::size_label(done as usize)),
+                    Some((done, _)) => format!("  {}", size_label(done as usize)),
                     None => String::new(),
                 };
                 ui.add(
@@ -919,17 +1032,20 @@ impl RemotePanel {
         ui.painter().rect_filled(rect, 0.0, pal.base);
         ui.add_space(6.0);
         if !self.connected {
-            ui.label(
-                RichText::new("  Подключитесь к серверу в панели файлов (F8) — поиск идёт в открытой там папке.")
-                    .color(pal.faint)
-                    .size(12.5),
+            ui.add(
+                egui::Label::new(
+                    RichText::new("  Подключитесь к серверу в панели файлов (F8) — поиск идёт в открытой там папке.")
+                        .color(pal.faint)
+                        .size(12.5),
+                )
+                .wrap(),
             );
             return;
         }
         let mut start = false;
         ui.horizontal_wrapped(|ui| {
             ui.add_space(6.0);
-            let field_w = (ui.available_width() - 20.0).clamp(120.0, 280.0);
+            let field_w = (ui.available_width() - 20.0).clamp(80.0, 280.0);
             let field = ui.add(
                 TextEdit::singleline(&mut self.search_query)
                     .hint_text(format!("Искать в {}", self.cwd))
@@ -965,7 +1081,7 @@ impl RemotePanel {
                     .size(12.5),
             );
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add_space(6.0);
             ui.label(
                 RichText::new("Не искать в папках:")
@@ -974,7 +1090,7 @@ impl RemotePanel {
             );
             ui.add(
                 TextEdit::singleline(&mut self.search_excludes)
-                    .desired_width(ui.available_width() - 12.0)
+                    .desired_width((ui.available_width() - 12.0).max(80.0))
                     .font(egui::TextStyle::Small),
             );
         });
@@ -1035,50 +1151,113 @@ impl RemotePanel {
         }
     }
 
-    fn selection_paths(&self, clicked: &str) -> Vec<(String, bool)> {
-        let names: Vec<&str> = if self.marked.contains(clicked) {
-            self.marked.iter().map(String::as_str).collect()
+    fn rows(&self) -> Vec<Row> {
+        let mut rows = Vec::new();
+        if self.cwd != "/" {
+            rows.push(Row {
+                path: remote::parent(&self.cwd),
+                name: "..".into(),
+                depth: 0,
+                entry: None,
+            });
+        }
+        if !self.tree {
+            for entry in &self.entries {
+                rows.push(Row {
+                    path: remote::join(&self.cwd, &entry.name),
+                    name: entry.name.clone(),
+                    depth: 0,
+                    entry: Some(entry.clone()),
+                });
+            }
+            return rows;
+        }
+        fn walk(panel: &RemotePanel, dir: &str, depth: usize, rows: &mut Vec<Row>) {
+            let Some(entries) = panel.children.get(dir) else {
+                return;
+            };
+            for entry in entries {
+                let path = remote::join(dir, &entry.name);
+                let open = entry.is_dir && panel.expanded.contains(&path);
+                rows.push(Row {
+                    path: path.clone(),
+                    name: entry.name.clone(),
+                    depth,
+                    entry: Some(entry.clone()),
+                });
+                if open && depth < 40 {
+                    walk(panel, &path, depth + 1, rows);
+                }
+            }
+        }
+        if self.children.contains_key(&self.cwd) {
+            walk(self, &self.cwd, 0, &mut rows);
         } else {
-            vec![clicked]
-        };
-        self.entries
-            .iter()
-            .filter(|e| names.contains(&e.name.as_str()))
-            .map(|e| (remote::join(&self.cwd, &e.name), e.is_dir))
-            .collect()
+            for entry in &self.entries {
+                rows.push(Row {
+                    path: remote::join(&self.cwd, &entry.name),
+                    name: entry.name.clone(),
+                    depth: 0,
+                    entry: Some(entry.clone()),
+                });
+            }
+        }
+        rows
+    }
+
+    fn selection_paths(&self, rows: &[Row], clicked: &str) -> Vec<(String, bool)> {
+        if self.marked.contains(clicked) {
+            rows.iter()
+                .filter(|r| r.entry.is_some() && self.marked.contains(&r.path))
+                .map(|r| (r.path.clone(), r.entry.as_ref().is_some_and(|e| e.is_dir)))
+                .collect()
+        } else {
+            rows.iter()
+                .filter(|r| r.entry.is_some() && r.path == clicked)
+                .map(|r| (r.path.clone(), r.entry.as_ref().is_some_and(|e| e.is_dir)))
+                .collect()
+        }
     }
 
     fn listing(&mut self, ui: &mut Ui, pal: &Palette) {
         let row_h = 22.0;
-        let has_parent = self.cwd != "/";
-        let offset = has_parent as usize;
-        let total = self.entries.len() + offset;
+        let rows = self.rows();
+        let total = rows.len();
         let show_size = !self.store.hide_size;
         let show_date = self.store.show_date;
+        let show_perm = self.store.show_perm;
         let mut go = None;
         let mut download: Vec<String> = Vec::new();
         let mut moves: Vec<(String, String)> = Vec::new();
         let mut walk: Vec<String> = Vec::new();
+        let mut toggle: Option<String> = None;
+        let mut attrs: Option<Vec<(String, bool)>> = None;
         let reserve = if self.busy.is_some() { 34.0 } else { 0.0 };
+        let tree = self.tree;
+        let outer = ui.available_rect_before_wrap();
+        let height = (ui.available_height() - reserve).max(40.0);
+        let blank = ui.interact(
+            Rect::from_min_size(outer.min, egui::vec2(outer.width(), height)),
+            ui.scope_id().with(("tror_remote_blank", self.id)),
+            Sense::click(),
+        );
         let area = ScrollArea::vertical()
+            .id_salt(("tror_remote_rows", self.id))
             .auto_shrink(false)
             .max_height((ui.available_height() - reserve).max(40.0))
-            .show_rows(ui, row_h, total, |ui, rows| {
+            .show_rows(ui, row_h, total, |ui, range| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                for row in rows {
+                for index in range {
+                    let row = &rows[index];
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), row_h),
                         Sense::click_and_drag(),
                     );
-                    let index = row.checked_sub(offset).filter(|_| row >= offset);
-                    let entry = index.map(|i| self.entries[i].clone());
-                    let name = entry.as_ref().map_or("..", |e| e.name.as_str()).to_owned();
+                    let entry = row.entry.clone();
+                    let name = row.name.clone();
+                    let path = row.path.clone();
                     let is_dir = entry.as_ref().is_none_or(|e| e.is_dir);
-                    let marked = entry.is_some() && self.marked.contains(&name);
-                    let path = match &entry {
-                        Some(e) => remote::join(&self.cwd, &e.name),
-                        None => remote::parent(&self.cwd),
-                    };
+                    let marked = entry.is_some() && self.marked.contains(&path);
                     let drop_target = is_dir
                         && response
                             .dnd_hover_payload::<Dragged>()
@@ -1094,16 +1273,34 @@ impl RemotePanel {
                     } else if response.hovered() {
                         painter.rect_filled(rect, 5.0, pal.crust);
                     }
+                    let indent = row.depth as f32 * 14.0 + if tree { 14.0 } else { 0.0 };
+                    if tree && is_dir && entry.is_some() {
+                        let open = self.expanded.contains(&path);
+                        chevron(
+                            &painter,
+                            egui::pos2(rect.left() + indent - 6.0, rect.center().y),
+                            open,
+                            pal.faint,
+                        );
+                        if self.loading.contains(&path) {
+                            painter.circle_filled(
+                                egui::pos2(rect.left() + indent - 6.0, rect.center().y + 7.0),
+                                1.5,
+                                pal.accent,
+                            );
+                        }
+                    }
                     paint_icon(
                         &painter,
-                        egui::pos2(rect.left() + 14.0, rect.center().y),
+                        egui::pos2(rect.left() + indent + 14.0, rect.center().y),
                         is_dir,
                         &name,
                         pal,
                     );
                     let mut right = rect.right() - 6.0;
                     let small = egui::FontId::proportional(11.5);
-                    if show_date {
+                    let narrow = rect.width() - indent < 230.0;
+                    if show_date && !narrow {
                         if let Some(secs) = entry.as_ref().and_then(|e| e.mtime) {
                             painter.text(
                                 egui::pos2(right, rect.center().y),
@@ -1115,7 +1312,19 @@ impl RemotePanel {
                         }
                         right -= 100.0;
                     }
-                    if show_size {
+                    if show_perm && !narrow {
+                        if let Some(mode) = entry.as_ref().and_then(|e| e.perm) {
+                            painter.text(
+                                egui::pos2(right, rect.center().y),
+                                egui::Align2::RIGHT_CENTER,
+                                format!("{mode:03o}"),
+                                egui::FontId::monospace(11.0),
+                                pal.faint,
+                            );
+                        }
+                        right -= 34.0;
+                    }
+                    if show_size && rect.width() - indent > 150.0 {
                         if let Some(e) = entry.as_ref().filter(|e| !e.is_dir) {
                             painter.text(
                                 egui::pos2(right, rect.center().y),
@@ -1128,46 +1337,62 @@ impl RemotePanel {
                         right -= 58.0;
                     }
                     let name_clip = Rect::from_min_max(
-                        egui::pos2(rect.left() + 28.0, rect.top()),
-                        egui::pos2(right.max(rect.left() + 60.0), rect.bottom()),
+                        egui::pos2(rect.left() + indent + 28.0, rect.top()),
+                        egui::pos2(right.max(rect.left() + indent + 60.0), rect.bottom()),
                     );
                     ui.painter_at(name_clip).text(
                         egui::pos2(name_clip.left(), rect.center().y),
                         egui::Align2::LEFT_CENTER,
                         &name,
                         egui::FontId::proportional(13.0),
-                        pal.text,
+                        if name.starts_with('.') && name != ".." {
+                            pal.subtext
+                        } else {
+                            pal.text
+                        },
                     );
 
                     if response.clicked() {
                         let modifiers = ui.input(|i| i.modifiers);
-                        match index {
-                            Some(i) if modifiers.shift && self.anchor.is_some() => {
-                                let a = self.anchor.unwrap_or(i).min(self.entries.len() - 1);
-                                let (from, to) = (a.min(i), a.max(i));
-                                if !modifiers.command {
-                                    self.marked.clear();
-                                }
-                                for e in &self.entries[from..=to] {
-                                    self.marked.insert(e.name.clone());
-                                }
-                            }
-                            Some(i) if modifiers.command => {
-                                if !self.marked.remove(&name) {
-                                    self.marked.insert(name.clone());
-                                }
-                                self.anchor = Some(i);
-                            }
-                            Some(i) => {
+                        let on_chevron = tree
+                            && is_dir
+                            && entry.is_some()
+                            && response
+                                .interact_pointer_pos()
+                                .is_some_and(|p| p.x < rect.left() + indent + 4.0);
+                        if on_chevron {
+                            toggle = Some(path.clone());
+                        } else if entry.is_none() {
+                            self.marked.clear();
+                        } else if modifiers.shift && self.anchor.is_some() {
+                            let anchor = self.anchor.clone().unwrap_or_default();
+                            let a = rows.iter().position(|r| r.path == anchor).unwrap_or(index);
+                            let (from, to) = (a.min(index), a.max(index));
+                            if !modifiers.command {
                                 self.marked.clear();
-                                self.marked.insert(name.clone());
-                                self.anchor = Some(i);
                             }
-                            None => self.marked.clear(),
+                            for r in &rows[from..=to] {
+                                if r.entry.is_some() {
+                                    self.marked.insert(r.path.clone());
+                                }
+                            }
+                        } else if modifiers.command {
+                            if !self.marked.remove(&path) {
+                                self.marked.insert(path.clone());
+                            }
+                            self.anchor = Some(path.clone());
+                        } else {
+                            self.marked.clear();
+                            self.marked.insert(path.clone());
+                            self.anchor = Some(path.clone());
+                            if tree && is_dir {
+                                toggle = Some(path.clone());
+                            }
                         }
                     }
                     if response.double_clicked() {
-                        if is_dir {
+                        if is_dir && tree && entry.is_some() {
+                        } else if is_dir {
                             go = Some(path.clone());
                         } else {
                             download.push(path.clone());
@@ -1176,7 +1401,7 @@ impl RemotePanel {
                     if entry.is_some() && response.drag_started() {
                         response.dnd_set_drag_payload(Dragged {
                             panel: self.id,
-                            paths: self.selection_paths(&name),
+                            paths: self.selection_paths(&rows, &path),
                         });
                     }
                     if is_dir
@@ -1194,14 +1419,35 @@ impl RemotePanel {
                     }
                     if entry.is_some() {
                         response.context_menu(|ui| {
-                            let chosen = self.selection_paths(&name);
+                            ui.set_min_width(220.0);
+                            let chosen = self.selection_paths(&rows, &path);
                             let files: Vec<String> = chosen
                                 .iter()
                                 .filter(|(_, dir)| !dir)
                                 .map(|(p, _)| p.clone())
                                 .collect();
+                            let dirs: Vec<String> = chosen
+                                .iter()
+                                .filter(|(_, dir)| *dir)
+                                .map(|(p, _)| p.clone())
+                                .collect();
                             if !files.is_empty() && ui.button("Открыть").clicked() {
                                 download.extend(files.iter().cloned());
+                            }
+                            if chosen.len() == 1 && is_dir {
+                                if ui.button("Новый файл здесь…").clicked() {
+                                    self.prompt = Some(Prompt::NewFile(path.clone(), String::new()));
+                                }
+                                if ui.button("Новая папка здесь…").clicked() {
+                                    self.prompt =
+                                        Some(Prompt::NewFolder(path.clone(), String::new()));
+                                }
+                                if ui.button("Загрузить сюда файлы…").clicked()
+                                    && let Some(files) = rfd::FileDialog::new().pick_files()
+                                {
+                                    self.upload_local_to(files, &path);
+                                }
+                                ui.separator();
                             }
                             if files.len() == 1
                                 && ui.button("Скачать как…").clicked()
@@ -1212,11 +1458,6 @@ impl RemotePanel {
                                 self.save_to.insert(files[0].clone(), local);
                                 download.push(files[0].clone());
                             }
-                            let dirs: Vec<String> = chosen
-                                .iter()
-                                .filter(|(_, dir)| *dir)
-                                .map(|(p, _)| p.clone())
-                                .collect();
                             if (files.len() > 1 || !dirs.is_empty())
                                 && ui.button("Скачать в папку…").clicked()
                                 && let Some(folder) = rfd::FileDialog::new().pick_folder()
@@ -1238,10 +1479,19 @@ impl RemotePanel {
                                     walk.push(dir.clone());
                                 }
                             }
-                            if let Some(peer) = &self.peer
-                                && ui.button(format!("Передать на «{peer}»")).clicked()
-                            {
-                                self.outgoing = Some(chosen.clone());
+                            for (peer, label) in self.peers.clone() {
+                                if ui.button(format!("Передать на «{label}»")).clicked() {
+                                    self.outgoing = Some((peer, chosen.clone()));
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("Права и атрибуты…").clicked() {
+                                attrs = Some(chosen.clone());
+                            }
+                            if ui.button("Копировать путь").clicked() {
+                                let text: Vec<&str> =
+                                    chosen.iter().map(|(p, _)| p.as_str()).collect();
+                                ui.ctx().copy_text(text.join("\n"));
                             }
                             if chosen.len() == 1 && ui.button("Переименовать…").clicked()
                             {
@@ -1261,14 +1511,31 @@ impl RemotePanel {
                         });
                     }
                 }
-            })
-            .inner_rect;
+            });
+        let inner = area.inner_rect;
+        if blank.clicked() {
+            self.marked.clear();
+        }
+        let cwd = self.cwd.clone();
+        egui::Popup::context_menu(&blank).show(|ui| {
+            ui.set_min_width(220.0);
+            self.menu_items(ui, &cwd);
+            ui.separator();
+            if ui.button("Обновить").clicked() {
+                self.list(cwd.clone());
+                ui.close();
+            }
+            if ui.button("Копировать путь папки").clicked() {
+                ui.ctx().copy_text(cwd.clone());
+                ui.close();
+            }
+        });
         if let Some(dragged) = egui::DragAndDrop::payload::<Dragged>(ui.ctx())
             && dragged.panel != self.id
-            && ui.rect_contains_pointer(area)
+            && ui.rect_contains_pointer(inner)
         {
             ui.painter().rect_stroke(
-                area.shrink(1.0),
+                inner.shrink(1.0),
                 6.0,
                 egui::Stroke::new(1.5, pal.accent),
                 egui::StrokeKind::Inside,
@@ -1301,8 +1568,19 @@ impl RemotePanel {
                     pal.text,
                 );
         }
+        if let Some(path) = toggle {
+            if !self.expanded.remove(&path) {
+                self.expanded.insert(path.clone());
+                if !self.children.contains_key(&path) {
+                    self.load(path);
+                }
+            }
+        }
         if let Some(path) = go {
             self.list(path);
+        }
+        if let Some(items) = attrs {
+            self.open_attrs(items);
         }
         for path in download {
             let name = remote::file_name(&path).to_owned();
@@ -1321,6 +1599,7 @@ impl RemotePanel {
         let mut out = Vec::new();
         self.host_key_dialog(ctx, pal);
         self.prompt_dialog(ctx, pal);
+        self.attrs_dialog(ctx, pal);
         self.editor_dialog(ctx, pal);
         self.drop_dialog(ctx, pal, &mut out);
         out
@@ -1336,7 +1615,7 @@ impl RemotePanel {
             ui.set_width(420.0);
             ui.label(format!("Что сделать с перетащенными файлами ({count})?"));
             ui.add_space(10.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if dialog_button(ui, pal, "Открыть в редакторе", true) {
                     choice = Some(0);
                 }
@@ -1414,6 +1693,158 @@ impl RemotePanel {
         }
     }
 
+    fn attrs_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
+        let Some(state) = &mut self.attrs else {
+            return;
+        };
+        let mut apply = false;
+        let mut cancel = false;
+        let sftp = self
+            .store
+            .profiles
+            .get(self.selected)
+            .is_some_and(|p| p.protocol == Protocol::Sftp);
+        let modal = dialog(("tror_remote_attrs", self.id), pal).show(ctx, |ui| {
+            ui.set_width(400.0);
+            let title = if state.items.len() == 1 {
+                format!("Свойства «{}»", remote::file_name(&state.items[0].0))
+            } else {
+                format!("Свойства выбранных объектов ({})", state.items.len())
+            };
+            ui.label(RichText::new(title).strong());
+            ui.add_space(6.0);
+            if !state.loaded {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("чтение с сервера…").color(pal.subtext));
+                });
+            }
+            if let Some(info) = &state.info
+                && state.items.len() == 1
+            {
+                egui::Grid::new("tror_attrs_info")
+                    .num_columns(2)
+                    .spacing([14.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Путь").color(pal.subtext));
+                        ui.label(&state.items[0].0);
+                        ui.end_row();
+                        if let Some(size) = info.size.filter(|_| !info.is_dir) {
+                            ui.label(RichText::new("Размер").color(pal.subtext));
+                            ui.label(if size < 1024 {
+                                size_label(size as usize)
+                            } else {
+                                format!("{} ({size} Б)", size_label(size as usize))
+                            });
+                            ui.end_row();
+                        }
+                        if info.uid.is_some() || info.gid.is_some() {
+                            ui.label(RichText::new("Владелец").color(pal.subtext));
+                            ui.label(format!(
+                                "uid {}, gid {}",
+                                info.uid.map_or("?".into(), |v| v.to_string()),
+                                info.gid.map_or("?".into(), |v| v.to_string())
+                            ));
+                            ui.end_row();
+                        }
+                        if let Some(atime) = info.atime {
+                            ui.label(RichText::new("Открыт").color(pal.subtext));
+                            ui.label(date_label(atime));
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(8.0);
+            }
+            ui.label(RichText::new("Права доступа").family(crate::theme::medium()));
+            ui.add_space(2.0);
+            widgets::perm_grid(ui, pal, &mut state.mode, &mut state.octal);
+            let has_dirs = state.items.iter().any(|(_, dir)| *dir);
+            if has_dirs {
+                ui.add_space(4.0);
+                ui.checkbox(&mut state.recursive, "Применить ко всему содержимому папок");
+                if state.recursive {
+                    ui.horizontal(|ui| {
+                        ui.add_space(22.0);
+                        ui.checkbox(&mut state.dirs, "к папкам");
+                        ui.checkbox(&mut state.files, "к файлам");
+                    });
+                    ui.label(
+                        RichText::new("Обычно папкам ставят 755, файлам 644 — примените дважды с разными галочками.")
+                            .size(12.0)
+                            .color(pal.subtext),
+                    );
+                }
+            }
+            if state.items.len() == 1 {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Дата изменения");
+                    ui.add(
+                        TextEdit::singleline(&mut state.mtime)
+                            .hint_text("ДД.ММ.ГГГГ ЧЧ:ММ")
+                            .desired_width(150.0),
+                    );
+                    if state.mtime != state.mtime_was && widgets::parse_date(&state.mtime).is_none()
+                    {
+                        ui.label(RichText::new("не дата").color(pal.warn).size(12.0));
+                    }
+                });
+                if !sftp {
+                    ui.label(
+                        RichText::new("По FTP дата меняется командой MFMT — её поддерживают не все серверы.")
+                            .size(12.0)
+                            .color(pal.subtext),
+                    );
+                }
+            }
+            if !sftp {
+                ui.label(
+                    RichText::new("По FTP права меняются командой SITE CHMOD; на Windows-серверах она обычно не работает.")
+                        .size(12.0)
+                        .color(pal.subtext),
+                );
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if dialog_button(ui, pal, "Применить", true) {
+                    apply = true;
+                }
+                if dialog_button(ui, pal, "Отмена", false) {
+                    cancel = true;
+                }
+            });
+        });
+        if apply && let Some(state) = self.attrs.take() {
+            let recursive = state.recursive;
+            for (path, dir) in &state.items {
+                self.send(
+                    Cmd::Chmod {
+                        path: path.clone(),
+                        mode: state.mode,
+                        recursive: recursive && *dir,
+                        dirs: state.dirs,
+                        files: state.files,
+                    },
+                    "Смена прав…",
+                );
+            }
+            if state.items.len() == 1
+                && state.mtime != state.mtime_was
+                && let Some(mtime) = widgets::parse_date(&state.mtime)
+            {
+                self.send(
+                    Cmd::Touch {
+                        path: state.items[0].0.clone(),
+                        mtime,
+                    },
+                    "Смена даты…",
+                );
+            }
+        } else if cancel || modal.should_close() {
+            self.attrs = None;
+        }
+    }
+
     fn prompt_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(prompt) = &mut self.prompt else {
             return;
@@ -1423,9 +1854,9 @@ impl RemotePanel {
         let modal = dialog(("tror_remote_prompt", self.id), pal).show(ctx, |ui| {
             ui.set_width(340.0);
             let (title, input, action) = match prompt {
-                Prompt::NewFolder(name) => ("Новая папка", Some(name), "Создать"),
-                Prompt::NewFile(name) => ("Новый файл", Some(name), "Создать"),
-                Prompt::Rename { name, .. } => ("Переименовать", Some(name), "Переименовать"),
+                Prompt::NewFolder(dir, name) => (format!("Новая папка в {dir}"), Some(name), "Создать"),
+                Prompt::NewFile(dir, name) => (format!("Новый файл в {dir}"), Some(name), "Создать"),
+                Prompt::Rename { name, .. } => ("Переименовать".to_owned(), Some(name), "Переименовать"),
                 Prompt::Delete(items) => {
                     let folders = items.iter().filter(|(_, dir)| *dir).count();
                     if items.len() == 1 {
@@ -1452,11 +1883,11 @@ impl RemotePanel {
                             .color(pal.warn),
                         );
                     }
-                    ("", None, "Удалить")
+                    (String::new(), None, "Удалить")
                 }
             };
             if let Some(input) = input {
-                ui.label(title);
+                ui.add(egui::Label::new(title).truncate());
                 ui.add_space(4.0);
                 let field = ui.add(TextEdit::singleline(input).desired_width(f32::INFINITY));
                 field.request_focus();
@@ -1475,22 +1906,27 @@ impl RemotePanel {
             });
         });
         if confirmed {
-            let cwd = self.cwd.clone();
             let valid = |name: &str| {
                 let name = name.trim();
                 (!name.is_empty() && !name.contains('/')).then(|| name.to_owned())
             };
             match self.prompt.take() {
-                Some(Prompt::NewFolder(name)) => {
+                Some(Prompt::NewFolder(dir, name)) => {
                     if let Some(name) = valid(&name) {
-                        self.send(Cmd::Mkdir(remote::join(&cwd, &name)), "Создание папки…");
+                        if self.tree {
+                            self.expanded.insert(dir.clone());
+                        }
+                        self.send(Cmd::Mkdir(remote::join(&dir, &name)), "Создание папки…");
                     }
                 }
-                Some(Prompt::NewFile(name)) => {
+                Some(Prompt::NewFile(dir, name)) => {
                     if let Some(name) = valid(&name) {
+                        if self.tree {
+                            self.expanded.insert(dir.clone());
+                        }
                         self.send(
                             Cmd::Upload {
-                                path: remote::join(&cwd, &name),
+                                path: remote::join(&dir, &name),
                                 data: Vec::new(),
                                 doc: None,
                             },
@@ -1506,6 +1942,8 @@ impl RemotePanel {
                 }
                 Some(Prompt::Delete(items)) => {
                     for (path, dir) in items {
+                        self.marked.remove(&path);
+                        self.expanded.remove(&path);
                         self.send(Cmd::Delete { path, dir }, "Удаление…");
                     }
                 }
@@ -1522,19 +1960,20 @@ impl RemotePanel {
         };
         let mut save = false;
         let mut cancel = false;
+        let mut test = false;
         let location = self
             .store
             .path()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         let modal = dialog(("tror_profiles", self.id), pal).show(ctx, |ui| {
-            ui.set_width(620.0);
+            ui.set_width(640.0);
             ui.label(RichText::new("Профили подключений").strong());
             ui.add_space(8.0);
             ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
                     ui.set_width(180.0);
-                    ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
+                    ScrollArea::vertical().max_height(270.0).show(ui, |ui| {
                         for (i, profile) in editor.drafts.iter().enumerate() {
                             let name = if profile.name.trim().is_empty() {
                                 "без имени"
@@ -1543,6 +1982,7 @@ impl RemotePanel {
                             };
                             if ui.selectable_label(i == editor.index, name).clicked() {
                                 editor.index = i;
+                                editor.result = None;
                             }
                         }
                     });
@@ -1554,6 +1994,7 @@ impl RemotePanel {
                                 editor.drafts.len() + 1
                             )));
                             editor.index = editor.drafts.len() - 1;
+                            editor.result = None;
                         }
                         if ui
                             .add_enabled(
@@ -1577,13 +2018,14 @@ impl RemotePanel {
                         .num_columns(2)
                         .spacing([10.0, 8.0])
                         .show(ui, |ui| {
-                            let wide = 300.0;
+                            let wide = 320.0;
                             ui.label("Название");
                             ui.add(TextEdit::singleline(&mut p.name).desired_width(wide));
                             ui.end_row();
                             ui.label("Протокол");
-                            ui.horizontal(|ui| {
-                                for protocol in [Protocol::Sftp, Protocol::Ftp, Protocol::Ftps] {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.set_max_width(wide);
+                                for protocol in Protocol::ALL {
                                     if ui
                                         .selectable_label(p.protocol == protocol, protocol.label())
                                         .clicked()
@@ -1602,9 +2044,10 @@ impl RemotePanel {
                                 ui.add(
                                     TextEdit::singleline(&mut p.host)
                                         .hint_text("example.org")
-                                        .desired_width(wide - 78.0),
+                                        .desired_width(wide - 70.0),
                                 );
-                                ui.add(egui::DragValue::new(&mut p.port).range(1..=65535));
+                                widgets::port_field(ui, &mut p.port, 60.0)
+                                    .on_hover_text("Порт");
                             });
                             ui.end_row();
                             ui.label("Пользователь");
@@ -1641,8 +2084,30 @@ impl RemotePanel {
                                     }
                                 });
                                 ui.end_row();
+                                if !p.key_file.trim().is_empty() {
+                                    ui.label("");
+                                    match remote::key_kind(&p.key_file) {
+                                        Ok(kind) => ui.label(
+                                            RichText::new(format!("ключ: {kind}"))
+                                                .size(12.0)
+                                                .color(pal.subtext),
+                                        ),
+                                        Err(e) => {
+                                            ui.label(RichText::new(e).size(12.0).color(pal.warn))
+                                        }
+                                    };
+                                    ui.end_row();
+                                    ui.label("Парольная фраза");
+                                    ui.add(
+                                        TextEdit::singleline(&mut p.passphrase)
+                                            .password(!editor.reveal)
+                                            .hint_text("если ключ защищён")
+                                            .desired_width(wide),
+                                    );
+                                    ui.end_row();
+                                }
                             }
-                            if p.protocol == Protocol::Ftps {
+                            if p.protocol.tls() {
                                 ui.label("Сертификат");
                                 ui.checkbox(&mut p.insecure_tls, "не проверять (самоподписанный)");
                                 ui.end_row();
@@ -1662,38 +2127,35 @@ impl RemotePanel {
                             );
                             ui.end_row();
                         });
-                    if p.protocol == Protocol::Sftp {
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(
-                                "С ключом поле «Пароль» используется как парольная фраза ключа. \
-                                 Без пароля и ключа используется ssh-agent.",
-                            )
-                            .color(pal.subtext)
-                            .size(12.0),
-                        );
-                    } else if p.protocol == Protocol::Ftp {
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new("FTP передаёт пароль и файлы без шифрования.")
-                                .color(pal.warn)
-                                .size(12.0),
-                        );
-                    } else {
-                        ui.add_space(4.0);
-                        let (text, color) = if p.insecure_tls {
-                            (
-                                "Соединение шифруется, но подлинность сервера не проверяется — \
-                                 включайте только для своего сервера с самоподписанным сертификатом.",
-                                pal.warn,
-                            )
-                        } else {
-                            (
-                                "FTPS с явным TLS (AUTH TLS, обычно порт 21): шифруются и команды, и данные.",
-                                pal.subtext,
-                            )
+                    ui.add_space(4.0);
+                    let (text, color) = match p.protocol {
+                        Protocol::Sftp => (
+                            "Вход по паролю, по ключу (RSA, ECDSA, Ed25519) или через ssh-agent, если не заданы ни пароль, ни ключ. Если у ключа нет отдельной парольной фразы, используется поле «Пароль».",
+                            pal.subtext,
+                        ),
+                        Protocol::Ftp => ("FTP передаёт пароль и файлы без шифрования.", pal.warn),
+                        _ if p.insecure_tls => (
+                            "Соединение шифруется, но подлинность сервера не проверяется — \
+                             включайте только для своего сервера с самоподписанным сертификатом.",
+                            pal.warn,
+                        ),
+                        Protocol::Ftps => (
+                            "FTPS с явным TLS (AUTH TLS, обычно порт 21): шифруются и команды, и данные.",
+                            pal.subtext,
+                        ),
+                        Protocol::FtpsImplicit => (
+                            "Неявный FTPS (обычно порт 990): TLS включается сразу при соединении. Старый способ — выбирайте его, только если хостинг не поддерживает явный FTPS.",
+                            pal.subtext,
+                        ),
+                    };
+                    ui.label(RichText::new(text).color(color).size(12.0));
+                    if let Some(result) = &editor.result {
+                        let (text, color) = match result {
+                            Ok(text) => (format!("Работает: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
+                            Err(e) => (format!("Ошибка: {e}"), pal.warn),
                         };
-                        ui.label(RichText::new(text).color(color).size(12.0));
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(text).size(12.5).color(color));
                     }
                 });
             });
@@ -1710,11 +2172,27 @@ impl RemotePanel {
                 if dialog_button(ui, pal, "Сохранить", true) {
                     save = true;
                 }
+                if editor.probe.is_some() {
+                    ui.add_space(6.0);
+                    ui.spinner();
+                    ui.label(RichText::new("проверка…").color(pal.subtext));
+                } else if dialog_button(ui, pal, "Проверить", false) {
+                    test = true;
+                }
                 if dialog_button(ui, pal, "Отмена", false) {
                     cancel = true;
                 }
             });
         });
+        if test
+            && let Some(editor) = &mut self.editor
+            && let Some(profile) = editor.drafts.get(editor.index).cloned()
+        {
+            let key = format!("{}:{}", profile.host.trim(), profile.port);
+            let known = self.store.known_hosts.get(&key).cloned();
+            editor.result = None;
+            editor.probe = Some(crate::console::probe(move || remote::test(&profile, known)));
+        }
         if save {
             if let Some(editor) = self.editor.take() {
                 self.selected = editor.index;

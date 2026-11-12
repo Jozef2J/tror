@@ -1,26 +1,32 @@
 [package]
 name = "tror"
-version = "0.11.0"
+version = "0.12.0"
 description = "Быстрый компактный редактор кода"
 edition = "2024"
 
 [dependencies]
+aes = "0.9"
+base64 = "0.23.1"
 chardetng = "1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "glow", "persistence", "wayland", "x11"] }
 egui_stack = { version = "0.25.8", features = ["serde"] }
 encoding_rs = "0.8.44"
+flate2 = "1.1.11"
 log = "0.4.35"
 mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust"] }
 native-tls = "0.2.18"
+ocb3 = "0.2.0"
+postgres = "0.19.14"
 regex = "1.13.1"
 rfd = "0.18.0"
 ropey = { version = "1", default-features = false, features = ["simd"] }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 similar = "3.2.1"
 ssh2 = { version = "0.9.7", features = ["vendored-openssl"] }
-suppaftp = { version = "12.2.1", features = ["native-tls"] }
+suppaftp = { version = "12.2.1", features = ["deprecated", "native-tls"] }
 syntect = { version = "5.3.0", default-features = false, features = ["default-onig"] }
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-onig"] }
 vt100 = "0.18.1"
@@ -37,6 +43,13 @@ winresource = "0.1"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 wry = { version = "0.57.2", default-features = false, features = ["os-webview"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wry = { version = "0.57.2", default-features = false, features = ["os-webview", "x11"], optional = true }
+gtk = { version = "0.18", optional = true }
+
+[features]
+webview = ["dep:wry", "dep:gtk"]
 
 [dev-dependencies]
 ron = "0.12.3"

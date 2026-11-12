@@ -1,0 +1,35 @@
+print(*values, sep=' ', end='\n', file=None, flush=False)
+len(obj, /): int
+range(start, stop, step=1)
+open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None)
+enumerate(iterable, start=0)
+zip(*iterables, strict=False)
+sorted(iterable, /, *, key=None, reverse=False): list
+isinstance(obj, class_or_tuple, /): bool
+getattr(object, name, default=None)
+setattr(object, name, value, /)
+hasattr(object, name, /): bool
+int(x=0, base=10): int
+str(object=''): str
+dict(**kwargs): dict
+list(iterable=(), /): list
+map(function, iterable, *iterables)
+filter(function, iterable, /)
+max(iterable, *, key=None, default=None)
+min(iterable, *, key=None, default=None)
+sum(iterable, /, start=0)
+round(number, ndigits=None)
+input(prompt='', /): str
+abs(x, /)
+any(iterable, /): bool
+all(iterable, /): bool
+format(value, format_spec='', /): str
+super(type=None, object_or_type=None)
+split(sep=None, maxsplit=-1): list
+join(iterable, /): str
+replace(old, new, count=-1): str
+startswith(prefix, start=None, end=None): bool
+endswith(suffix, start=None, end=None): bool
+append(object, /): None
+extend(iterable, /): None
+get(key, default=None)

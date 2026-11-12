@@ -1,6 +1,286 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::RwLock;
 
 use crate::document::Document;
+
+const PHP_SIGS: &str = include_str!("../assets/signatures/php.txt");
+const BITRIX_SIGS: &str = include_str!("../assets/signatures/bitrix.txt");
+const JS_SIGS: &str = include_str!("../assets/signatures/js.txt");
+const PY_SIGS: &str = include_str!("../assets/signatures/python.txt");
+
+static CUSTOM: RwLock<BTreeMap<String, String>> = RwLock::new(BTreeMap::new());
+
+pub fn set_custom(map: &BTreeMap<String, String>) {
+    if let Ok(mut custom) = CUSTOM.write()
+        && *custom != *map
+    {
+        *custom = map.clone();
+    }
+}
+
+fn custom_lines(lang: Lang) -> Vec<String> {
+    let Ok(custom) = CUSTOM.read() else {
+        return Vec::new();
+    };
+    let key = lang_key(lang);
+    ["all", key]
+        .iter()
+        .filter(|k| !k.is_empty())
+        .filter_map(|k| custom.get(*k))
+        .flat_map(|text| text.lines())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Signature {
+    pub name: String,
+    pub params: Vec<String>,
+    pub ret: String,
+    pub doc: String,
+}
+
+pub struct Hint {
+    pub sigs: Vec<Signature>,
+    pub active: usize,
+    pub open: usize,
+}
+
+fn split_params(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut current = String::new();
+    let mut escaped = false;
+    for c in text.chars() {
+        if let Some(q) = quote {
+            current.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => {
+                quote = Some(c);
+                current.push(c);
+            }
+            '(' | '[' | '{' | '<' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' | ']' | '}' | '>' if depth > 0 => {
+                depth -= 1;
+                current.push(c);
+            }
+            ',' if depth == 0 => {
+                out.push(current.trim().to_owned());
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_owned());
+    }
+    out
+}
+
+pub fn parse_signature(line: &str) -> Option<Signature> {
+    let line = line.trim();
+    let open = line.find('(')?;
+    let name = line[..open].trim();
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return None;
+    }
+    let mut depth = 0;
+    let mut close = None;
+    for (i, c) in line[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    let rest = line[close + 1..].trim();
+    let (ret, doc) = match rest.split_once(" — ") {
+        Some((ret, doc)) => (ret, doc),
+        None => (rest, ""),
+    };
+    Some(Signature {
+        name: name.to_owned(),
+        params: split_params(&line[open + 1..close]),
+        ret: ret.trim().trim_start_matches(':').trim().to_owned(),
+        doc: doc.trim().to_owned(),
+    })
+}
+
+fn builtin_sigs(lang: Lang) -> &'static [&'static str] {
+    match lang {
+        Lang::Php | Lang::Html | Lang::Twig => &[PHP_SIGS, BITRIX_SIGS],
+        Lang::Js => &[JS_SIGS],
+        Lang::Python => &[PY_SIGS],
+        _ => &[],
+    }
+}
+
+fn short_name(name: &str) -> &str {
+    let tail = name.rsplit("::").next().unwrap_or(name);
+    let tail = tail.rsplit("->").next().unwrap_or(tail);
+    tail.rsplit('.').next().unwrap_or(tail)
+}
+
+fn class_name(name: &str) -> Option<&str> {
+    let (left, _) = name.rsplit_once("::")?;
+    Some(left.rsplit('\\').next().unwrap_or(left))
+}
+
+fn document_sigs(doc: &Document, name: &str) -> Vec<Signature> {
+    let head_line = doc.rope.char_to_line(doc.sel.1);
+    let first = head_line.saturating_sub(SCAN_LINES * 2);
+    let last = (head_line + SCAN_LINES * 2).min(doc.line_count());
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    for line in first..last {
+        let slice = doc.rope.line(line);
+        if slice.len_bytes() > MAX_SCAN_LINE_BYTES {
+            continue;
+        }
+        buf.clear();
+        buf.extend(slice.chunks());
+        for keyword in ["function ", "def ", "fn "] {
+            let Some(at) = buf.find(keyword) else {
+                continue;
+            };
+            let rest = buf[at + keyword.len()..].trim_start().trim_start_matches('&');
+            if !rest.starts_with(name) {
+                continue;
+            }
+            let after = rest[name.len()..].trim_start();
+            if !after.starts_with('(') {
+                continue;
+            }
+            let mut text = format!("{name}{after}");
+            if let Some(end) = text.rfind('{') {
+                text.truncate(end);
+            }
+            if let Some(sig) = parse_signature(text.trim_end_matches(':')) {
+                out.push(sig);
+            }
+        }
+        if out.len() >= 3 {
+            break;
+        }
+    }
+    out
+}
+
+fn find_sigs(doc: &Document, lang: Lang, called: &str) -> Vec<Signature> {
+    let short = short_name(called);
+    let class = class_name(called);
+    let wanted = |sig: &Signature| {
+        let sig_short = short_name(&sig.name);
+        if !sig_short.eq_ignore_ascii_case(short) {
+            return false;
+        }
+        match (class, class_name(&sig.name)) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            (None, Some(_)) => called.contains("->") || !sig.name.contains("::"),
+            _ => true,
+        }
+    };
+    let mut out: Vec<Signature> = custom_lines(lang)
+        .iter()
+        .filter_map(|line| parse_signature(line))
+        .filter(wanted)
+        .collect();
+    for source in builtin_sigs(lang) {
+        out.extend(source.lines().filter_map(parse_signature).filter(wanted));
+    }
+    if out.is_empty() && !short.is_empty() {
+        out = document_sigs(doc, short);
+    }
+    out.truncate(4);
+    out
+}
+
+fn call_at(doc: &Document) -> Option<(usize, usize, String)> {
+    let head = doc.sel.1;
+    let mut chars = doc.rope.chars_at(head);
+    let mut pos = head;
+    let mut nested = 0i32;
+    let mut commas = 0;
+    let mut quote: Option<char> = None;
+    let mut steps = 0;
+    let open = loop {
+        let c = chars.prev()?;
+        pos -= 1;
+        steps += 1;
+        if steps > 4000 {
+            return None;
+        }
+        if let Some(q) = quote {
+            if c == q && (pos == 0 || doc.rope.char(pos - 1) != '\\') {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' | '`' => quote = Some(c),
+            ')' | ']' | '}' => nested += 1,
+            '[' | '{' if nested > 0 => nested -= 1,
+            '(' if nested > 0 => nested -= 1,
+            '(' => break pos,
+            ',' if nested == 0 => commas += 1,
+            ';' | '{' | '[' if nested == 0 => return None,
+            _ => {}
+        }
+    };
+    let mut start = open;
+    let mut back = doc.rope.chars_at(open);
+    while let Some(c) = back.prev() {
+        if c.is_alphanumeric() || matches!(c, '_' | '$' | ':' | '\\' | '.' | '>' | '-') {
+            start -= 1;
+            if open - start > 120 {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    let name: String = doc.rope.slice(start..open).to_string();
+    let name = name.trim_start_matches(['$', '.', '-', '>', ':']).to_owned();
+    let name = if name.starts_with("this->") || name.contains("->") {
+        format!("->{}", name.rsplit("->").next().unwrap_or(""))
+    } else {
+        name
+    };
+    let bare = name.trim_start_matches("->");
+    if bare.is_empty() || !bare.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '\\') {
+        return None;
+    }
+    if matches!(
+        bare,
+        "if" | "for" | "foreach" | "while" | "switch" | "catch" | "match" | "elseif" | "return" | "fn" | "function" | "array" | "list" | "isset" | "empty" | "unset"
+    ) && !matches!(bare, "isset" | "empty" | "unset")
+    {
+        return None;
+    }
+    Some((open, commas, name))
+}
 
 const MAX_ITEMS: usize = 60;
 const SCAN_LINES: usize = 2500;
@@ -44,7 +324,21 @@ enum Lang {
     Css,
     Python,
     Rust,
+    Sql,
     Other,
+}
+
+fn lang_key(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Php => "php",
+        Lang::Html | Lang::Twig => "html",
+        Lang::Js => "js",
+        Lang::Css => "css",
+        Lang::Python => "python",
+        Lang::Rust => "rust",
+        Lang::Sql => "sql",
+        Lang::Other => "",
+    }
 }
 
 fn lang(syntax: &str) -> Lang {
@@ -63,6 +357,8 @@ fn lang(syntax: &str) -> Lang {
         Lang::Python
     } else if s == "rust" {
         Lang::Rust
+    } else if s.contains("sql") {
+        Lang::Sql
     } else {
         Lang::Other
     }
@@ -86,6 +382,7 @@ pub struct Completion {
     pub items: Vec<Item>,
     pub selected: usize,
     pub start: usize,
+    pub hint: Option<Hint>,
 }
 
 fn dictionaries(
@@ -106,7 +403,7 @@ fn dictionaries(
         Lang::Css => vec![(CSS_PROPS, "свойство"), (CSS_VALUES, "значение")],
         Lang::Python => vec![(PYTHON, "python")],
         Lang::Rust => vec![(RUST, "rust")],
-        Lang::Other => vec![],
+        Lang::Sql | Lang::Other => vec![],
     }
 }
 
@@ -191,6 +488,39 @@ impl Completion {
                 }
             }
         }
+        let member = matches!(before, Some('>' | ':' | '.'));
+        for line in custom_lines(lang) {
+            let word = match line.find('(') {
+                Some(open) => line[..open].trim().to_owned(),
+                None => line.split(" — ").next().unwrap_or("").trim().to_owned(),
+            };
+            let short = short_name(&word).to_owned();
+            let candidate = if member { short } else { word };
+            if candidate.to_lowercase().starts_with(&lower) {
+                add(&candidate, "словарь", 0);
+            }
+        }
+        for source in builtin_sigs(lang) {
+            if lang != Lang::Php && !member {
+                continue;
+            }
+            for line in source.lines() {
+                let Some(open) = line.find('(') else {
+                    continue;
+                };
+                let name = line[..open].trim();
+                let candidate = if member {
+                    short_name(name)
+                } else if let Some(class) = class_name(name) {
+                    class
+                } else {
+                    continue;
+                };
+                if candidate.to_lowercase().starts_with(&lower) {
+                    add(candidate, if member { "метод" } else { "класс" }, 1);
+                }
+            }
+        }
         for word in &words {
             add(word, "текст", 0);
         }
@@ -205,6 +535,25 @@ impl Completion {
         self.selected = 0;
         self.start = start;
         self.open = true;
+    }
+
+    pub fn update_hint(&mut self, doc: &Document) {
+        if doc.has_selection() {
+            self.hint = None;
+            return;
+        }
+        let Some((open, active, name)) = call_at(doc) else {
+            self.hint = None;
+            return;
+        };
+        if let Some(hint) = &mut self.hint
+            && hint.open == open
+        {
+            hint.active = active;
+            return;
+        }
+        let sigs = find_sigs(doc, lang(&doc.syntax), &name);
+        self.hint = (!sigs.is_empty()).then_some(Hint { sigs, active, open });
     }
 
     pub fn step(&mut self, delta: isize) {
@@ -281,6 +630,68 @@ mod tests {
         assert_eq!(texts(&c), vec!["endblock"]);
         let (_, c) = complete("let v: Has", "Rust", false);
         assert_eq!(texts(&c), vec!["Hash", "HashMap", "HashSet"]);
+    }
+
+    fn hint_at(text: &str, syntax: &str) -> Option<(String, usize, Vec<String>)> {
+        let mut doc = Document::from_text(text);
+        doc.syntax = syntax.into();
+        doc.move_to(doc.len(), false);
+        let mut c = Completion::default();
+        c.update_hint(&doc);
+        c.hint.map(|h| {
+            (
+                h.sigs[0].name.clone(),
+                h.active,
+                h.sigs[0].params.clone(),
+            )
+        })
+    }
+
+    #[test]
+    fn signatures_follow_the_call_under_cursor() {
+        let (name, active, params) = hint_at("<?php\n$x = str_replace('a', ", "PHP").unwrap();
+        assert_eq!(name, "str_replace");
+        assert_eq!(active, 1);
+        assert_eq!(params[2], "string|array $subject");
+        let (name, active, _) = hint_at("<?php\nimplode(', ', array_map(fn($a) => $a, ", "PHP").unwrap();
+        assert_eq!((name.as_str(), active), ("array_map", 1));
+        let (name, active, _) =
+            hint_at("<?php\n$res = CIBlockElement::GetList([], ['IBLOCK_ID' => 5], false, ", "PHP").unwrap();
+        assert_eq!((name.as_str(), active), ("CIBlockElement::GetList", 3));
+        let (name, _, _) = hint_at("<?php\n$APPLICATION->SetTitle(", "PHP").unwrap();
+        assert_eq!(name, "SetTitle");
+        assert!(hint_at("<?php\nstrlen('x');", "PHP").is_none());
+        assert!(hint_at("<?php\nif ($a && ", "PHP").is_none());
+        let (name, active, params) =
+            hint_at("function total($items, $tax = 0.2) {}\ntotal($cart, ", "PHP").unwrap();
+        assert_eq!((name.as_str(), active), ("total", 1));
+        assert_eq!(params, vec!["$items", "$tax = 0.2"]);
+        let (name, _, _) = hint_at("$('.a').toggleClass(", "JavaScript (Babel)").unwrap();
+        assert_eq!(name, "toggleClass");
+        let (name, _, _) = hint_at("def area(w, h=1):\n    pass\narea(", "Python").unwrap();
+        assert_eq!(name, "area");
+    }
+
+    #[test]
+    fn custom_dictionaries_feed_words_and_signatures() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "php".to_owned(),
+            "myHelper($a, $b) — свой помощник\nSPECIAL_CONST".to_owned(),
+        );
+        set_custom(&map);
+        let (_, c) = complete("<?php\nmyHe", "PHP", false);
+        assert_eq!(texts(&c), vec!["myHelper"]);
+        let (_, c) = complete("<?php\nSPEC", "PHP", false);
+        assert!(texts(&c).contains(&"SPECIAL_CONST"));
+        let (name, active, _) = hint_at("<?php\nmyHelper(1, ", "PHP").unwrap();
+        assert_eq!((name.as_str(), active), ("myHelper", 1));
+        let (_, c) = complete("<?php\n$x = CIBlockSec", "PHP", false);
+        assert!(texts(&c).contains(&"CIBlockSection"));
+        set_custom(&BTreeMap::new());
+        let sig = parse_signature("f(array $a = [1, 2], string $s = \"(,)\"): int — doc").unwrap();
+        assert_eq!(sig.params, vec!["array $a = [1, 2]", "string $s = \"(,)\""]);
+        assert_eq!((sig.ret.as_str(), sig.doc.as_str()), ("int", "doc"));
     }
 
     #[test]

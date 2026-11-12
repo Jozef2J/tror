@@ -38,6 +38,98 @@ pub struct Pointer {
     pos: usize,
     clicks: u8,
     origin: Option<(usize, usize)>,
+    block: Option<(usize, f64)>,
+}
+
+static BLOCK_CLIP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn remember_block(text: Option<String>) {
+    if let Ok(mut clip) = BLOCK_CLIP.lock() {
+        *clip = text;
+    }
+}
+
+fn is_block_clip(text: &str) -> bool {
+    BLOCK_CLIP
+        .lock()
+        .ok()
+        .and_then(|c| c.clone())
+        .is_some_and(|c| c == text)
+}
+
+fn apply_block(ui: &Ui, doc: &mut Document, m: &Metrics) {
+    let Some(((l0, x0), (l1, x1))) = doc.block else {
+        return;
+    };
+    let last = doc.line_count().saturating_sub(1);
+    let (l0, l1) = (l0.min(last), l1.min(last));
+    let lines: Vec<usize> = if l0 <= l1 {
+        (l0..=l1).collect()
+    } else {
+        (l1..=l0).rev().collect()
+    };
+    let mut cursors = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let layout = layout_line(ui, doc, *line, m);
+        let start = doc.rope.line_to_char(*line);
+        let a = start + layout.col_at(x0);
+        let h = start + layout.col_at(x1);
+        cursors.push((a, h));
+    }
+    let primary = cursors.len().saturating_sub(1);
+    let block = doc.block;
+    let sel = cursors[primary];
+    doc.set_cursors(cursors.clone(), primary);
+    if doc.cursors().len() != cursors.len() {
+        doc.sel = sel;
+        doc.extra = cursors[..primary].to_vec();
+    }
+    doc.block = block;
+    doc.reveal = true;
+}
+
+fn block_step(ui: &Ui, doc: &mut Document, m: &Metrics, key: Key) {
+    let head = doc.sel.1;
+    let (anchor, mut target) = match doc.block {
+        Some(block) => block,
+        None => {
+            let line = doc.rope.char_to_line(head);
+            let col = head - doc.rope.line_to_char(line);
+            let x = layout_line(ui, doc, line, m).x_of(col, m.char_w);
+            let anchor_line = doc.rope.char_to_line(doc.sel.0);
+            let anchor_col = doc.sel.0 - doc.rope.line_to_char(anchor_line);
+            let ax = layout_line(ui, doc, anchor_line, m).x_of(anchor_col, m.char_w);
+            ((anchor_line, ax), (line, x))
+        }
+    };
+    let cw = m.char_w as f64;
+    match key {
+        Key::ArrowUp => target.0 = target.0.saturating_sub(1),
+        Key::ArrowDown => target.0 = (target.0 + 1).min(doc.line_count().saturating_sub(1)),
+        Key::ArrowLeft => target.1 = (target.1 - cw).max(0.0),
+        Key::ArrowRight => target.1 += cw,
+        _ => {}
+    }
+    target.1 = (target.1 / cw).round() * cw;
+    doc.block = Some((anchor, target));
+    apply_block(ui, doc, m);
+}
+
+fn vertical_char(doc: &Document, pos: usize, down: bool) -> usize {
+    let line = doc.rope.char_to_line(pos);
+    let col = pos - doc.rope.line_to_char(line);
+    let target = if down {
+        if line + 1 >= doc.line_count() {
+            return doc.len();
+        }
+        line + 1
+    } else {
+        if line == 0 {
+            return 0;
+        }
+        line - 1
+    };
+    doc.rope.line_to_char(target) + col.min(doc.line_len(target))
 }
 
 struct Metrics {
@@ -362,6 +454,86 @@ fn handle_events(ui: &Ui, doc: &mut Document, m: &Metrics) -> Typed {
     let mut typed = Typed::None;
     let events = ui.input(|i| i.events.clone());
     for event in events {
+        if let Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = &event
+        {
+            let key = *key;
+            let alt_shift = modifiers.alt && modifiers.shift && !modifiers.command;
+            if alt_shift
+                && matches!(
+                    key,
+                    Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight
+                )
+            {
+                block_step(ui, doc, m, key);
+                continue;
+            }
+            if modifiers.command && modifiers.alt && matches!(key, Key::ArrowUp | Key::ArrowDown) {
+                doc.add_cursor_vertical(key == Key::ArrowDown);
+                continue;
+            }
+            if modifiers.command && !modifiers.shift && !modifiers.alt && key == Key::D {
+                doc.select_next_match();
+                continue;
+            }
+            if key == Key::Escape && (doc.multi() || doc.block.is_some()) {
+                let sel = doc.sel;
+                doc.clear_extra();
+                doc.sel = sel;
+                continue;
+            }
+            if doc.multi() {
+                let shift = modifiers.shift;
+                let cmd = modifiers.command;
+                let handled = match key {
+                    Key::ArrowLeft => {
+                        doc.move_each(shift, |d, c| {
+                            if cmd {
+                                d.word_left(c.1)
+                            } else if !shift && c.0 != c.1 {
+                                c.0.min(c.1)
+                            } else {
+                                c.1.saturating_sub(1)
+                            }
+                        });
+                        true
+                    }
+                    Key::ArrowRight => {
+                        doc.move_each(shift, |d, c| {
+                            if cmd {
+                                d.word_right(c.1)
+                            } else if !shift && c.0 != c.1 {
+                                c.0.max(c.1)
+                            } else {
+                                c.1 + 1
+                            }
+                        });
+                        true
+                    }
+                    Key::ArrowUp | Key::ArrowDown if !cmd => {
+                        let down = key == Key::ArrowDown;
+                        doc.move_each(shift, |d, c| vertical_char(d, c.1, down));
+                        true
+                    }
+                    Key::Home => {
+                        doc.move_each(shift, |d, c| d.line_home(c.1));
+                        true
+                    }
+                    Key::End => {
+                        doc.move_each(shift, |d, c| d.line_end(c.1));
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    continue;
+                }
+            }
+        }
         match event {
             Event::Text(text) => {
                 let clean: String = text.chars().filter(|c| !c.is_control()).collect();
@@ -378,18 +550,28 @@ fn handle_events(ui: &Ui, doc: &mut Document, m: &Metrics) -> Typed {
             Event::Paste(text) => {
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
                 if !text.is_empty() {
-                    doc.insert_text(&text);
+                    if !doc.multi() && !doc.has_selection() && is_block_clip(&text) {
+                        doc.block_paste(&text);
+                    } else {
+                        doc.insert_text(&text);
+                    }
                 }
             }
-            Event::Copy => {
-                if doc.has_selection() {
+            Event::Copy | Event::Cut => {
+                let cut = matches!(event, Event::Cut);
+                if doc.multi() {
+                    let text = doc.texts().join("\n");
+                    remember_block((doc.block.is_some() || doc.multi()).then(|| text.clone()));
+                    ui.ctx().copy_text(text);
+                    if cut {
+                        doc.insert_text("");
+                    }
+                } else if doc.has_selection() {
+                    remember_block(None);
                     ui.ctx().copy_text(doc.selected_text());
-                }
-            }
-            Event::Cut => {
-                if doc.has_selection() {
-                    ui.ctx().copy_text(doc.selected_text());
-                    doc.insert_text("");
+                    if cut {
+                        doc.insert_text("");
+                    }
                 }
             }
             Event::Key {
@@ -616,6 +798,8 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 if i.consume_key(egui::Modifiers::NONE, Key::Escape) {
                     complete.close();
                 }
+            } else if complete.hint.is_some() && i.consume_key(egui::Modifiers::NONE, Key::Escape) {
+                complete.hint = None;
             }
         });
         if complete.open
@@ -628,15 +812,22 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         }
         let stepped = complete.open;
         let typed = handle_events(ui, doc, &m);
-        if manual {
+        if doc.multi() {
+            complete.close();
+            complete.hint = None;
+        } else if manual {
             complete.refresh(doc, true);
         } else if typed == Typed::Text || (typed == Typed::Backspace && stepped) {
             complete.refresh(doc, false);
         } else if before != (doc.version, doc.sel) {
             complete.close();
         }
+        if !doc.multi() && (before != (doc.version, doc.sel) || manual) {
+            complete.update_hint(doc);
+        }
     } else {
         complete.close();
+        complete.hint = None;
     }
     if ui.rect_contains_pointer(full) {
         let delta = ui.input(|i| i.smooth_scroll_delta);
@@ -676,10 +867,48 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     if pressed {
         complete.close();
     }
-    if pressed && let Some(p) = pointer {
+    let modifiers = ui.input(|i| i.modifiers);
+    let point_x = |doc: &Document, p: Pos2| (p.x - text_rect.left() - PAD_X) as f64 + doc.scroll_x;
+    if pressed
+        && modifiers.alt
+        && !modifiers.command
+        && let Some(p) = pointer
+    {
+        let pos = char_at(ui, doc, p);
+        let line = doc.rope.char_to_line(pos);
+        let x = (point_x(doc, p) / char_w as f64).round() * char_w as f64;
+        state.block = Some((line, x.max(0.0)));
+        state.origin = None;
+        doc.move_to(pos, false);
+        doc.block = Some(((line, x.max(0.0)), (line, x.max(0.0))));
+        doc.reveal = false;
+    } else if pressed
+        && modifiers.command
+        && !modifiers.shift
+        && let Some(p) = pointer
+    {
+        let pos = char_at(ui, doc, p);
+        doc.add_cursor(pos);
+        state.origin = None;
+        state.block = None;
+    } else if response.is_pointer_button_down_on()
+        && let (Some(p), Some(anchor)) = (pointer, state.block)
+    {
+        let clamped = egui::pos2(
+            p.x.clamp(text_rect.left(), text_rect.right()),
+            p.y.clamp(text_rect.top(), text_rect.bottom() - 1.0),
+        );
+        let pos = char_at(ui, doc, clamped);
+        let line = doc.rope.char_to_line(pos);
+        let x = (point_x(doc, clamped) / char_w as f64).round() * char_w as f64;
+        doc.block = Some((anchor, (line, x.max(0.0))));
+        apply_block(ui, doc, &m);
+        doc.reveal = false;
+    } else if pressed && let Some(p) = pointer {
+        state.block = None;
         let pos = char_at(ui, doc, p);
         let now = ui.input(|i| i.time);
-        let shift = ui.input(|i| i.modifiers.shift);
+        let shift = modifiers.shift;
         state.clicks = if now - state.time < 0.4 && state.pos == pos && state.clicks < 3 {
             state.clicks + 1
         } else {
@@ -722,6 +951,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     }
     if !ui.input(|i| i.pointer.primary_down()) {
         state.origin = None;
+        state.block = None;
     }
     ui.data_mut(|d| d.insert_temp(id, state));
 
@@ -895,6 +1125,13 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     let head_line = doc.rope.char_to_line(head);
     let sorted = (sel.start, sel.end);
     let mut cursor_rect = None;
+    let mut extra_rects: Vec<Rect> = Vec::new();
+    let extras: Vec<(usize, usize)> = doc
+        .extra
+        .iter()
+        .map(|(a, h)| (*a.min(h), *a.max(h)))
+        .collect();
+    let extra_heads: Vec<usize> = doc.extra.iter().map(|c| c.1).collect();
 
     for (line, offset) in visible {
         let top64 = origin_y as f64 + offset;
@@ -972,6 +1209,14 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             let past = if sel.end > line_end { b + 1 } else { b };
             fill(a, past, char_w * 0.6, 0.0, pal.selection);
         }
+        for (lo, hi) in &extras {
+            if lo < hi && *lo <= line_end && *hi > line_start {
+                let a = lo.max(&line_start) - line_start;
+                let b = hi.min(&line_end) - line_start;
+                let past = if *hi > line_end { b + 1 } else { b };
+                fill(a, past, char_w * 0.6, 0.0, pal.selection);
+            }
+        }
         if layout.grid > 0 {
             for r in row_from..row_to {
                 painter.galley(
@@ -995,6 +1240,16 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 egui::pos2(sx(x) + 1.0, top + row_h),
             ));
         }
+        for extra in &extra_heads {
+            if *extra >= line_start && *extra <= line_end {
+                let (x, at) = layout.place(extra - line_start, char_w);
+                let top = row_top(at);
+                extra_rects.push(Rect::from_min_max(
+                    egui::pos2(sx(x), top),
+                    egui::pos2(sx(x) + 1.0, top + row_h),
+                ));
+            }
+        }
         gutter_painter.text(
             egui::pos2(gutter_rect.right() - 14.0, y + row_h * 0.5),
             Align2::RIGHT_CENTER,
@@ -1015,6 +1270,12 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 [rect.left_top(), rect.left_bottom()],
                 Stroke::new(2.0, pal.accent),
             );
+            for extra in &extra_rects {
+                painter.line_segment(
+                    [extra.left_top(), extra.left_bottom()],
+                    Stroke::new(2.0, pal.accent.gamma_multiply(0.8)),
+                );
+            }
         }
         let wait = 0.5 - phase % 0.5;
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait.max(0.02)));
@@ -1103,6 +1364,82 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             complete.selected = index;
             complete.accept(doc);
             ctx.request_repaint();
+        }
+    }
+    if focused
+        && let (Some(hint), Some(rect)) = (&complete.hint, cursor_rect)
+    {
+        let small = FontId::proportional(12.0);
+        let code = FontId::monospace((font_size - 1.0).max(10.0));
+        let mut jobs = Vec::new();
+        for sig in hint.sigs.iter().take(3) {
+            let mut job = LayoutJob::default();
+            job.wrap.max_width = (full.width() - 40.0).clamp(200.0, 720.0);
+            let plain = TextFormat::simple(code.clone(), pal.subtext);
+            job.append(&sig.name, 0.0, TextFormat::simple(code.clone(), pal.text));
+            job.append("(", 0.0, plain.clone());
+            let active = hint
+                .active
+                .min(sig.params.len().saturating_sub(1));
+            for (i, param) in sig.params.iter().enumerate() {
+                if i > 0 {
+                    job.append(", ", 0.0, plain.clone());
+                }
+                let variadic = param.contains("...") || param.starts_with('*');
+                let current = i == active || (variadic && hint.active >= i);
+                let mut format = TextFormat::simple(
+                    code.clone(),
+                    if current { pal.accent } else { pal.subtext },
+                );
+                if current {
+                    format.underline = Stroke::new(1.0, pal.accent);
+                }
+                job.append(param, 0.0, format);
+            }
+            job.append(")", 0.0, plain.clone());
+            if !sig.ret.is_empty() {
+                job.append(&format!(": {}", sig.ret), 0.0, TextFormat::simple(code.clone(), pal.faint));
+            }
+            if !sig.doc.is_empty() {
+                job.append(&format!("\n{}", sig.doc), 0.0, TextFormat::simple(small.clone(), pal.faint));
+            }
+            jobs.push(ui.fonts_mut(|f| f.layout_job(job)));
+        }
+        if !jobs.is_empty() {
+            let width = jobs.iter().map(|g| g.size().x).fold(0.0, f32::max) + 20.0;
+            let height: f32 = jobs.iter().map(|g| g.size().y + 4.0).sum::<f32>() + 12.0;
+            let above = rect.top() - height - 4.0;
+            let y = if complete.open || above < full.top() {
+                if complete.open {
+                    above.max(full.top())
+                } else {
+                    rect.bottom() + 4.0
+                }
+            } else {
+                above
+            };
+            let x = rect.left().min(full.right() - width - 4.0).max(full.left());
+            egui::Area::new(id.with("signature"))
+                .order(egui::Order::Foreground)
+                .interactable(false)
+                .fixed_pos(egui::pos2(x, y))
+                .show(&ctx, |ui| {
+                    let (area, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+                    let painter = ui.painter();
+                    painter.rect(
+                        area,
+                        7.0,
+                        pal.mantle,
+                        Stroke::new(1.0, pal.border),
+                        egui::StrokeKind::Outside,
+                    );
+                    let mut top = area.top() + 6.0;
+                    for galley in jobs {
+                        let h = galley.size().y;
+                        painter.galley(egui::pos2(area.left() + 10.0, top), galley, pal.text);
+                        top += h + 4.0;
+                    }
+                });
         }
     }
 }

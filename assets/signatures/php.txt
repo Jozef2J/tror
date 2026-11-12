@@ -1,0 +1,280 @@
+abs(int|float $num): int|float
+addslashes(string $string): string
+array_chunk(array $array, int $length, bool $preserve_keys = false): array
+array_column(array $array, int|string|null $column_key, int|string|null $index_key = null): array
+array_combine(array $keys, array $values): array
+array_count_values(array $array): array
+array_diff(array $array, array ...$arrays): array
+array_diff_assoc(array $array, array ...$arrays): array
+array_diff_key(array $array, array ...$arrays): array
+array_fill(int $start_index, int $count, mixed $value): array
+array_fill_keys(array $keys, mixed $value): array
+array_filter(array $array, ?callable $callback = null, int $mode = 0): array
+array_flip(array $array): array
+array_intersect(array $array, array ...$arrays): array
+array_intersect_key(array $array, array ...$arrays): array
+array_is_list(array $array): bool
+array_key_exists(string|int $key, array $array): bool
+array_key_first(array $array): int|string|null
+array_key_last(array $array): int|string|null
+array_keys(array $array, mixed $filter_value = ?, bool $strict = false): array
+array_map(?callable $callback, array $array, array ...$arrays): array
+array_merge(array ...$arrays): array
+array_merge_recursive(array ...$arrays): array
+array_multisort(array &$array, mixed &...$rest): bool
+array_pad(array $array, int $length, mixed $value): array
+array_pop(array &$array): mixed
+array_product(array $array): int|float
+array_push(array &$array, mixed ...$values): int
+array_rand(array $array, int $num = 1): int|string|array
+array_reduce(array $array, callable $callback, mixed $initial = null): mixed
+array_replace(array $array, array ...$replacements): array
+array_reverse(array $array, bool $preserve_keys = false): array
+array_search(mixed $needle, array $haystack, bool $strict = false): int|string|false
+array_shift(array &$array): mixed
+array_slice(array $array, int $offset, ?int $length = null, bool $preserve_keys = false): array
+array_splice(array &$array, int $offset, ?int $length = null, mixed $replacement = []): array
+array_sum(array $array): int|float
+array_unique(array $array, int $flags = SORT_STRING): array
+array_unshift(array &$array, mixed ...$values): int
+array_values(array $array): array
+array_walk(array|object &$array, callable $callback, mixed $arg = ?): true
+arsort(array &$array, int $flags = SORT_REGULAR): true
+asort(array &$array, int $flags = SORT_REGULAR): true
+base64_decode(string $string, bool $strict = false): string|false
+base64_encode(string $string): string
+basename(string $path, string $suffix = ""): string
+bin2hex(string $string): string
+boolval(mixed $value): bool
+call_user_func(callable $callback, mixed ...$args): mixed
+call_user_func_array(callable $callback, array $args): mixed
+ceil(int|float $num): float
+checkdate(int $month, int $day, int $year): bool
+chmod(string $filename, int $permissions): bool
+chr(int $codepoint): string
+chunk_split(string $string, int $length = 76, string $separator = "\r\n"): string
+class_exists(string $class, bool $autoload = true): bool
+compact(array|string $var_name, array|string ...$var_names): array
+constant(string $name): mixed
+copy(string $from, string $to, ?resource $context = null): bool
+count(Countable|array $value, int $mode = COUNT_NORMAL): int
+crc32(string $string): int
+ctype_alnum(mixed $text): bool
+ctype_alpha(mixed $text): bool
+ctype_digit(mixed $text): bool
+curl_close(CurlHandle $handle): void
+curl_error(CurlHandle $handle): string
+curl_exec(CurlHandle $handle): string|bool
+curl_getinfo(CurlHandle $handle, ?int $option = null): mixed
+curl_init(?string $url = null): CurlHandle|false
+curl_setopt(CurlHandle $handle, int $option, mixed $value): bool
+curl_setopt_array(CurlHandle $handle, array $options): bool
+current(array|object $array): mixed
+date(string $format, ?int $timestamp = null): string
+date_create(string $datetime = "now", ?DateTimeZone $timezone = null): DateTime|false
+date_default_timezone_set(string $timezoneId): bool
+date_diff(DateTimeInterface $baseObject, DateTimeInterface $targetObject, bool $absolute = false): DateInterval
+date_format(DateTimeInterface $object, string $format): string
+debug_backtrace(int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT, int $limit = 0): array
+dechex(int $num): string
+define(string $constant_name, mixed $value, bool $case_insensitive = false): bool
+defined(string $constant_name): bool
+dirname(string $path, int $levels = 1): string
+explode(string $separator, string $string, int $limit = PHP_INT_MAX): array
+extract(array &$array, int $flags = EXTR_OVERWRITE, string $prefix = ""): int
+fclose(resource $stream): bool
+feof(resource $stream): bool
+fgetcsv(resource $stream, ?int $length = null, string $separator = ",", string $enclosure = "\"", string $escape = "\\"): array|false
+fgets(resource $stream, ?int $length = null): string|false
+file(string $filename, int $flags = 0, ?resource $context = null): array|false
+file_exists(string $filename): bool
+file_get_contents(string $filename, bool $use_include_path = false, ?resource $context = null, int $offset = 0, ?int $length = null): string|false
+file_put_contents(string $filename, mixed $data, int $flags = 0, ?resource $context = null): int|false
+filemtime(string $filename): int|false
+filesize(string $filename): int|false
+filter_input(int $type, string $var_name, int $filter = FILTER_DEFAULT, array|int $options = 0): mixed
+filter_var(mixed $value, int $filter = FILTER_DEFAULT, array|int $options = 0): mixed
+floatval(mixed $value): float
+floor(int|float $num): float
+fopen(string $filename, string $mode, bool $use_include_path = false, ?resource $context = null): resource|false
+fputcsv(resource $stream, array $fields, string $separator = ",", string $enclosure = "\"", string $escape = "\\", string $eol = "\n"): int|false
+fputs(resource $stream, string $data, ?int $length = null): int|false
+fread(resource $stream, int $length): string|false
+fseek(resource $stream, int $offset, int $whence = SEEK_SET): int
+func_get_args(): array
+function_exists(string $function): bool
+fwrite(resource $stream, string $data, ?int $length = null): int|false
+get_class(object $object = ?): string
+get_object_vars(object $object): array
+getenv(?string $name = null, bool $local_only = false): array|string|false
+gettype(mixed $value): string
+glob(string $pattern, int $flags = 0): array|false
+gmdate(string $format, ?int $timestamp = null): string
+hash(string $algo, string $data, bool $binary = false, array $options = []): string
+hash_hmac(string $algo, string $data, string $key, bool $binary = false): string
+header(string $header, bool $replace = true, int $response_code = 0): void
+headers_sent(string &$filename = null, int &$line = null): bool
+hex2bin(string $string): string|false
+html_entity_decode(string $string, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, ?string $encoding = null): string
+htmlentities(string $string, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, ?string $encoding = null, bool $double_encode = true): string
+htmlspecialchars(string $string, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, ?string $encoding = null, bool $double_encode = true): string
+htmlspecialchars_decode(string $string, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401): string
+http_build_query(array|object $data, string $numeric_prefix = "", ?string $arg_separator = null, int $encoding_type = PHP_QUERY_RFC1738): string
+iconv(string $from_encoding, string $to_encoding, string $string): string|false
+implode(string $separator, array $array): string
+in_array(mixed $needle, array $haystack, bool $strict = false): bool
+ini_get(string $option): string|false
+ini_set(string $option, string|int|float|bool|null $value): string|false
+intdiv(int $num1, int $num2): int
+interface_exists(string $interface, bool $autoload = true): bool
+intval(mixed $value, int $base = 10): int
+is_array(mixed $value): bool
+is_bool(mixed $value): bool
+is_callable(mixed $value, bool $syntax_only = false, string &$callable_name = null): bool
+is_dir(string $filename): bool
+is_file(string $filename): bool
+is_float(mixed $value): bool
+is_int(mixed $value): bool
+is_null(mixed $value): bool
+is_numeric(mixed $value): bool
+is_object(mixed $value): bool
+is_readable(string $filename): bool
+is_string(mixed $value): bool
+is_writable(string $filename): bool
+iterator_to_array(Traversable|array $iterator, bool $preserve_keys = true): array
+json_decode(string $json, ?bool $associative = null, int $depth = 512, int $flags = 0): mixed
+json_encode(mixed $value, int $flags = 0, int $depth = 512): string|false
+json_last_error(): int
+json_last_error_msg(): string
+key(array|object $array): int|string|null
+krsort(array &$array, int $flags = SORT_REGULAR): true
+ksort(array &$array, int $flags = SORT_REGULAR): true
+lcfirst(string $string): string
+ltrim(string $string, string $characters = " \n\r\t\v\x00"): string
+mail(string $to, string $subject, string $message, array|string $additional_headers = [], string $additional_params = ""): bool
+max(mixed $value, mixed ...$values): mixed
+mb_convert_case(string $string, int $mode, ?string $encoding = null): string
+mb_convert_encoding(array|string $string, string $to_encoding, array|string|null $from_encoding = null): array|string|false
+mb_internal_encoding(?string $encoding = null): string|bool
+mb_strlen(string $string, ?string $encoding = null): int
+mb_strpos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false
+mb_strrpos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false
+mb_strtolower(string $string, ?string $encoding = null): string
+mb_strtoupper(string $string, ?string $encoding = null): string
+mb_substr(string $string, int $start, ?int $length = null, ?string $encoding = null): string
+mb_substr_count(string $haystack, string $needle, ?string $encoding = null): int
+md5(string $string, bool $binary = false): string
+md5_file(string $filename, bool $binary = false): string|false
+method_exists(object|string $object_or_class, string $method): bool
+microtime(bool $as_float = false): string|float
+min(mixed $value, mixed ...$values): mixed
+mkdir(string $directory, int $permissions = 0777, bool $recursive = false, ?resource $context = null): bool
+mktime(int $hour, ?int $minute = null, ?int $second = null, ?int $month = null, ?int $day = null, ?int $year = null): int|false
+move_uploaded_file(string $from, string $to): bool
+nl2br(string $string, bool $use_xhtml = true): string
+number_format(float $num, int $decimals = 0, ?string $decimal_separator = ".", ?string $thousands_separator = ","): string
+ob_end_clean(): bool
+ob_get_clean(): string|false
+ob_get_contents(): string|false
+ob_start(callable $callback = null, int $chunk_size = 0, int $flags = PHP_OUTPUT_HANDLER_STDFLAGS): bool
+opendir(string $directory, ?resource $context = null): resource|false
+ord(string $character): int
+parse_str(string $string, array &$result): void
+parse_url(string $url, int $component = -1): int|string|array|null|false
+password_hash(string $password, string|int|null $algo, array $options = []): string
+password_verify(string $password, string $hash): bool
+pathinfo(string $path, int $flags = PATHINFO_ALL): array|string
+pow(mixed $num, mixed $exponent): int|float|object
+preg_grep(string $pattern, array $array, int $flags = 0): array|false
+preg_match(string $pattern, string $subject, array &$matches = null, int $flags = 0, int $offset = 0): int|false
+preg_match_all(string $pattern, string $subject, array &$matches = null, int $flags = 0, int $offset = 0): int|false
+preg_quote(string $str, ?string $delimiter = null): string
+preg_replace(string|array $pattern, string|array $replacement, string|array $subject, int $limit = -1, int &$count = null): string|array|null
+preg_replace_callback(string|array $pattern, callable $callback, string|array $subject, int $limit = -1, int &$count = null, int $flags = 0): string|array|null
+preg_split(string $pattern, string $subject, int $limit = -1, int $flags = 0): array|false
+print_r(mixed $value, bool $return = false): string|true
+printf(string $format, mixed ...$values): int
+property_exists(object|string $object_or_class, string $property): bool
+random_bytes(int $length): string
+random_int(int $min, int $max): int
+range(string|int|float $start, string|int|float $end, int|float $step = 1): array
+rawurldecode(string $string): string
+rawurlencode(string $string): string
+readdir(?resource $dir_handle = null): string|false
+realpath(string $path): string|false
+rename(string $from, string $to, ?resource $context = null): bool
+reset(array|object &$array): mixed
+rmdir(string $directory, ?resource $context = null): bool
+round(int|float $num, int $precision = 0, int $mode = PHP_ROUND_HALF_UP): float
+rsort(array &$array, int $flags = SORT_REGULAR): true
+rtrim(string $string, string $characters = " \n\r\t\v\x00"): string
+scandir(string $directory, int $sorting_order = SCANDIR_SORT_ASCENDING, ?resource $context = null): array|false
+serialize(mixed $value): string
+session_destroy(): bool
+session_id(?string $id = null): string|false
+session_start(array $options = []): bool
+set_error_handler(?callable $callback, int $error_levels = E_ALL): ?callable
+set_exception_handler(?callable $callback): ?callable
+set_time_limit(int $seconds): bool
+setcookie(string $name, string $value = "", int $expires_or_options = 0, string $path = "", string $domain = "", bool $secure = false, bool $httponly = false): bool
+settype(mixed &$var, string $type): bool
+sha1(string $string, bool $binary = false): string
+shuffle(array &$array): true
+simplexml_load_file(string $filename, ?string $class_name = SimpleXMLElement::class, int $options = 0, string $namespace_or_prefix = "", bool $is_prefix = false): SimpleXMLElement|false
+simplexml_load_string(string $data, ?string $class_name = SimpleXMLElement::class, int $options = 0, string $namespace_or_prefix = "", bool $is_prefix = false): SimpleXMLElement|false
+sleep(int $seconds): int
+sort(array &$array, int $flags = SORT_REGULAR): true
+sprintf(string $format, mixed ...$values): string
+sqrt(float $num): float
+str_contains(string $haystack, string $needle): bool
+str_ends_with(string $haystack, string $needle): bool
+str_ireplace(array|string $search, array|string $replace, string|array $subject, int &$count = null): string|array
+str_pad(string $string, int $length, string $pad_string = " ", int $pad_type = STR_PAD_RIGHT): string
+str_repeat(string $string, int $times): string
+str_replace(array|string $search, array|string $replace, string|array $subject, int &$count = null): string|array
+str_split(string $string, int $length = 1): array
+str_starts_with(string $haystack, string $needle): bool
+str_word_count(string $string, int $format = 0, ?string $characters = null): array|int
+strcasecmp(string $string1, string $string2): int
+strcmp(string $string1, string $string2): int
+strip_tags(string $string, array|string|null $allowed_tags = null): string
+stripos(string $haystack, string $needle, int $offset = 0): int|false
+stripslashes(string $string): string
+stristr(string $haystack, string $needle, bool $before_needle = false): string|false
+strlen(string $string): int
+strncmp(string $string1, string $string2, int $length): int
+strpos(string $haystack, string $needle, int $offset = 0): int|false
+strrchr(string $haystack, string $needle): string|false
+strrev(string $string): string
+strrpos(string $haystack, string $needle, int $offset = 0): int|false
+strstr(string $haystack, string $needle, bool $before_needle = false): string|false
+strtolower(string $string): string
+strtotime(string $datetime, ?int $baseTimestamp = null): int|false
+strtoupper(string $string): string
+strtr(string $string, string|array $from, ?string $to = null): string
+strval(mixed $value): string
+substr(string $string, int $offset, ?int $length = null): string
+substr_count(string $haystack, string $needle, int $offset = 0, ?int $length = null): int
+substr_replace(array|string $string, array|string $replace, array|int $offset, array|int|null $length = null): string|array
+sys_get_temp_dir(): string
+tempnam(string $directory, string $prefix): string|false
+time(): int
+touch(string $filename, ?int $mtime = null, ?int $atime = null): bool
+trigger_error(string $message, int $error_level = E_USER_NOTICE): true
+trim(string $string, string $characters = " \n\r\t\v\x00"): string
+uasort(array &$array, callable $callback): true
+ucfirst(string $string): string
+ucwords(string $string, string $separators = " \t\r\n\f\v"): string
+uksort(array &$array, callable $callback): true
+uniqid(string $prefix = "", bool $more_entropy = false): string
+unlink(string $filename, ?resource $context = null): bool
+unserialize(string $data, array $options = []): mixed
+urldecode(string $string): string
+urlencode(string $string): string
+usleep(int $microseconds): void
+usort(array &$array, callable $callback): true
+var_dump(mixed $value, mixed ...$values): void
+var_export(mixed $value, bool $return = false): ?string
+version_compare(string $version1, string $version2, ?string $operator = null): int|bool
+vsprintf(string $format, array $values): string
+wordwrap(string $string, int $width = 75, string $break = "\n", bool $cut_long_words = false): string

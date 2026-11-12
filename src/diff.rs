@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align2, Button, ComboBox, FontId, Rect, RichText, ScrollArea, Sense, Ui};
@@ -37,6 +39,55 @@ pub struct DiffPanel {
     jump: Option<usize>,
     at: usize,
     scroll_x: f32,
+    inline: HashMap<usize, [Vec<Range<usize>>; 2]>,
+}
+
+pub fn inline(old: &str, new: &str) -> [Vec<Range<usize>>; 2] {
+    let deadline = Instant::now() + Duration::from_millis(20);
+    let ops = similar::TextDiff::configure()
+        .algorithm(Algorithm::Myers)
+        .deadline(deadline)
+        .diff_chars(old, new);
+    let mut sides: [Vec<Range<usize>>; 2] = [Vec::new(), Vec::new()];
+    let mut push = |side: usize, range: Range<usize>| {
+        if range.is_empty() {
+            return;
+        }
+        if let Some(last) = sides[side].last_mut()
+            && last.end == range.start
+        {
+            last.end = range.end;
+            return;
+        }
+        sides[side].push(range);
+    };
+    for op in ops.ops() {
+        match *op {
+            DiffOp::Equal { .. } => {}
+            DiffOp::Delete {
+                old_index, old_len, ..
+            } => push(0, old_index..old_index + old_len),
+            DiffOp::Insert {
+                new_index, new_len, ..
+            } => push(1, new_index..new_index + new_len),
+            DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => {
+                push(0, old_index..old_index + old_len);
+                push(1, new_index..new_index + new_len);
+            }
+        }
+    }
+    let changed = |side: &[Range<usize>], len: usize| {
+        side.iter().map(|r| r.len()).sum::<usize>() * 10 > len.max(1) * 7
+    };
+    if changed(&sides[0], old.chars().count()) && changed(&sides[1], new.chars().count()) {
+        return [Vec::new(), Vec::new()];
+    }
+    sides
 }
 
 fn lines(doc: &Document) -> Vec<String> {
@@ -162,6 +213,7 @@ impl DiffPanel {
         }
         self.at = 0;
         self.jump = self.hunks.first().copied();
+        self.inline.clear();
     }
 
     pub fn ui(
@@ -242,15 +294,19 @@ impl DiffPanel {
             let dx = ui.input(|i| i.smooth_scroll_delta.x);
             self.scroll_x = (self.scroll_x - dx).max(0.0);
         }
-        let (red, green) = if dark {
+        let (red, green, red_strong, green_strong) = if dark {
             (
                 egui::Color32::from_rgb(0x3f, 0x20, 0x28),
                 egui::Color32::from_rgb(0x1b, 0x38, 0x28),
+                egui::Color32::from_rgb(0x7a, 0x2c, 0x3a),
+                egui::Color32::from_rgb(0x23, 0x6b, 0x41),
             )
         } else {
             (
                 egui::Color32::from_rgb(0xff, 0xdc, 0xdc),
                 egui::Color32::from_rgb(0xd8, 0xf5, 0xdc),
+                egui::Color32::from_rgb(0xff, 0xa8, 0xa8),
+                egui::Color32::from_rgb(0x9b, 0xe3, 0xa8),
             )
         };
         let digits = self.texts[0]
@@ -270,6 +326,16 @@ impl DiffPanel {
         scroll.show_rows(ui, row_h, self.rows.len(), |ui, range| {
             for index in range {
                 let row = self.rows[index];
+                if row.kind == Kind::Changed
+                    && !self.inline.contains_key(&index)
+                    && let (Some(l), Some(r)) = (row.left, row.right)
+                {
+                    let ranges = inline(
+                        &self.texts[0][l as usize],
+                        &self.texts[1][r as usize],
+                    );
+                    self.inline.insert(index, ranges);
+                }
                 let (rect, response) =
                     ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), Sense::click());
                 let (left, right) = rect.split_left_right_at_fraction(0.5);
@@ -299,6 +365,25 @@ impl DiffPanel {
                         half.right_bottom(),
                     );
                     let room = (text_rect.width() / char_w) as usize + 2;
+                    if let Some(ranges) = self.inline.get(&index) {
+                        let strong = if side == 0 { red_strong } else { green_strong };
+                        let clip = painter.with_clip_rect(text_rect.intersect(painter.clip_rect()));
+                        for range in &ranges[side] {
+                            if range.end <= skip || range.start > skip + room {
+                                continue;
+                            }
+                            let from = range.start.max(skip) - skip;
+                            let to = range.end.min(skip + room) - skip;
+                            clip.rect_filled(
+                                Rect::from_min_max(
+                                    egui::pos2(text_rect.left() + from as f32 * char_w, half.top() + 2.0),
+                                    egui::pos2(text_rect.left() + to as f32 * char_w, half.bottom() - 2.0),
+                                ),
+                                2.0,
+                                strong,
+                            );
+                        }
+                    }
                     let shown: String = self.texts[side][line as usize]
                         .chars()
                         .skip(skip)
@@ -379,6 +464,18 @@ mod tests {
         let right: Vec<u32> = rows.iter().filter_map(|r| r.right).collect();
         assert_eq!(left, (0..5).collect::<Vec<u32>>());
         assert_eq!(right, (0..6).collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn inline_changes_mark_only_differing_chars() {
+        let [left, right] = inline("$price = 100;", "$price = 250;");
+        assert!(!left.is_empty() && !right.is_empty());
+        assert!(left.iter().chain(&right).all(|r| r.start >= 9 && r.end <= 12));
+        let [left, right] = inline("echo $a;", "echo $a . $b;");
+        assert!(left.is_empty());
+        assert_eq!(right, vec![7..12]);
+        let [left, right] = inline("abc", "xyz");
+        assert!(left.is_empty() && right.is_empty());
     }
 
     #[test]

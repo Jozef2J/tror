@@ -37,3 +37,17 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.path }}
+
+  linux-webview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+      - run: cargo build --release --locked --features webview
+      - run: tar -czf tror-linux-x86_64-webview.tar.gz -C target/release tror
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tror-linux-x86_64-webview
+          path: tror-linux-x86_64-webview.tar.gz

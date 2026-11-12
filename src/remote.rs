@@ -22,14 +22,23 @@ pub enum Protocol {
     Sftp,
     Ftp,
     Ftps,
+    FtpsImplicit,
 }
 
 impl Protocol {
+    pub const ALL: [Protocol; 4] = [
+        Protocol::Sftp,
+        Protocol::Ftp,
+        Protocol::Ftps,
+        Protocol::FtpsImplicit,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Protocol::Sftp => "SFTP",
             Protocol::Ftp => "FTP",
             Protocol::Ftps => "FTPS",
+            Protocol::FtpsImplicit => "FTPS неявный",
         }
     }
 
@@ -37,7 +46,12 @@ impl Protocol {
         match self {
             Protocol::Sftp => 22,
             Protocol::Ftp | Protocol::Ftps => 21,
+            Protocol::FtpsImplicit => 990,
         }
+    }
+
+    pub fn tls(self) -> bool {
+        matches!(self, Protocol::Ftps | Protocol::FtpsImplicit)
     }
 }
 
@@ -88,6 +102,8 @@ pub struct Profile {
     #[serde(with = "masked")]
     pub password: String,
     pub key_file: String,
+    #[serde(with = "masked")]
+    pub passphrase: String,
     pub directory: String,
     pub url: String,
     pub insecure_tls: bool,
@@ -116,6 +132,8 @@ pub struct Store {
     pub show_date: bool,
     pub search_excludes: Option<String>,
     pub databases: Vec<crate::db::DbProfile>,
+    pub terminals: Vec<TermProfile>,
+    pub show_perm: bool,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -153,12 +171,219 @@ impl Store {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+pub enum TermProtocol {
+    #[default]
+    Ssh,
+    Telnet,
+    Mosh,
+}
+
+impl TermProtocol {
+    pub const ALL: [TermProtocol; 3] = [TermProtocol::Ssh, TermProtocol::Telnet, TermProtocol::Mosh];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TermProtocol::Ssh => "SSH",
+            TermProtocol::Telnet => "Telnet",
+            TermProtocol::Mosh => "Mosh",
+        }
+    }
+
+    pub fn default_port(self) -> u16 {
+        match self {
+            TermProtocol::Ssh | TermProtocol::Mosh => 22,
+            TermProtocol::Telnet => 23,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
+pub struct TermProfile {
+    pub name: String,
+    pub protocol: TermProtocol,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    #[serde(with = "masked")]
+    pub password: String,
+    pub key_file: String,
+    #[serde(with = "masked")]
+    pub passphrase: String,
+    pub theme: String,
+    pub font: String,
+    pub font_size: f32,
+    pub mosh_server: String,
+    pub mosh_ports: String,
+    pub startup: String,
+}
+
+impl Default for TermProfile {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            protocol: TermProtocol::Ssh,
+            host: String::new(),
+            port: 22,
+            user: String::new(),
+            password: String::new(),
+            key_file: String::new(),
+            passphrase: String::new(),
+            theme: String::new(),
+            font: String::new(),
+            font_size: 0.0,
+            mosh_server: String::new(),
+            mosh_ports: String::new(),
+            startup: String::new(),
+        }
+    }
+}
+
+impl TermProfile {
+    pub fn ssh(&self) -> Profile {
+        Profile {
+            name: self.name.clone(),
+            protocol: Protocol::Sftp,
+            host: self.host.clone(),
+            port: self.port,
+            user: self.user.clone(),
+            password: self.password.clone(),
+            key_file: self.key_file.clone(),
+            passphrase: self.passphrase.clone(),
+            ..Default::default()
+        }
+    }
+
+    pub fn from_host(profile: &Profile) -> Self {
+        Self {
+            name: profile.name.clone(),
+            protocol: TermProtocol::Ssh,
+            host: profile.host.clone(),
+            port: if profile.protocol == Protocol::Sftp {
+                profile.port
+            } else {
+                22
+            },
+            user: profile.user.clone(),
+            password: profile.password.clone(),
+            key_file: profile.key_file.clone(),
+            passphrase: profile.passphrase.clone(),
+            ..Default::default()
+        }
+    }
+
+    pub fn address(&self) -> String {
+        format!("{}:{}", self.host.trim(), self.port)
+    }
+}
+
+const DSA_NOTE: &str = "ключ DSA: этот тип устарел, в OpenSSH 10 удалён, и библиотека SSH программы входить по нему не умеет — создайте ключ Ed25519 (ssh-keygen -t ed25519)";
+
+pub fn key_kind(path: &str) -> Result<String, String> {
+    use base64::Engine;
+    let text = std::fs::read_to_string(path.trim()).map_err(|e| e.to_string())?;
+    if text.starts_with("PuTTY-User-Key-File") {
+        return Err("ключ в формате PuTTY (.ppk) — экспортируйте его в PuTTYgen: Conversions → Export OpenSSH key".into());
+    }
+    let header = text
+        .lines()
+        .find(|l| l.starts_with("-----BEGIN "))
+        .ok_or("это не закрытый ключ OpenSSH или PEM")?;
+    let encrypted = text.contains("ENCRYPTED");
+    let lock = |name: &str| {
+        if encrypted {
+            format!("{name}, защищён парольной фразой")
+        } else {
+            name.to_owned()
+        }
+    };
+    Ok(match header {
+        h if h.contains("RSA PRIVATE KEY") => lock("RSA"),
+        h if h.contains("DSA PRIVATE KEY") => return Err(DSA_NOTE.into()),
+        h if h.contains("EC PRIVATE KEY") => lock("ECDSA"),
+        h if h.contains("OPENSSH PRIVATE KEY") => {
+            let body: String = text
+                .lines()
+                .skip_while(|l| !l.starts_with("-----BEGIN"))
+                .skip(1)
+                .take_while(|l| !l.starts_with("-----END"))
+                .collect();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(body.trim())
+                .map_err(|e| e.to_string())?;
+            let magic = b"openssh-key-v1\0";
+            if !bytes.starts_with(magic) {
+                return Err("повреждённый ключ OpenSSH".into());
+            }
+            let mut at = magic.len();
+            fn field(bytes: &[u8], at: &mut usize) -> Option<Vec<u8>> {
+                let len = u32::from_be_bytes(bytes.get(*at..*at + 4)?.try_into().ok()?) as usize;
+                let value = bytes.get(*at + 4..*at + 4 + len)?.to_vec();
+                *at += 4 + len;
+                Some(value)
+            }
+            let cipher = field(&bytes, &mut at).ok_or("повреждённый ключ OpenSSH")?;
+            field(&bytes, &mut at);
+            field(&bytes, &mut at);
+            at += 4;
+            let public = field(&bytes, &mut at).ok_or("повреждённый ключ OpenSSH")?;
+            let len = public
+                .get(..4)
+                .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+                .unwrap_or(0);
+            let kind = String::from_utf8_lossy(public.get(4..4 + len).unwrap_or_default());
+            let name = match kind.as_ref() {
+                "ssh-ed25519" => "Ed25519".to_owned(),
+                "ssh-rsa" => "RSA".to_owned(),
+                "ssh-dss" => return Err(DSA_NOTE.into()),
+                k if k.starts_with("ecdsa-sha2-") => format!("ECDSA {}", &k[11..]),
+                k if k.starts_with("sk-") => format!("{k} (ключ безопасности)"),
+                k => k.to_owned(),
+            };
+            if cipher != b"none" {
+                format!("{name}, защищён парольной фразой")
+            } else {
+                name
+            }
+        }
+        h if h.contains("ENCRYPTED PRIVATE KEY") => "PKCS#8, защищён парольной фразой".into(),
+        h if h.contains("PRIVATE KEY") => "PKCS#8".into(),
+        _ => return Err("это не закрытый ключ".into()),
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Entry {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
     pub mtime: Option<u64>,
+    pub perm: Option<u32>,
+    pub owner: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Attrs {
+    pub perm: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub size: Option<u64>,
+    pub mtime: Option<u64>,
+    pub atime: Option<u64>,
+    pub is_dir: bool,
+}
+
+pub fn perm_string(mode: u32, is_dir: bool) -> String {
+    let mut out = String::with_capacity(10);
+    out.push(if is_dir { 'd' } else { '-' });
+    for shift in [6, 3, 0] {
+        let bits = (mode >> shift) & 7;
+        out.push(if bits & 4 != 0 { 'r' } else { '-' });
+        out.push(if bits & 2 != 0 { 'w' } else { '-' });
+        out.push(if bits & 1 != 0 { 'x' } else { '-' });
+    }
+    out
 }
 
 pub enum Cmd {
@@ -177,6 +402,18 @@ pub enum Cmd {
         dir: bool,
     },
     Walk(String),
+    Stat(String),
+    Chmod {
+        path: String,
+        mode: u32,
+        recursive: bool,
+        dirs: bool,
+        files: bool,
+    },
+    Touch {
+        path: String,
+        mtime: u64,
+    },
 }
 
 pub enum Event {
@@ -208,6 +445,10 @@ pub enum Event {
     Walked {
         root: String,
         files: Vec<(String, u64)>,
+    },
+    Stat {
+        path: String,
+        attrs: Attrs,
     },
     Log(String, bool),
     Error(String),
@@ -273,7 +514,7 @@ fn fingerprint(session: &ssh2::Session) -> Option<String> {
     Some(hash.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-fn open_session(
+pub(crate) fn open_session(
     profile: &Profile,
     known: Option<&str>,
     confirm: &dyn Fn(&str, bool) -> bool,
@@ -286,10 +527,10 @@ fn open_session(
         .handshake()
         .map_err(|e| format!("ошибка SSH: {e}"))?;
     if let Some(banner) = session.banner() {
-        trace::line(format!("[SSH] remote version: {}", banner.trim()), false);
+        trace::server(format!("[SSH] remote version: {}", banner.trim()));
     }
     let method = |kind| session.methods(kind).unwrap_or("-").to_owned();
-    trace::line(
+    trace::server(
         format!(
             "[SSH] kex: {}; host key: {}; cipher: {} / {}; mac: {} / {}",
             method(ssh2::MethodType::Kex),
@@ -299,12 +540,11 @@ fn open_session(
             method(ssh2::MethodType::MacCs),
             method(ssh2::MethodType::MacSc),
         ),
-        false,
     );
     let print = fingerprint(&session).ok_or("сервер не прислал ключ")?;
     let mut accepted = None;
     if known == Some(print.as_str()) {
-        trace::line(format!("[SSH] host key SHA256:{print} (known)"), false);
+        trace::server(format!("[SSH] host key SHA256:{print} (known)"));
     } else {
         let state = if known.is_some() { "CHANGED" } else { "new" };
         trace::line(
@@ -320,25 +560,56 @@ fn open_session(
     }
     let user = profile.user.trim();
     if let Ok(methods) = session.auth_methods(user) {
-        trace::line(format!("[SSH] auth methods: {methods}"), false);
+        trace::server(format!("[SSH] auth methods: {methods}"));
     }
     let key = profile.key_file.trim();
-    let auth = if !key.is_empty() {
-        trace::line(format!("[SSH] userauth publickey ({key}) as {user}"), false);
-        let phrase = (!profile.password.is_empty()).then_some(profile.password.as_str());
-        session.userauth_pubkey_file(user, None, Path::new(key), phrase)
+    let mut auth = if !key.is_empty() {
+        trace::client(format!("[SSH] userauth publickey ({key}) as {user}"));
+        if !Path::new(key).is_file() {
+            Err(ssh2::Error::new(
+                ssh2::ErrorCode::Session(-16),
+                "файл ключа не найден",
+            ))
+        } else {
+            let phrase = if !profile.passphrase.is_empty() {
+                Some(profile.passphrase.as_str())
+            } else {
+                (!profile.password.is_empty()).then_some(profile.password.as_str())
+            };
+            let public = PathBuf::from(format!("{key}.pub"));
+            let public = public.is_file().then_some(public.as_path());
+            session.userauth_pubkey_file(user, public, Path::new(key), phrase)
+        }
     } else if !profile.password.is_empty() {
-        trace::line(format!("[SSH] userauth password as {user}"), false);
+        trace::client(format!("[SSH] userauth password as {user}"));
         session.userauth_password(user, &profile.password)
     } else {
-        trace::line(format!("[SSH] userauth agent as {user}"), false);
+        trace::client(format!("[SSH] userauth agent as {user}"));
         session.userauth_agent(user)
     };
+    if auth.is_err()
+        && !key.is_empty()
+        && !profile.passphrase.is_empty()
+        && !profile.password.is_empty()
+        && !session.authenticated()
+    {
+        if let Err(e) = &auth {
+            trace::line(format!("[SSH] {e}"), true);
+        }
+        trace::client(format!("[SSH] userauth password as {user}"));
+        auth = session.userauth_password(user, &profile.password);
+    }
     if let Err(e) = &auth {
         trace::line(format!("[SSH] {e}"), true);
+        if !key.is_empty()
+            && let Err(why) = key_kind(key)
+        {
+            trace::line(format!("[SSH] key file: {why}"), true);
+            return Err(format!("вход не выполнен: {why}"));
+        }
     }
     auth.map_err(|e| format!("вход не выполнен: {e}"))?;
-    trace::line("[SSH] authenticated", false);
+    trace::server("[SSH] authenticated");
     Ok((session, accepted))
 }
 
@@ -385,11 +656,11 @@ pub enum ShellEvent {
     HostKey { fingerprint: String, changed: bool },
     Connected { fingerprint: Option<String> },
     Output(Vec<u8>),
+    Status(String),
     Closed(String),
 }
 
 pub struct Shell {
-    pub host: String,
     pub tx: Sender<ShellCmd>,
     pub rx: Receiver<ShellEvent>,
 }
@@ -398,6 +669,7 @@ fn run_shell(
     profile: &Profile,
     known: Option<&str>,
     size: (u16, u16),
+    startup: &str,
     cmds: &Receiver<ShellCmd>,
     events: &Sender<ShellEvent>,
     wake: &dyn Fn(),
@@ -424,18 +696,20 @@ fn run_shell(
     channel
         .shell()
         .map_err(|e| format!("сервер не запустил оболочку: {e}"))?;
-    trace::line(
-        format!(
-            "[SSH] channel session: pty xterm-256color {}x{}, shell started",
-            size.0, size.1
-        ),
-        false,
-    );
+    trace::client(format!(
+        "[SSH] channel session: pty xterm-256color {}x{}, shell started",
+        size.0, size.1
+    ));
     let _ = events.send(ShellEvent::Connected { fingerprint });
     wake();
     session.set_blocking(false);
 
     let mut pending: Vec<u8> = Vec::new();
+    let startup = startup.trim();
+    if !startup.is_empty() {
+        pending.extend_from_slice(startup.as_bytes());
+        pending.push(b'\r');
+    }
     let mut resize = None;
     let mut buf = [0u8; 16 * 1024];
     loop {
@@ -503,49 +777,76 @@ pub fn open_shell(
     profile: &Profile,
     known: Option<String>,
     size: (u16, u16),
+    startup: String,
     wake: impl Fn() + Send + 'static,
 ) -> Shell {
     let (tx, cmds) = channel();
     let (events, rx) = channel();
-    let host = format!("{}@{}", profile.user.trim(), profile.host.trim());
     let profile = profile.clone();
     std::thread::spawn(move || {
-        let message = run_shell(&profile, known.as_deref(), size, &cmds, &events, &wake)
+        let message = run_shell(&profile, known.as_deref(), size, &startup, &cmds, &events, &wake)
             .unwrap_or_else(|e| e);
         let _ = events.send(ShellEvent::Closed(message));
         wake();
     });
-    Shell { host, tx, rx }
+    Shell { tx, rx }
+}
+
+fn tls_connector(profile: &Profile) -> Result<suppaftp::NativeTlsConnector, String> {
+    let connector = native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(profile.insecure_tls)
+        .danger_accept_invalid_hostnames(profile.insecure_tls)
+        .build()
+        .map_err(|e| format!("TLS: {e}"))?;
+    Ok(suppaftp::NativeTlsConnector::from(connector))
 }
 
 fn connect_ftp(profile: &Profile) -> Result<(Backend, String), String> {
-    let stream = tcp(profile)?;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(IO_TIMEOUT_MS as u64)))
-        .ok();
-    let mut ftp = suppaftp::NativeTlsFtpStream::connect_with_stream(stream)
-        .map_err(|e| format!("ошибка FTP: {e}"))?;
-    if profile.protocol == Protocol::Ftps {
-        let connector = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(profile.insecure_tls)
-            .danger_accept_invalid_hostnames(profile.insecure_tls)
-            .build()
-            .map_err(|e| format!("TLS: {e}"))?;
+    let mut ftp = if profile.protocol == Protocol::FtpsImplicit {
+        let address = profile
+            .address()
+            .to_socket_addrs()
+            .map_err(|e| format!("не удалось найти хост: {e}"))?
+            .next()
+            .ok_or("не удалось найти хост")?;
         trace::line(
             format!(
-                "[FTPS] AUTH TLS, certificate check {}",
+                "[FTPS] implicit TLS on {address}, certificate check {}",
                 if profile.insecure_tls { "OFF" } else { "on" }
             ),
             profile.insecure_tls,
         );
-        ftp = ftp
-            .into_secure(
-                suppaftp::NativeTlsConnector::from(connector),
-                profile.host.trim(),
-            )
-            .map_err(|e| format!("защищённое соединение не установлено: {e}"))?;
-        trace::line("[FTPS] TLS session established", false);
-    }
+        let ftp = suppaftp::NativeTlsFtpStream::connect_secure_implicit(
+            address,
+            tls_connector(profile)?,
+            profile.host.trim(),
+        )
+        .map_err(|e| format!("защищённое соединение не установлено: {e}"))?;
+        trace::server("[FTPS] TLS session established");
+        ftp
+    } else {
+        let stream = tcp(profile)?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(IO_TIMEOUT_MS as u64)))
+            .ok();
+        let mut ftp = suppaftp::NativeTlsFtpStream::connect_with_stream(stream)
+            .map_err(|e| format!("ошибка FTP: {e}"))?;
+        if profile.protocol == Protocol::Ftps {
+            trace::line(
+                format!(
+                    "[FTPS] AUTH TLS, certificate check {}",
+                    if profile.insecure_tls { "OFF" } else { "on" }
+                ),
+                profile.insecure_tls,
+            );
+            ftp = ftp
+                .into_secure(tls_connector(profile)?, profile.host.trim())
+                .map_err(|e| format!("защищённое соединение не установлено: {e}"))?;
+            trace::server("[FTPS] TLS session established");
+        }
+        ftp
+    };
+
     let user = if profile.user.trim().is_empty() {
         "anonymous"
     } else {
@@ -594,6 +895,11 @@ impl Backend {
                         is_dir,
                         size: stat.size.unwrap_or(0),
                         mtime: stat.mtime,
+                        perm: stat.perm.map(|p| p & 0o7777),
+                        owner: match (stat.uid, stat.gid) {
+                            (Some(u), Some(g)) => format!("{u}:{g}"),
+                            _ => String::new(),
+                        },
                     })
                 })
                 .collect::<Vec<_>>(),
@@ -612,6 +918,11 @@ impl Backend {
                         .ok()
                         .map(|d| d.as_secs())
                         .filter(|secs| *secs > 0),
+                    perm: ftp_mode(&f),
+                    owner: match (f.uid(), f.gid()) {
+                        (Some(u), Some(g)) => format!("{u}:{g}"),
+                        _ => String::new(),
+                    },
                 })
                 .collect(),
         };
@@ -764,6 +1075,123 @@ impl Backend {
         Ok(())
     }
 
+    fn stat(&mut self, path: &str) -> Result<Attrs, String> {
+        match self {
+            Backend::Sftp { sftp, .. } => {
+                let stat = sftp.stat(Path::new(path)).map_err(|e| e.to_string())?;
+                Ok(Attrs {
+                    perm: stat.perm.map(|p| p & 0o7777),
+                    uid: stat.uid,
+                    gid: stat.gid,
+                    size: stat.size,
+                    mtime: stat.mtime,
+                    atime: stat.atime,
+                    is_dir: stat.is_dir(),
+                })
+            }
+            Backend::Ftp(_) => {
+                let dir = parent(path);
+                let name = file_name(path).to_owned();
+                let entry = self
+                    .list(&dir)?
+                    .into_iter()
+                    .find(|e| e.name == name)
+                    .ok_or("объект не найден")?;
+                let mut ids = entry.owner.split(':').map(|v| v.parse().ok());
+                Ok(Attrs {
+                    perm: entry.perm,
+                    uid: ids.next().flatten(),
+                    gid: ids.next().flatten(),
+                    size: Some(entry.size),
+                    mtime: entry.mtime,
+                    atime: None,
+                    is_dir: entry.is_dir,
+                })
+            }
+        }
+    }
+
+    fn chmod_one(&mut self, path: &str, mode: u32) -> Result<(), String> {
+        match self {
+            Backend::Sftp { sftp, .. } => sftp
+                .setstat(
+                    Path::new(path),
+                    ssh2::FileStat {
+                        size: None,
+                        uid: None,
+                        gid: None,
+                        perm: Some(mode & 0o7777),
+                        atime: None,
+                        mtime: None,
+                    },
+                )
+                .map_err(|e| e.to_string()),
+            Backend::Ftp(ftp) => ftp
+                .site(format!("CHMOD {:o} {path}", mode & 0o7777))
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+        }
+    }
+
+    fn chmod(
+        &mut self,
+        path: &str,
+        mode: u32,
+        recursive: bool,
+        dirs: bool,
+        files: bool,
+        changed: &mut usize,
+    ) -> Result<(), String> {
+        let is_dir = self.stat(path).map(|a| a.is_dir).unwrap_or(false);
+        if !recursive || (is_dir && dirs) || (!is_dir && files) {
+            self.chmod_one(path, mode)?;
+            *changed += 1;
+        }
+        if recursive && is_dir {
+            for entry in self.list(path)? {
+                let child = join(path, &entry.name);
+                if entry.is_dir {
+                    self.chmod(&child, mode, true, dirs, files, changed)?;
+                } else if files {
+                    self.chmod_one(&child, mode)?;
+                    *changed += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn touch(&mut self, path: &str, mtime: u64) -> Result<(), String> {
+        match self {
+            Backend::Sftp { sftp, .. } => {
+                let atime = sftp.stat(Path::new(path)).ok().and_then(|s| s.atime);
+                sftp.setstat(
+                    Path::new(path),
+                    ssh2::FileStat {
+                        size: None,
+                        uid: None,
+                        gid: None,
+                        perm: None,
+                        atime: Some(atime.unwrap_or(mtime)),
+                        mtime: Some(mtime),
+                    },
+                )
+                .map_err(|e| e.to_string())
+            }
+            Backend::Ftp(ftp) => {
+                let stamp = chrono::DateTime::from_timestamp(mtime as i64, 0)
+                    .map(|d| d.format("%Y%m%d%H%M%S").to_string())
+                    .unwrap_or_default();
+                ftp.custom_command(
+                    format!("MFMT {stamp} {path}"),
+                    &[suppaftp::Status::File],
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            }
+        }
+    }
+
     fn ping(&mut self) -> Result<(), String> {
         match self {
             Backend::Sftp { sftp, .. } => sftp
@@ -791,7 +1219,28 @@ fn describe(cmd: &Cmd) -> String {
         Cmd::Walk(path) => format!("[SFTP] readdir (recursive) {path}"),
         Cmd::Delete { path, dir: true } => format!("[SFTP] rmdir (recursive) {path}"),
         Cmd::Delete { path, .. } => format!("[SFTP] unlink {path}"),
+        Cmd::Stat(path) => format!("[SFTP] stat {path}"),
+        Cmd::Chmod {
+            path,
+            mode,
+            recursive,
+            ..
+        } => format!(
+            "[SFTP] setstat {path} mode {mode:o}{}",
+            if *recursive { " (recursive)" } else { "" }
+        ),
+        Cmd::Touch { path, mtime } => format!("[SFTP] setstat {path} mtime {mtime}"),
     }
+}
+
+fn ftp_mode(file: &suppaftp::list::File) -> Option<u32> {
+    use suppaftp::list::PosixPexQuery as Who;
+    let bits = |who: Who| {
+        (file.can_read(who) as u32) << 2
+            | (file.can_write(who) as u32) << 1
+            | file.can_execute(who) as u32
+    };
+    Some(bits(Who::Owner) << 6 | bits(Who::Group) << 3 | bits(Who::Others))
 }
 
 fn execute(
@@ -858,6 +1307,31 @@ fn execute(
             backend.delete_tree(path, *dir, &mut removed)?;
             (Event::Changed(parent(path)), format!("{removed} removed"))
         }
+        Cmd::Stat(path) => {
+            let attrs = backend.stat(path)?;
+            (
+                Event::Stat {
+                    path: path.clone(),
+                    attrs,
+                },
+                "ok".into(),
+            )
+        }
+        Cmd::Chmod {
+            path,
+            mode,
+            recursive,
+            dirs,
+            files,
+        } => {
+            let mut changed = 0;
+            backend.chmod(path, *mode, *recursive, *dirs, *files, &mut changed)?;
+            (Event::Changed(parent(path)), format!("{changed} changed"))
+        }
+        Cmd::Touch { path, mtime } => {
+            backend.touch(path, *mtime)?;
+            (Event::Changed(parent(path)), "ok".into())
+        }
     })
 }
 
@@ -887,12 +1361,12 @@ fn serve(
     let tag = match profile.protocol {
         Protocol::Sftp => "[SFTP]",
         Protocol::Ftp => "[FTP]",
-        Protocol::Ftps => "[FTPS]",
+        Protocol::Ftps | Protocol::FtpsImplicit => "[FTPS]",
     };
     let mut known = known;
     let open = |known: Option<&str>| match profile.protocol {
         Protocol::Sftp => connect_sftp(&profile, known, &events, &cmds, wake),
-        Protocol::Ftp | Protocol::Ftps => connect_ftp(&profile).map(|(b, home)| (b, home, None)),
+        _ => connect_ftp(&profile).map(|(b, home)| (b, home, None)),
     };
     log(
         format!(
@@ -940,7 +1414,7 @@ fn serve(
             continue;
         }
         if sftp {
-            log(describe(&cmd), false);
+            trace::client(describe(&cmd));
         }
         let mut result = if alive {
             execute(&mut backend, &cmd, &progress)
@@ -961,7 +1435,7 @@ fn serve(
                     }
                     log(format!("{tag} reconnected, retrying"), false);
                     if sftp {
-                        log(describe(&cmd), false);
+                        trace::client(describe(&cmd));
                     }
                     result = execute(&mut backend, &cmd, &progress);
                 }
@@ -975,7 +1449,7 @@ fn serve(
         match result {
             Ok((event, summary)) => {
                 if sftp {
-                    log(format!("[SFTP] {summary}"), false);
+                    trace::server(format!("[SFTP] {summary}"));
                 }
                 send(event);
             }
@@ -1106,7 +1580,7 @@ fn search_remote_shell(
         return Ok(None);
     };
     let command = search_command(params);
-    trace::line(format!("[SSH] exec: {command}"), false);
+    trace::client(format!("[SSH] exec: {command}"));
     if channel.exec(&command).is_err() {
         return Ok(None);
     }
@@ -1278,7 +1752,7 @@ pub fn search(
                         "обход каталогов",
                     ))
                 }
-                Protocol::Ftp | Protocol::Ftps => {
+                _ => {
                     let (mut backend, _) = connect_ftp(&profile)?;
                     Ok((
                         search_walk(&mut backend, &params, &flag, &emit),
@@ -1438,6 +1912,147 @@ pub fn tunnel(
     Ok(Tunnel { port: local, stop })
 }
 
+fn ssh_probe(profile: &Profile, known: Option<&str>) -> Result<(ssh2::Session, String), String> {
+    let changed_key = std::cell::Cell::new(false);
+    let confirm = |_: &str, changed: bool| {
+        changed_key.set(changed);
+        !changed
+    };
+    match open_session(profile, known, &confirm) {
+        Ok((session, new_key)) => {
+            let note = match new_key {
+                Some(print) => format!(
+                    "; ключ сервера новый (SHA-256 {}…) — при подключении его попросят подтвердить",
+                    &print[..16.min(print.len())]
+                ),
+                None => String::new(),
+            };
+            Ok((session, note))
+        }
+        Err(_) if changed_key.get() => Err(
+            "ключ сервера изменился — подключитесь и сверьте отпечаток, пароль не отправлялся".into(),
+        ),
+        Err(e) => Err(e),
+    }
+}
+
+fn timed(started: std::time::Instant, result: Result<String, String>) -> Result<String, String> {
+    let result = result.map(|text| format!("{text} ({} мс)", started.elapsed().as_millis()));
+    match &result {
+        Ok(text) => trace::server(format!("[TEST] ok: {text}")),
+        Err(e) => trace::line(format!("[TEST] failed: {e}"), true),
+    }
+    result
+}
+
+pub fn test(profile: &Profile, known: Option<String>) -> Result<String, String> {
+    let started = std::time::Instant::now();
+    trace::client(format!(
+        "[TEST] {} {} as {}",
+        profile.protocol.label(),
+        profile.address(),
+        profile.user.trim()
+    ));
+    let result = match profile.protocol {
+        Protocol::Sftp => ssh_probe(profile, known.as_deref()).and_then(|(session, note)| {
+            let sftp = session.sftp().map_err(|e| format!("SFTP недоступен: {e}"))?;
+            let home = sftp
+                .realpath(Path::new("."))
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "/".into());
+            let start = profile.directory.trim();
+            if !start.is_empty() && sftp.stat(Path::new(start)).is_err() {
+                return Err(format!(
+                    "вход выполнен, но начальной папки {start} нет на сервере"
+                ));
+            }
+            Ok(format!("вход выполнен, домашняя папка {home}{note}"))
+        }),
+        _ => connect_ftp(profile).and_then(|(mut backend, home)| {
+            let start = profile.directory.trim();
+            if !start.is_empty() && backend.list(start).is_err() {
+                return Err(format!(
+                    "вход выполнен, но начальной папки {start} нет на сервере"
+                ));
+            }
+            if let Backend::Ftp(ftp) = &mut backend {
+                let _ = ftp.quit();
+            }
+            Ok(format!("вход выполнен, папка {home}"))
+        }),
+    };
+    timed(started, result)
+}
+
+pub fn test_terminal(profile: &TermProfile, known: Option<String>) -> Result<String, String> {
+    let started = std::time::Instant::now();
+    trace::client(format!(
+        "[TEST] {} {} as {}",
+        profile.protocol.label(),
+        profile.address(),
+        profile.user.trim()
+    ));
+    let result = match profile.protocol {
+        TermProtocol::Telnet => (|| {
+            let address = profile
+                .address()
+                .to_socket_addrs()
+                .map_err(|e| format!("не удалось найти хост: {e}"))?
+                .next()
+                .ok_or("не удалось найти хост")?;
+            let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
+                .map_err(|e| format!("нет соединения: {e}"))?;
+            stream
+                .set_read_timeout(Some(Duration::from_millis(1500)))
+                .ok();
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let text: String = String::from_utf8_lossy(&buf[..n])
+                .chars()
+                .filter(|c| !c.is_control() || *c == '\n')
+                .collect();
+            let line = text
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && l.chars().all(|c| (c as u32) < 0xfffd))
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect::<String>();
+            Ok(if line.is_empty() {
+                "порт открыт, сервер принял соединение".to_owned()
+            } else {
+                format!("порт открыт, сервер ответил: «{line}»")
+            })
+        })(),
+        TermProtocol::Ssh => ssh_probe(&profile.ssh(), known.as_deref())
+            .map(|(_, note)| format!("вход выполнен{note}")),
+        TermProtocol::Mosh => ssh_probe(&profile.ssh(), known.as_deref()).and_then(|(session, note)| {
+            let server = if profile.mosh_server.trim().is_empty() {
+                "mosh-server"
+            } else {
+                profile.mosh_server.trim()
+            };
+            let mut channel = session.channel_session().map_err(|e| e.to_string())?;
+            channel
+                .exec(&format!("command -v {server} || which {server}"))
+                .map_err(|e| e.to_string())?;
+            let mut out = String::new();
+            let _ = channel.read_to_string(&mut out);
+            let _ = channel.wait_close();
+            let path = out.lines().next().unwrap_or("").trim().to_owned();
+            if path.is_empty() {
+                Err(format!(
+                    "вход по SSH выполнен, но {server} на сервере не найден — установите пакет mosh"
+                ))
+            } else {
+                Ok(format!("вход выполнен, найден {path}{note}"))
+            }
+        }),
+    };
+    timed(started, result)
+}
+
 pub fn connect(
     profile: &Profile,
     known: Option<String>,
@@ -1483,6 +2098,7 @@ mod tests {
             user: "admin".into(),
             password: "s3cret пароль".into(),
             key_file: String::new(),
+            passphrase: String::new(),
             directory: "/www".into(),
             url: "https://example.org".into(),
             insecure_tls: false,
@@ -1508,24 +2124,28 @@ mod tests {
                 is_dir: false,
                 size: 1,
                 mtime: None,
+                ..Default::default()
             },
             Entry {
                 name: "Zeta".into(),
                 is_dir: true,
                 size: 0,
                 mtime: None,
+                ..Default::default()
             },
             Entry {
                 name: "a.php".into(),
                 is_dir: false,
                 size: 1,
                 mtime: None,
+                ..Default::default()
             },
             Entry {
                 name: "alpha".into(),
                 is_dir: true,
                 size: 0,
                 mtime: None,
+                ..Default::default()
             },
         ];
         sort(&mut entries);
@@ -1542,6 +2162,7 @@ mod tests {
             user: "jozef".into(),
             password: "secret".into(),
             key_file: String::new(),
+            passphrase: String::new(),
             directory: String::new(),
             url: String::new(),
             insecure_tls: protocol == Protocol::Ftps,
@@ -1826,5 +2447,60 @@ mod tests {
     #[ignore]
     fn live_search_ftp_walks_directories() {
         assert!(live_search(Protocol::Ftp, 2121).contains("обход каталогов"));
+    }
+}
+
+#[cfg(test)]
+mod live_keys {
+    use super::*;
+
+    fn shell_with(key: &str, passphrase: &str) -> Result<String, String> {
+        let profile = TermProfile {
+            name: "keys".into(),
+            host: "127.0.0.1".into(),
+            port: 2222,
+            user: "jozef".into(),
+            key_file: format!("/tmp/keys/{key}"),
+            passphrase: passphrase.into(),
+            startup: "echo key-$((40+2))".into(),
+            ..Default::default()
+        };
+        let shell = open_shell(&profile.ssh(), None, (80, 24), profile.startup.clone(), || {});
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut output = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match shell.rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(ShellEvent::HostKey { .. }) => shell.tx.send(ShellCmd::TrustHost(true)).unwrap(),
+                Ok(ShellEvent::Output(bytes)) => output.extend(bytes),
+                Ok(ShellEvent::Closed(e)) => return Err(e),
+                _ => {}
+            }
+            let text = String::from_utf8_lossy(&output).into_owned();
+            if text.contains("key-42") {
+                return Ok(key_kind(&profile.key_file).unwrap_or_default());
+            }
+        }
+        Err("timeout".into())
+    }
+
+    #[test]
+    #[ignore]
+    fn live_ssh_key_types() {
+        assert_eq!(shell_with("k_ed25519", "").unwrap(), "Ed25519");
+        assert_eq!(shell_with("k_ecdsa", "").unwrap(), "ECDSA nistp256");
+        assert_eq!(shell_with("k_rsa", "").unwrap(), "RSA");
+        assert_eq!(shell_with("k_rsa_pem", "").unwrap(), "RSA");
+        assert_eq!(
+            shell_with("k_ed25519_pass", "фраза-pass").unwrap(),
+            "Ed25519, защищён парольной фразой"
+        );
+        assert_eq!(
+            shell_with("k_ecdsa_pass", "pp").unwrap(),
+            "ECDSA nistp384, защищён парольной фразой"
+        );
+        let wrong = shell_with("k_ed25519_pass", "wrong").unwrap_err();
+        assert!(wrong.contains("вход не выполнен"), "{wrong}");
+        let dsa = shell_with("k_dsa_pem", "").unwrap_err();
+        assert!(dsa.contains("DSA"), "{dsa}");
     }
 }

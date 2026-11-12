@@ -1,0 +1,95 @@
+CIBlockElement::GetList($arOrder = ["SORT" => "ASC"], $arFilter = [], $arGroupBy = false, $arNavStartParams = false, $arSelectFields = []): CIBlockResult — элементы инфоблока
+CIBlockElement::GetByID($ID): CIBlockResult
+CIBlockElement::GetProperty($IBLOCK_ID, $ELEMENT_ID, $by = "sort", $order = "asc", $arFilter = []): CDBResult
+CIBlockElement::SetPropertyValuesEx($ELEMENT_ID, $IBLOCK_ID, $PROPERTY_VALUES, $FLAGS = []): void
+CIBlockElement::SetPropertyValues($ELEMENT_ID, $IBLOCK_ID, $PROPERTY_VALUES, $PROPERTY_CODE = false): void
+CIBlockElement::GetElementGroups($ID, $bElementOnly = false, $arSelect = []): CIBlockResult
+CIBlockElement::Delete($ID): bool
+CIBlockElement::CounterInc($ID): void
+Add($arFields, $bWorkFlow = false, $bUpdateSearch = true, $bResizePictures = false): int|false — CIBlockElement / CIBlockSection
+Update($ID, $arFields, $bWorkFlow = false, $bUpdateSearch = true, $bResizePictures = false, $bCheckDiskQuota = true): bool — CIBlockElement
+CIBlockSection::GetList($arOrder = ["SORT" => "ASC"], $arFilter = [], $bIncCnt = false, $arSelect = [], $arNavStartParams = false): CIBlockResult — разделы инфоблока
+CIBlockSection::GetByID($ID): CIBlockResult
+CIBlockSection::GetNavChain($IBLOCK_ID, $SECTION_ID, $arSelect = [], $arrayResult = false): CIBlockResult|array
+CIBlock::GetList($arOrder = ["SORT" => "ASC"], $arFilter = [], $bIncCnt = false): CIBlockResult
+CIBlock::GetArrayByID($IBLOCK_ID, $FIELD = false): mixed
+CIBlockProperty::GetList($arOrder = [], $arFilter = []): CIBlockPropertyResult
+CIBlockPropertyEnum::GetList($arOrder = ["SORT" => "ASC", "VALUE" => "ASC"], $arFilter = []): CIBlockPropertyEnumResult
+CIBlockFormatProperties::GetDisplayValue($arItem, $arProperty, $event1 = ""): array
+GetNext($bTextHtmlAuto = true, $use_tilda = true): array|false — следующая запись результата
+Fetch(): array|false
+GetNextElement($bTextHtmlAuto = true, $use_tilda = true): _CIBElement|false
+GetFields(): array
+GetProperties($arOrder = false, $arFilter = []): array
+GetPageNavStringEx(&$navComponentObject, $navigationTitle, $templateName = "", $showAlways = false, $parentComponent = null, $componentParams = null): string
+CFile::GetPath($fileId): string|null
+CFile::GetFileArray($FILE_ID, $upload_dir = false): array|false
+CFile::ResizeImageGet($file, $arSize, $resizeType = BX_RESIZE_IMAGE_PROPORTIONAL, $bInitSizes = false, $arFilters = false, $bImmediate = false, $jpgQuality = false): array|false
+CFile::SaveFile($arFile, $strSavePath, $bForceMD5 = false, $bSkipExt = false, $dirAdd = ""): int|false
+CFile::MakeFileArray($path, $mimetype = false, $skipInternal = false, $external_id = ""): array|false
+CFile::Delete($ID): void
+CFile::ShowImage($strImage, $iMaxW = 0, $iMaxH = 0, $sParams = null, $strImageUrl = "", $bPopup = false, $sPopupTitle = false): string
+CModule::IncludeModule($module_name): bool
+Loader::includeModule($moduleName): bool — \Bitrix\Main\Loader
+LocalRedirect($url, $skip_security_check = false, $status = "302 Found"): void
+ShowError($strError, $cls = "errortext"): void
+ShowMessage($arMess): void
+htmlspecialcharsbx($string, $flags = ENT_COMPAT, $doubleEncode = true): string
+bitrix_sessid_post($varname = "sessid", $returnInvocations = false): string
+check_bitrix_sessid($varname = "sessid"): bool
+bitrix_sessid(): string
+GetMessage($name, $aReplace = null): string
+Loc::getMessage($code, $replace = null, $language = null): ?string — \Bitrix\Main\Localization\Loc
+Loc::loadMessages($file): void
+AddMessage2Log($text, $module = "", $traceDepth = 6, $showArgs = false): void
+Debug::writeToFile($variable, $varName = "", $fileName = ""): void — \Bitrix\Main\Diag\Debug
+Debug::dump($var, $varName = "", $return = false): ?string
+Debug::dumpToFile($variable, $varName = "", $fileName = ""): void
+Option::get($moduleId, $name, $default = "", $siteId = false): string — \Bitrix\Main\Config\Option
+Option::set($moduleId, $name, $value = "", $siteId = ""): void
+Application::getInstance(): Application — \Bitrix\Main\Application
+getList(array $parameters = []): Result — ORM: select, filter, order, group, limit, offset, runtime, cache
+getById($id): Result
+getRow(array $parameters): ?array
+getByPrimary($primary, array $parameters = []): Result
+SetTitle($title, $arOptions = null): void — $APPLICATION
+SetPageProperty($PROPERTY_ID, $PROPERTY_VALUE, $arOptions = null): void
+GetCurPage($get_index_page = null): string
+GetCurPageParam($strParam = "", $arParamKill = [], $get_index_page = null): string
+IncludeComponent($componentName, $componentTemplate, $arParams = [], $parentComponent = null, $arFunctionParams = [], $returnResult = false): mixed
+AddChainItem($title, $link = "", $bUnQuote = true): void
+ShowTitle($property_name = "title", $strip_tags = true): void
+AddHeadScript($src, $bUnique = false): void
+SetAdditionalCSS($Path2css, $additional = false): void
+IsAuthorized(): bool — $USER
+IsAdmin(): bool
+GetID(): int|null
+Authorize($id, $bSave = false, $bUpdate = true, $applicationId = null): bool
+CUser::GetByID($ID): CDBResult
+CUser::GetList(&$by, &$order, $arFilter = [], $arParams = []): CDBResult
+CEvent::Send($event, $lid, $arFields, $Duplicate = "Y", $message_id = "", $files = [], $languageId = ""): int|false — почтовое событие
+CEvent::SendImmediate($event, $lid, $arFields, $Duplicate = "Y", $message_id = "", $files = [], $languageId = ""): string
+AddEventHandler($FROM_MODULE_ID, $MESSAGE_ID, $CALLBACK, $SORT = 100, $FULL_PATH = false): int
+addEventHandler($fromModuleId, $eventType, $callback, $includeFile = false, $sort = 100): int — EventManager::getInstance()
+CAgent::AddAgent($name, $module = "", $period = "N", $interval = 86400, $datecheck = "", $active = "Y", $next_exec = "", $sort = 100, $user_id = false, $existError = true): int|false
+ConvertTimeStamp($timestamp = false, $type = "SHORT", $site = false, $bSearchInSitesOnly = false): string|false
+MakeTimeStamp($datetime, $format = false): int|false
+FormatDate($format = "", $timestamp = false, $now = false, ?string $languageId = null): string
+CurrencyFormat($price, $currency): string
+CPrice::GetBasePrice($productID, $quantityFrom = false, $quantityTo = false, $boolExt = true): array|false
+CCatalogProduct::GetByID($ID): array|false
+CCatalogProduct::GetOptimalPrice($intProductID, $quantity = 1, $arUserGroups = [], $renewal = "N", $priceList = [], $siteID = false, $arDiscountCoupons = false): array|false
+CUtil::JSEscape($s): string
+CUtil::PhpToJSObject($arData, $bWS = false, $bSkipTilda = false, $bExtType = false): string
+CUtil::translit($str, $lang, $params = []): string
+InitCache($TTL, $uniq_str, $initdir = false, $basedir = "cache"): bool — CPHPCache
+StartDataCache($TTL = false, $uniq_str = false, $initdir = false, $vars = [], $basedir = "cache"): bool
+EndDataCache($vars = false): void
+GetVars(): array
+StartResultCache($cacheTime = false, $additionalCacheID = false, $cachePath = false): bool — компонент
+SetResultCacheKeys($arResultCacheKeys): void
+IncludeComponentTemplate($templatePage = "", $customTemplatePath = ""): void
+AbortResultCache(): void
+addJs($path, $additional = false): bool — Asset::getInstance()
+addCss($path, $additional = false): bool
+addString($str, $unique = false, $location = AssetLocation::AFTER_JS_KERNEL, $mode = null): bool

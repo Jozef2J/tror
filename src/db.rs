@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -16,10 +17,56 @@ use crate::trace;
 const MAX_ROWS: usize = 5000;
 const MAX_CELL: usize = 4000;
 
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+pub enum DbKind {
+    #[default]
+    MySql,
+    Postgres,
+    Sqlite,
+}
+
+impl DbKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            DbKind::MySql => "MySQL / MariaDB",
+            DbKind::Postgres => "PostgreSQL",
+            DbKind::Sqlite => "SQLite",
+        }
+    }
+
+    fn default_port(self) -> u16 {
+        match self {
+            DbKind::Postgres => 5432,
+            _ => 3306,
+        }
+    }
+
+    pub fn quote(self, name: &str) -> String {
+        match self {
+            DbKind::MySql => format!("`{}`", name.replace('`', "``")),
+            _ => format!("\"{}\"", name.replace('"', "\"\"")),
+        }
+    }
+
+    pub fn literal(self, value: Option<&str>) -> String {
+        match value {
+            None => "NULL".into(),
+            Some(text) => {
+                let mut escaped = text.replace('\'', "''");
+                if self == DbKind::MySql {
+                    escaped = escaped.replace('\\', "\\\\");
+                }
+                format!("'{escaped}'")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 pub struct DbProfile {
     pub name: String,
+    pub kind: DbKind,
     pub host: String,
     pub port: u16,
     pub user: String,
@@ -27,18 +74,21 @@ pub struct DbProfile {
     pub password: String,
     pub database: String,
     pub tunnel: String,
+    pub file: String,
 }
 
 impl Default for DbProfile {
     fn default() -> Self {
         Self {
             name: String::new(),
+            kind: DbKind::MySql,
             host: "127.0.0.1".into(),
             port: 3306,
             user: String::new(),
             password: String::new(),
             database: String::new(),
             tunnel: String::new(),
+            file: String::new(),
         }
     }
 }
@@ -52,17 +102,37 @@ pub struct Table {
     pub truncated: bool,
 }
 
+impl Table {
+    fn empty() -> Self {
+        Table {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            affected: 0,
+            info: String::new(),
+            elapsed: Duration::ZERO,
+            truncated: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Source {
+    pub schema: String,
+    pub table: String,
+}
+
 enum Cmd {
-    Query(String),
+    Query(String, Option<Source>),
     Databases,
     Tables(String),
+    Batch(Vec<String>, String, Option<Source>),
 }
 
 enum Event {
     Connected(String),
     Databases(Vec<String>),
     Tables(String, Vec<String>),
-    Result(Table),
+    Result(Table, Option<Source>, Vec<String>),
     Error(String),
     Closed(String),
 }
@@ -72,22 +142,23 @@ struct Conn {
     rx: Receiver<Event>,
 }
 
+fn clip(text: String) -> String {
+    if text.len() > MAX_CELL {
+        let cut = (0..=MAX_CELL)
+            .rev()
+            .find(|i| text.is_char_boundary(*i))
+            .unwrap_or(0);
+        format!("{}…", &text[..cut])
+    } else {
+        text
+    }
+}
+
 fn cell(value: mysql::Value) -> Option<String> {
     use mysql::Value;
     Some(match value {
         Value::NULL => return None,
-        Value::Bytes(bytes) => {
-            let text = String::from_utf8_lossy(&bytes);
-            if text.len() > MAX_CELL {
-                let cut = (0..=MAX_CELL)
-                    .rev()
-                    .find(|i| text.is_char_boundary(*i))
-                    .unwrap_or(0);
-                format!("{}…", &text[..cut])
-            } else {
-                text.into_owned()
-            }
-        }
+        Value::Bytes(bytes) => clip(String::from_utf8_lossy(&bytes).into_owned()),
         Value::Int(v) => v.to_string(),
         Value::UInt(v) => v.to_string(),
         Value::Float(v) => v.to_string(),
@@ -107,56 +178,15 @@ fn cell(value: mysql::Value) -> Option<String> {
     })
 }
 
-fn run_query(conn: &mut mysql::Conn, sql: &str) -> Result<Table, String> {
-    let started = Instant::now();
-    let mut result = conn.query_iter(sql).map_err(explain)?;
-    let mut table = Table {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        affected: 0,
-        info: String::new(),
-        elapsed: Duration::ZERO,
-        truncated: false,
-    };
-    while let Some(set) = result.iter() {
-        let columns: Vec<String> = set
-            .columns()
-            .as_ref()
-            .iter()
-            .map(|c| c.name_str().into_owned())
-            .collect();
-        let affected = set.affected_rows();
-        let info = set.info_str().into_owned();
-        let mut rows = Vec::new();
-        let mut truncated = false;
-        for row in set {
-            let row = row.map_err(explain)?;
-            if rows.len() >= MAX_ROWS {
-                truncated = true;
-                continue;
-            }
-            rows.push(row.unwrap().into_iter().map(cell).collect());
-        }
-        if !columns.is_empty() || table.columns.is_empty() {
-            table.columns = columns;
-            table.rows = rows;
-            table.truncated = truncated;
-        }
-        table.affected += affected;
-        if !info.is_empty() {
-            table.info = info;
-        }
-    }
-    table.elapsed = started.elapsed();
-    Ok(table)
-}
-
-fn names(conn: &mut mysql::Conn, sql: &str) -> Result<Vec<String>, String> {
-    Ok(run_query(conn, sql)?
-        .rows
-        .into_iter()
-        .filter_map(|row| row.into_iter().next().flatten())
-        .collect())
+fn lite_cell(value: rusqlite::types::ValueRef<'_>) -> Option<String> {
+    use rusqlite::types::ValueRef;
+    Some(match value {
+        ValueRef::Null => return None,
+        ValueRef::Integer(v) => v.to_string(),
+        ValueRef::Real(v) => v.to_string(),
+        ValueRef::Text(bytes) => clip(String::from_utf8_lossy(bytes).into_owned()),
+        ValueRef::Blob(bytes) => format!("[BLOB, {} Б]", bytes.len()),
+    })
 }
 
 fn explain(error: mysql::Error) -> String {
@@ -166,8 +196,308 @@ fn explain(error: mysql::Error) -> String {
     }
 }
 
+fn explain_pg(error: postgres::Error) -> String {
+    match error.as_db_error() {
+        Some(db) => format!("ERROR {}: {}", db.code().code(), db.message()),
+        None => error.to_string(),
+    }
+}
+
+#[cfg(test)]
 pub fn quote_name(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
+    DbKind::MySql.quote(name)
+}
+
+enum Engine {
+    My(Box<mysql::Conn>),
+    Pg(Box<postgres::Client>),
+    Lite(Box<rusqlite::Connection>),
+}
+
+impl Engine {
+    fn kind(&self) -> DbKind {
+        match self {
+            Engine::My(_) => DbKind::MySql,
+            Engine::Pg(_) => DbKind::Postgres,
+            Engine::Lite(_) => DbKind::Sqlite,
+        }
+    }
+
+    fn query(&mut self, sql: &str) -> Result<Table, String> {
+        let started = Instant::now();
+        let mut table = Table::empty();
+        match self {
+            Engine::My(conn) => {
+                let mut result = conn.query_iter(sql).map_err(explain)?;
+                while let Some(set) = result.iter() {
+                    let columns: Vec<String> = set
+                        .columns()
+                        .as_ref()
+                        .iter()
+                        .map(|c| c.name_str().into_owned())
+                        .collect();
+                    let affected = set.affected_rows();
+                    let info = set.info_str().into_owned();
+                    let mut rows = Vec::new();
+                    let mut truncated = false;
+                    for row in set {
+                        let row = row.map_err(explain)?;
+                        if rows.len() >= MAX_ROWS {
+                            truncated = true;
+                            continue;
+                        }
+                        rows.push(row.unwrap().into_iter().map(cell).collect());
+                    }
+                    if !columns.is_empty() || table.columns.is_empty() {
+                        table.columns = columns;
+                        table.rows = rows;
+                        table.truncated = truncated;
+                    }
+                    table.affected += affected;
+                    if !info.is_empty() {
+                        table.info = info;
+                    }
+                }
+            }
+            Engine::Pg(client) => {
+                let messages = client.simple_query(sql).map_err(explain_pg)?;
+                let mut columns: Vec<String> = Vec::new();
+                let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+                let mut truncated = false;
+                for message in messages {
+                    match message {
+                        postgres::SimpleQueryMessage::RowDescription(desc) => {
+                            columns = desc.iter().map(|c| c.name().to_owned()).collect();
+                            rows.clear();
+                            truncated = false;
+                        }
+                        postgres::SimpleQueryMessage::Row(row) => {
+                            if columns.is_empty() {
+                                columns = row.columns().iter().map(|c| c.name().to_owned()).collect();
+                            }
+                            if rows.len() >= MAX_ROWS {
+                                truncated = true;
+                                continue;
+                            }
+                            rows.push(
+                                (0..row.len())
+                                    .map(|i| row.get(i).map(|v| clip(v.to_owned())))
+                                    .collect(),
+                            );
+                        }
+                        postgres::SimpleQueryMessage::CommandComplete(count) => {
+                            if columns.is_empty() {
+                                table.affected += count;
+                            } else {
+                                table.columns = std::mem::take(&mut columns);
+                                table.rows = std::mem::take(&mut rows);
+                                table.truncated = truncated;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Engine::Lite(conn) => {
+                use rusqlite::fallible_iterator::FallibleIterator;
+                let mut batch = rusqlite::Batch::new(conn, sql);
+                while let Some(mut stmt) = batch.next().map_err(|e| e.to_string())? {
+                    let count = stmt.column_count();
+                    if count == 0 {
+                        table.affected += stmt.raw_execute().map_err(|e| e.to_string())? as u64;
+                        continue;
+                    }
+                    let columns: Vec<String> =
+                        stmt.column_names().into_iter().map(str::to_owned).collect();
+                    let mut rows = Vec::new();
+                    let mut truncated = false;
+                    let mut query = stmt.raw_query();
+                    while let Some(row) = query.next().map_err(|e| e.to_string())? {
+                        if rows.len() >= MAX_ROWS {
+                            truncated = true;
+                            continue;
+                        }
+                        rows.push(
+                            (0..count)
+                                .map(|i| row.get_ref(i).ok().and_then(lite_cell))
+                                .collect(),
+                        );
+                    }
+                    table.columns = columns;
+                    table.rows = rows;
+                    table.truncated = truncated;
+                }
+                table.affected = table.affected.max(conn.changes());
+            }
+        }
+        table.elapsed = started.elapsed();
+        Ok(table)
+    }
+
+    fn first_column(&mut self, sql: &str) -> Result<Vec<String>, String> {
+        Ok(self
+            .query(sql)?
+            .rows
+            .into_iter()
+            .filter_map(|row| row.into_iter().next().flatten())
+            .collect())
+    }
+
+    fn databases(&mut self) -> Result<Vec<String>, String> {
+        match self {
+            Engine::My(_) => self.first_column("SHOW DATABASES"),
+            Engine::Pg(_) => self.first_column(
+                "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT LIKE 'pg\\_%' AND schema_name <> 'information_schema' ORDER BY 1",
+            ),
+            Engine::Lite(_) => {
+                let table = self.query("PRAGMA database_list")?;
+                Ok(table
+                    .rows
+                    .into_iter()
+                    .filter_map(|row| row.get(1).cloned().flatten())
+                    .collect())
+            }
+        }
+    }
+
+    fn tables(&mut self, schema: &str) -> Result<Vec<String>, String> {
+        let kind = self.kind();
+        match self {
+            Engine::My(_) => self.first_column(&format!("SHOW TABLES FROM {}", kind.quote(schema))),
+            Engine::Pg(_) => self.first_column(&format!(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = {} ORDER BY 1",
+                kind.literal(Some(schema))
+            )),
+            Engine::Lite(_) => self.first_column(&format!(
+                "SELECT name FROM {}.sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY 1",
+                kind.quote(schema)
+            )),
+        }
+    }
+
+    fn primary_key(&mut self, source: &Source) -> Vec<String> {
+        let kind = self.kind();
+        let result = match self {
+            Engine::My(_) => self
+                .query(&format!(
+                    "SHOW KEYS FROM {}.{} WHERE Key_name = 'PRIMARY'",
+                    kind.quote(&source.schema),
+                    kind.quote(&source.table)
+                ))
+                .map(|t| {
+                    let column = t.columns.iter().position(|c| c == "Column_name").unwrap_or(4);
+                    t.rows
+                        .into_iter()
+                        .filter_map(|r| r.get(column).cloned().flatten())
+                        .collect()
+                }),
+            Engine::Pg(_) => self.first_column(&format!(
+                "SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) WHERE i.indisprimary AND i.indrelid = {}::regclass ORDER BY array_position(i.indkey, a.attnum)",
+                kind.literal(Some(&format!(
+                    "{}.{}",
+                    kind.quote(&source.schema),
+                    kind.quote(&source.table)
+                )))
+            )),
+            Engine::Lite(_) => self
+                .query(&format!(
+                    "PRAGMA {}.table_info({})",
+                    kind.quote(&source.schema),
+                    kind.quote(&source.table)
+                ))
+                .map(|t| {
+                    let mut keys: Vec<(i64, String)> = t
+                        .rows
+                        .into_iter()
+                        .filter_map(|r| {
+                            let pk: i64 = r.get(5)?.as_deref()?.parse().ok()?;
+                            (pk > 0).then(|| Some((pk, r.get(1)?.clone()?)))?
+                        })
+                        .collect();
+                    keys.sort();
+                    keys.into_iter().map(|(_, name)| name).collect()
+                }),
+        };
+        result.unwrap_or_default()
+    }
+
+    fn batch(&mut self, statements: &[String]) -> Result<u64, String> {
+        let begin = match self {
+            Engine::My(_) => "START TRANSACTION",
+            _ => "BEGIN",
+        };
+        self.query(begin)?;
+        let mut affected = 0;
+        for statement in statements {
+            trace::client(format!("[DB] > {statement}"));
+            match self.query(statement) {
+                Ok(table) => affected += table.affected,
+                Err(e) => {
+                    let _ = self.query("ROLLBACK");
+                    trace::line("[DB] ROLLBACK", true);
+                    return Err(e);
+                }
+            }
+        }
+        self.query("COMMIT")?;
+        Ok(affected)
+    }
+}
+
+fn open_engine(profile: &DbProfile, host: String, port: u16) -> Result<(Engine, String), String> {
+    match profile.kind {
+        DbKind::MySql => {
+            let database = profile.database.trim();
+            let opts = mysql::OptsBuilder::new()
+                .ip_or_hostname(Some(host))
+                .tcp_port(port)
+                .user(Some(profile.user.trim()))
+                .pass(Some(profile.password.as_str()))
+                .db_name((!database.is_empty()).then_some(database))
+                .prefer_socket(false)
+                .tcp_connect_timeout(Some(Duration::from_secs(12)));
+            let conn = mysql::Conn::new(opts).map_err(explain)?;
+            let (a, b, c) = conn.server_version();
+            Ok((Engine::My(Box::new(conn)), format!("MySQL {a}.{b}.{c}")))
+        }
+        DbKind::Postgres => {
+            let mut config = postgres::Config::new();
+            config
+                .host(&host)
+                .port(port)
+                .user(profile.user.trim())
+                .password(profile.password.as_str())
+                .connect_timeout(Duration::from_secs(12));
+            let database = profile.database.trim();
+            if !database.is_empty() {
+                config.dbname(database);
+            }
+            let mut client = config.connect(postgres::NoTls).map_err(explain_pg)?;
+            let version = client
+                .simple_query("SHOW server_version")
+                .ok()
+                .and_then(|messages| {
+                    messages.into_iter().find_map(|m| match m {
+                        postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_owned),
+                        _ => None,
+                    })
+                })
+                .unwrap_or_default();
+            Ok((Engine::Pg(Box::new(client)), format!("PostgreSQL {version}")))
+        }
+        DbKind::Sqlite => {
+            let path = profile.file.trim();
+            if path.is_empty() {
+                return Err("не выбран файл базы".into());
+            }
+            let conn = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
+            let _ = conn.busy_timeout(Duration::from_secs(5));
+            Ok((
+                Engine::Lite(Box::new(conn)),
+                format!("SQLite {}", rusqlite::version()),
+            ))
+        }
+    }
 }
 
 fn serve(
@@ -184,7 +514,9 @@ fn serve(
     let mut host = profile.host.trim().to_owned();
     let mut port = profile.port;
     let mut _tunnel = None;
-    if let Some((ssh, known)) = ssh {
+    if profile.kind != DbKind::Sqlite
+        && let Some((ssh, known)) = ssh
+    {
         match remote::tunnel(&ssh, known.as_deref(), &host, port) {
             Ok(tunnel) => {
                 host = "127.0.0.1".into();
@@ -198,58 +530,59 @@ fn serve(
             }
         }
     }
-    trace::line(
-        format!(
-            "[DB] connecting to mysql://{}@{host}:{port}/{}",
+    let target = match profile.kind {
+        DbKind::Sqlite => format!("sqlite://{}", profile.file.trim()),
+        DbKind::MySql => format!(
+            "mysql://{}@{host}:{port}/{}",
             profile.user.trim(),
             profile.database.trim()
         ),
-        false,
-    );
-    let database = profile.database.trim();
-    let opts = mysql::OptsBuilder::new()
-        .ip_or_hostname(Some(host))
-        .tcp_port(port)
-        .user(Some(profile.user.trim()))
-        .pass(Some(profile.password.as_str()))
-        .db_name((!database.is_empty()).then_some(database))
-        .prefer_socket(false)
-        .tcp_connect_timeout(Some(Duration::from_secs(12)));
-    let mut conn = match mysql::Conn::new(opts) {
-        Ok(conn) => conn,
+        DbKind::Postgres => format!(
+            "postgres://{}@{host}:{port}/{}",
+            profile.user.trim(),
+            profile.database.trim()
+        ),
+    };
+    trace::line(format!("[DB] connecting to {target}"), false);
+    let (mut engine, version) = match open_engine(&profile, host, port) {
+        Ok(ok) => ok,
         Err(e) => {
-            let e = explain(e);
             trace::line(format!("[DB] {e}"), true);
             send(Event::Closed(e));
             return;
         }
     };
-    let (a, b, c) = conn.server_version();
-    let version = format!("{a}.{b}.{c}");
-    trace::line(format!("[DB] connected, server version {version}"), false);
+    trace::server(format!("[DB] connected, {version}"));
     send(Event::Connected(version));
     for cmd in cmds {
-        let sql = match &cmd {
-            Cmd::Query(sql) => sql.clone(),
-            Cmd::Databases => "SHOW DATABASES".into(),
-            Cmd::Tables(db) => format!("SHOW TABLES FROM {}", quote_name(db)),
-        };
-        trace::line(format!("[DB] > {}", sql.trim()), false);
         let result = match cmd {
-            Cmd::Query(sql) => run_query(&mut conn, &sql).map(|table| {
-                trace::line(
-                    format!(
+            Cmd::Query(sql, source) => {
+                trace::client(format!("[DB] > {}", sql.trim()));
+                engine.query(&sql).map(|table| {
+                    trace::server(format!(
                         "[DB] {} rows, {} affected, {:.1} ms",
                         table.rows.len(),
                         table.affected,
                         table.elapsed.as_secs_f64() * 1000.0
-                    ),
-                    false,
-                );
-                Event::Result(table)
+                    ));
+                    let keys = source
+                        .as_ref()
+                        .map(|s| engine.primary_key(s))
+                        .unwrap_or_default();
+                    Event::Result(table, source, keys)
+                })
+            }
+            Cmd::Databases => engine.databases().map(Event::Databases),
+            Cmd::Tables(db) => engine.tables(&db).map(|tables| Event::Tables(db, tables)),
+            Cmd::Batch(statements, refresh, source) => engine.batch(&statements).and_then(|affected| {
+                trace::server(format!("[DB] committed, {affected} rows affected"));
+                let table = engine.query(&refresh)?;
+                let keys = source
+                    .as_ref()
+                    .map(|s| engine.primary_key(s))
+                    .unwrap_or_default();
+                Ok(Event::Result(table, source, keys))
             }),
-            Cmd::Databases => names(&mut conn, &sql).map(Event::Databases),
-            Cmd::Tables(db) => names(&mut conn, &sql).map(|tables| Event::Tables(db, tables)),
         };
         match result {
             Ok(event) => send(event),
@@ -275,14 +608,34 @@ struct Editor {
 }
 
 #[derive(Default)]
+struct Edits {
+    cells: BTreeMap<(usize, usize), Option<String>>,
+    deleted: Vec<usize>,
+    added: Vec<Vec<Option<String>>>,
+    editing: Option<(usize, usize, String)>,
+    confirm: Option<Vec<String>>,
+}
+
+impl Edits {
+    fn count(&self) -> usize {
+        self.cells.len() + self.deleted.len() + self.added.len()
+    }
+}
+
+#[derive(Default)]
 pub struct DbPanel {
     selected: usize,
     conn: Option<Conn>,
+    kind: DbKind,
     version: Option<String>,
     schemas: Vec<Schema>,
     current: String,
     sql: String,
+    last_sql: String,
     result: Option<Table>,
+    source: Option<Source>,
+    keys: Vec<String>,
+    edits: Edits,
     widths: Vec<f32>,
     picked: Option<(usize, usize)>,
     status: String,
@@ -316,9 +669,56 @@ fn csv(table: &Table, separator: char) -> String {
     out
 }
 
+pub fn source_of(sql: &str, current: &str) -> Option<Source> {
+    let text = sql.trim().trim_end_matches(';').trim();
+    let lower = text.to_lowercase();
+    let rest = lower.strip_prefix("select * from ")?;
+    let offset = text.len() - rest.len();
+    let original = &text[offset..];
+    let name: String = original
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .collect();
+    let tail = original[name.len()..].trim().to_lowercase();
+    if !(tail.is_empty()
+        || tail.starts_with("where ")
+        || tail.starts_with("order by ")
+        || tail.starts_with("limit "))
+    {
+        return None;
+    }
+    let clean = |part: &str| part.trim_matches(['`', '"', '[', ']']).to_owned();
+    let mut parts = split_name(&name);
+    let table = clean(&parts.pop()?);
+    let schema = parts.pop().map(|p| clean(&p)).unwrap_or_else(|| current.to_owned());
+    (!table.is_empty() && !schema.is_empty()).then_some(Source { schema, table })
+}
+
+fn split_name(name: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    for c in name.chars() {
+        match (quote, c) {
+            (None, '`' | '"') => {
+                quote = Some(c);
+                current.push(c);
+            }
+            (Some(q), c) if c == q => {
+                quote = None;
+                current.push(c);
+            }
+            (None, '.') => parts.push(std::mem::take(&mut current)),
+            _ => current.push(c),
+        }
+    }
+    parts.push(current);
+    parts
+}
+
 impl DbPanel {
     pub fn modal_open(&self) -> bool {
-        self.editor.is_some()
+        self.editor.is_some() || self.edits.confirm.is_some()
     }
 
     fn send(&mut self, cmd: Cmd) {
@@ -335,7 +735,9 @@ impl DbPanel {
             return;
         }
         self.status.clear();
-        self.send(Cmd::Query(sql));
+        let source = source_of(&sql, &self.current);
+        self.last_sql = sql.clone();
+        self.send(Cmd::Query(sql, source));
     }
 
     fn connect(&mut self, store: &Store, ctx: &egui::Context) {
@@ -343,7 +745,7 @@ impl DbPanel {
             return;
         };
         let mut ssh = None;
-        if !profile.tunnel.is_empty() {
+        if !profile.tunnel.is_empty() && profile.kind != DbKind::Sqlite {
             let Some(host) = store.profiles.iter().find(|p| p.name == profile.tunnel) else {
                 self.status = format!("Хост «{}» для туннеля не найден", profile.tunnel);
                 self.error = true;
@@ -355,14 +757,20 @@ impl DbPanel {
         let (tx, cmds) = channel();
         let (events, rx) = channel();
         let ctx = ctx.clone();
+        self.kind = profile.kind;
+        self.current = match profile.kind {
+            DbKind::Sqlite => "main".into(),
+            DbKind::Postgres => "public".into(),
+            DbKind::MySql => profile.database.trim().to_owned(),
+        };
         std::thread::spawn(move || {
             serve(profile, ssh, cmds, events, &move || ctx.request_repaint())
         });
-        self.current = store.databases[self.selected].database.trim().to_owned();
         self.conn = Some(Conn { tx, rx });
         self.version = None;
         self.schemas.clear();
         self.result = None;
+        self.edits = Edits::default();
         self.status = "Подключение…".into();
         self.error = false;
         self.busy = true;
@@ -373,6 +781,7 @@ impl DbPanel {
         self.version = None;
         self.schemas.clear();
         self.busy = false;
+        self.edits = Edits::default();
     }
 
     pub fn poll(&mut self) {
@@ -384,7 +793,7 @@ impl DbPanel {
             self.busy = false;
             match event {
                 Event::Connected(version) => {
-                    self.status = format!("Подключено, сервер {version}");
+                    self.status = format!("Подключено: {version}");
                     self.error = false;
                     self.version = Some(version);
                     self.send(Cmd::Databases);
@@ -402,6 +811,11 @@ impl DbPanel {
                     if let Some(schema) = self.schemas.iter_mut().find(|s| s.name == current) {
                         schema.open = true;
                         self.send(Cmd::Tables(current));
+                    } else if self.schemas.len() == 1 {
+                        let name = self.schemas[0].name.clone();
+                        self.schemas[0].open = true;
+                        self.current = name.clone();
+                        self.send(Cmd::Tables(name));
                     }
                 }
                 Event::Tables(db, tables) => {
@@ -409,7 +823,7 @@ impl DbPanel {
                         schema.tables = Some(tables);
                     }
                 }
-                Event::Result(table) => {
+                Event::Result(table, source, keys) => {
                     self.status = if table.columns.is_empty() {
                         format!(
                             "Выполнено: затронуто строк {}, {:.1} мс. {}",
@@ -446,6 +860,12 @@ impl DbPanel {
                         })
                         .collect();
                     self.picked = None;
+                    self.keys = keys
+                        .into_iter()
+                        .filter(|k| table.columns.contains(k))
+                        .collect();
+                    self.source = source;
+                    self.edits = Edits::default();
                     self.result = Some(table);
                 }
                 Event::Error(e) => {
@@ -486,14 +906,16 @@ impl DbPanel {
         ui.horizontal_wrapped(|ui| {
             ui.add_space(8.0);
             let mut edit = false;
-            let combo_w = (ui.available_width() - 150.0).clamp(120.0, 220.0);
+            let combo_w = (ui.available_width() - 150.0).clamp(120.0, 240.0);
             ui.add_enabled_ui(!active, |ui| {
                 ComboBox::from_id_salt("tror_db_profile")
                     .width(combo_w)
+                    .truncate()
                     .selected_text(store.databases[self.selected].name.clone())
                     .show_ui(ui, |ui| {
                         for (i, profile) in store.databases.iter().enumerate() {
-                            ui.selectable_value(&mut self.selected, i, profile.name.as_str());
+                            let text = format!("{}  ·  {}", profile.name, profile.kind.label());
+                            ui.selectable_value(&mut self.selected, i, text);
                         }
                         ui.separator();
                         if ui.button("Настроить подключения…").clicked() {
@@ -504,11 +926,7 @@ impl DbPanel {
             if edit {
                 self.open_editor(store, false);
             }
-            let label = if active {
-                "Отключить"
-            } else {
-                "Подключить"
-            };
+            let label = if active { "Отключить" } else { "Подключить" };
             if ui.add(Button::new(label).fill(pal.surface)).clicked() {
                 if active {
                     self.disconnect();
@@ -560,12 +978,72 @@ impl DbPanel {
         ui.advance_cursor_after_rect(rect);
     }
 
+    fn table_queries(&self, schema: &str, table: &str) -> Vec<(&'static str, String)> {
+        let kind = self.kind;
+        let full = format!("{}.{}", kind.quote(schema), kind.quote(table));
+        let first = ("Первые 200 строк", format!("SELECT * FROM {full} LIMIT 200"));
+        let count = ("Число строк", format!("SELECT COUNT(*) FROM {full}"));
+        match kind {
+            DbKind::MySql => vec![
+                first,
+                ("Столбцы", format!("SHOW FULL COLUMNS FROM {full}")),
+                ("Индексы", format!("SHOW INDEX FROM {full}")),
+                ("SQL создания", format!("SHOW CREATE TABLE {full}")),
+                count,
+            ],
+            DbKind::Postgres => vec![
+                first,
+                (
+                    "Столбцы",
+                    format!(
+                        "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = {} AND table_name = {} ORDER BY ordinal_position",
+                        kind.literal(Some(schema)),
+                        kind.literal(Some(table))
+                    ),
+                ),
+                (
+                    "Индексы",
+                    format!(
+                        "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = {} AND tablename = {}",
+                        kind.literal(Some(schema)),
+                        kind.literal(Some(table))
+                    ),
+                ),
+                count,
+            ],
+            DbKind::Sqlite => vec![
+                first,
+                (
+                    "Столбцы",
+                    format!("PRAGMA {}.table_info({})", kind.quote(schema), kind.quote(table)),
+                ),
+                (
+                    "Индексы",
+                    format!("PRAGMA {}.index_list({})", kind.quote(schema), kind.quote(table)),
+                ),
+                (
+                    "SQL создания",
+                    format!(
+                        "SELECT sql FROM {}.sqlite_master WHERE name = {}",
+                        kind.quote(schema),
+                        kind.literal(Some(table))
+                    ),
+                ),
+                count,
+            ],
+        }
+    }
+
     fn tree(&mut self, ui: &mut Ui, pal: &Palette) {
-        let mut wanted = Vec::new();
-        let mut query = None;
         let mut refresh = false;
+        let kind = self.kind;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Базы и таблицы").size(12.0).color(pal.faint));
+            let title = match kind {
+                DbKind::MySql => "Базы и таблицы",
+                DbKind::Postgres => "Схемы и таблицы",
+                DbKind::Sqlite => "Таблицы",
+            };
+            ui.label(RichText::new(title).size(12.0).color(pal.faint));
             if ui
                 .small_button("↺")
                 .on_hover_text("Обновить список")
@@ -574,23 +1052,20 @@ impl DbPanel {
                 refresh = true;
             }
         });
+        let mut toggle = None;
+        let mut run: Option<(String, String, bool)> = None;
         ScrollArea::vertical()
             .id_salt("tror_db_tree")
             .auto_shrink(false)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
-                for schema in &mut self.schemas {
+                for (index, schema) in self.schemas.iter().enumerate() {
                     let current = schema.name == self.current;
                     let mark = if schema.open { "▼" } else { "▶" };
                     let text = RichText::new(format!("{mark}  {}", schema.name))
                         .color(if current { pal.accent } else { pal.text });
                     if ui.add(Button::new(text).frame(false).truncate()).clicked() {
-                        schema.open = !schema.open;
-                        if schema.open {
-                            self.current = schema.name.clone();
-                            wanted.push(schema.name.clone());
-                            query = Some((format!("USE {}", quote_name(&schema.name)), false));
-                        }
+                        toggle = Some(index);
                     }
                     if !schema.open {
                         continue;
@@ -601,8 +1076,6 @@ impl DbPanel {
                         }
                         Some(tables) => {
                             for table in tables {
-                                let full =
-                                    format!("{}.{}", quote_name(&schema.name), quote_name(table));
                                 let response = ui.add(
                                     Button::new(
                                         RichText::new(format!("      {table}")).color(pal.subtext),
@@ -610,23 +1083,14 @@ impl DbPanel {
                                     .frame(false)
                                     .truncate(),
                                 );
+                                let queries = self.table_queries(&schema.name, table);
                                 if response.clicked() {
-                                    query = Some((format!("SELECT * FROM {full} LIMIT 200"), true));
+                                    run = Some((schema.name.clone(), queries[0].1.clone(), true));
                                 }
                                 response.context_menu(|ui| {
-                                    let items = [
-                                        (
-                                            "Первые 200 строк",
-                                            format!("SELECT * FROM {full} LIMIT 200"),
-                                        ),
-                                        ("Столбцы", format!("SHOW FULL COLUMNS FROM {full}")),
-                                        ("Индексы", format!("SHOW INDEX FROM {full}")),
-                                        ("SQL создания", format!("SHOW CREATE TABLE {full}")),
-                                        ("Число строк", format!("SELECT COUNT(*) FROM {full}")),
-                                    ];
-                                    for (label, sql) in items {
-                                        if ui.button(label).clicked() {
-                                            query = Some((sql, true));
+                                    for (label, sql) in &queries {
+                                        if ui.button(*label).clicked() {
+                                            run = Some((schema.name.clone(), sql.clone(), true));
                                             ui.close();
                                         }
                                     }
@@ -639,10 +1103,20 @@ impl DbPanel {
         if refresh {
             self.send(Cmd::Databases);
         }
-        for db in wanted {
-            self.send(Cmd::Tables(db));
+        if let Some(index) = toggle {
+            let schema = &mut self.schemas[index];
+            schema.open = !schema.open;
+            if schema.open {
+                let name = schema.name.clone();
+                self.current = name.clone();
+                self.send(Cmd::Tables(name.clone()));
+                if kind == DbKind::MySql {
+                    self.run(format!("USE {}", kind.quote(&name)));
+                }
+            }
         }
-        if let Some((sql, show)) = query {
+        if let Some((schema, sql, show)) = run {
+            self.current = schema;
             if show {
                 self.sql = sql.clone();
             }
@@ -674,6 +1148,9 @@ impl DbPanel {
                     .collect::<String>()
             });
         let mut export = None;
+        let mut apply = false;
+        let mut discard = false;
+        let mut add_row = false;
         ui.horizontal_wrapped(|ui| {
             let run = ui
                 .add_enabled(
@@ -685,8 +1162,13 @@ impl DbPanel {
                 self.run(selected.unwrap_or_else(|| self.sql.clone()));
             }
             if !self.current.is_empty() {
+                let what = match self.kind {
+                    DbKind::MySql => "база",
+                    DbKind::Postgres => "схема",
+                    DbKind::Sqlite => "база",
+                };
                 ui.label(
-                    RichText::new(format!("база: {}", self.current))
+                    RichText::new(format!("{what}: {}", self.current))
                         .size(12.5)
                         .color(pal.subtext),
                 );
@@ -703,7 +1185,46 @@ impl DbPanel {
                     export = Some(false);
                 }
             }
+            if self.editable() {
+                if ui
+                    .button("+ Строка")
+                    .on_hover_text("Добавить строку в таблицу")
+                    .clicked()
+                {
+                    add_row = true;
+                }
+                let count = self.edits.count();
+                if count > 0 {
+                    if ui
+                        .add(
+                            Button::new(
+                                RichText::new(format!("Применить изменения ({count})"))
+                                    .color(pal.base),
+                            )
+                            .fill(pal.accent),
+                        )
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                    if ui.button("Отменить").clicked() {
+                        discard = true;
+                    }
+                }
+            }
         });
+        if discard {
+            self.edits = Edits::default();
+        }
+        if add_row && let Some(table) = &self.result {
+            self.edits.added.push(vec![None; table.columns.len()]);
+        }
+        if apply {
+            let statements = self.statements();
+            if !statements.is_empty() {
+                self.edits.confirm = Some(statements);
+            }
+        }
         if let (Some(to_file), Some(table)) = (export, &self.result) {
             if to_file {
                 if let Some(path) = rfd::FileDialog::new()
@@ -722,14 +1243,122 @@ impl DbPanel {
                 ui.ctx().copy_text(csv(table, '\t'));
             }
         }
+        if let Some(table) = &self.result
+            && !table.columns.is_empty()
+            && self.source.is_some()
+            && self.keys.is_empty()
+        {
+            ui.label(
+                RichText::new("У таблицы нет первичного ключа — правка в сетке недоступна, меняйте данные запросами.")
+                    .size(12.0)
+                    .color(pal.faint),
+            );
+        } else if self.editable() {
+            ui.label(
+                RichText::new("Двойной щелчок по ячейке — правка, Enter — принять, Esc — отмена. Правый щелчок — NULL и удаление строки.")
+                    .size(12.0)
+                    .color(pal.faint),
+            );
+        }
         ui.add_space(4.0);
+        self.grid(ui, pal, &font, font_size);
+    }
+
+    fn editable(&self) -> bool {
+        self.source.is_some()
+            && !self.keys.is_empty()
+            && self
+                .result
+                .as_ref()
+                .is_some_and(|t| !t.columns.is_empty() && !t.truncated)
+    }
+
+    fn statements(&self) -> Vec<String> {
+        let (Some(table), Some(source)) = (&self.result, &self.source) else {
+            return Vec::new();
+        };
+        let kind = self.kind;
+        let full = format!("{}.{}", kind.quote(&source.schema), kind.quote(&source.table));
+        let key_index: Vec<usize> = self
+            .keys
+            .iter()
+            .filter_map(|k| table.columns.iter().position(|c| c == k))
+            .collect();
+        let condition = |row: &[Option<String>]| {
+            key_index
+                .iter()
+                .map(|&i| match &row[i] {
+                    Some(value) => format!("{} = {}", kind.quote(&table.columns[i]), kind.literal(Some(value))),
+                    None => format!("{} IS NULL", kind.quote(&table.columns[i])),
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        };
+        let mut out = Vec::new();
+        let mut by_row: BTreeMap<usize, Vec<(usize, &Option<String>)>> = BTreeMap::new();
+        for ((row, col), value) in &self.edits.cells {
+            if !self.edits.deleted.contains(row) {
+                by_row.entry(*row).or_default().push((*col, value));
+            }
+        }
+        for (row, changes) in by_row {
+            let Some(original) = table.rows.get(row) else {
+                continue;
+            };
+            let set: Vec<String> = changes
+                .iter()
+                .map(|(col, value)| {
+                    format!(
+                        "{} = {}",
+                        kind.quote(&table.columns[*col]),
+                        kind.literal(value.as_deref())
+                    )
+                })
+                .collect();
+            out.push(format!(
+                "UPDATE {full} SET {} WHERE {}",
+                set.join(", "),
+                condition(original)
+            ));
+        }
+        for row in &self.edits.deleted {
+            if let Some(original) = table.rows.get(*row) {
+                out.push(format!("DELETE FROM {full} WHERE {}", condition(original)));
+            }
+        }
+        for added in &self.edits.added {
+            let pairs: Vec<(usize, &String)> = added
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| v.as_ref().map(|v| (i, v)))
+                .collect();
+            if pairs.is_empty() {
+                out.push(match kind {
+                    DbKind::MySql => format!("INSERT INTO {full} () VALUES ()"),
+                    _ => format!("INSERT INTO {full} DEFAULT VALUES"),
+                });
+                continue;
+            }
+            let columns: Vec<String> = pairs.iter().map(|(i, _)| kind.quote(&table.columns[*i])).collect();
+            let values: Vec<String> = pairs.iter().map(|(_, v)| kind.literal(Some(v))).collect();
+            out.push(format!(
+                "INSERT INTO {full} ({}) VALUES ({})",
+                columns.join(", "),
+                values.join(", ")
+            ));
+        }
+        out
+    }
+
+    fn grid(&mut self, ui: &mut Ui, pal: &Palette, font: &FontId, font_size: f32) {
+        let editable = self.editable();
         let Some(table) = &self.result else {
             return;
         };
         if table.columns.is_empty() {
             return;
         }
-        let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+        let char_w = ui.fonts_mut(|f| f.glyph_width(font, '0'));
         let row_h = (font_size * 1.7).round();
         let pad = 10.0;
         let widths: Vec<f32> = self.widths.iter().map(|w| w * char_w + pad * 2.0).collect();
@@ -741,31 +1370,49 @@ impl DbPanel {
         let clip = ui.painter().with_clip_rect(header);
         let mut x = header.left() + number_w - self.scroll_x;
         for (name, w) in table.columns.iter().zip(&widths) {
+            let key = self.keys.contains(name);
             clip.text(
                 egui::pos2(x + pad, header.center().y),
                 Align2::LEFT_CENTER,
-                name,
+                if key { format!("🔑{name}") } else { name.clone() },
                 font.clone(),
-                pal.text,
+                if key { pal.accent } else { pal.text },
             );
             x += w;
         }
-        let rows = &table.rows;
+        let base_rows = table.rows.len();
+        let total_rows = base_rows + self.edits.added.len();
         let mut copy = None;
         let mut picked = self.picked;
+        let mut start_edit = None;
+        let mut set_null = None;
+        let mut toggle_delete = None;
+        let mut commit = None;
+        let mut cancel_edit = false;
+        let changed_color = pal.match_bg;
         ui.spacing_mut().item_spacing.y = 0.0;
         let out = ScrollArea::both()
             .id_salt("tror_db_grid")
             .auto_shrink(false)
-            .show_rows(ui, row_h, rows.len(), |ui, range| {
+            .show_rows(ui, row_h, total_rows, |ui, range| {
                 for index in range {
+                    let added = index >= base_rows;
+                    let row_values: Vec<Option<String>> = if added {
+                        self.edits.added[index - base_rows].clone()
+                    } else {
+                        table.rows[index].clone()
+                    };
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(total.max(ui.available_width()), row_h),
                         Sense::click(),
                     );
-                    let painter = ui.painter();
+                    let painter = ui.painter().clone();
+                    let deleted = !added && self.edits.deleted.contains(&index);
                     if index % 2 == 1 {
                         painter.rect_filled(rect, 0.0, pal.base);
+                    }
+                    if added {
+                        painter.rect_filled(rect, 0.0, pal.selection.gamma_multiply(0.45));
                     }
                     if response.hovered() {
                         painter.rect_filled(rect, 0.0, pal.current_line);
@@ -773,7 +1420,7 @@ impl DbPanel {
                     painter.text(
                         egui::pos2(rect.left() + number_w - pad, rect.center().y),
                         Align2::RIGHT_CENTER,
-                        (index + 1).to_string(),
+                        if added { "+".to_owned() } else { (index + 1).to_string() },
                         font.clone(),
                         pal.faint,
                     );
@@ -784,7 +1431,7 @@ impl DbPanel {
                             .flatten()
                     });
                     let mut x = rect.left() + number_w;
-                    for (col, (value, w)) in rows[index].iter().zip(&widths).enumerate() {
+                    for (col, w) in widths.iter().enumerate() {
                         let cell = egui::Rect::from_min_size(
                             egui::pos2(x, rect.top()),
                             egui::vec2(*w, row_h),
@@ -795,45 +1442,116 @@ impl DbPanel {
                         {
                             picked = Some((index, col));
                         }
-                        if picked == Some((index, col)) {
-                            painter.rect_stroke(
-                                cell.shrink(1.0),
-                                3.0,
-                                Stroke::new(1.0, pal.accent),
-                                egui::StrokeKind::Inside,
-                            );
+                        if let Some(pos) = pointer
+                            && cell.contains(pos)
+                            && response.double_clicked()
+                            && editable
+                            && !deleted
+                        {
+                            start_edit = Some((index, col));
                         }
-                        let (text, color) = match value {
-                            Some(text) => (text.as_str(), pal.text),
-                            None => ("NULL", pal.faint),
+                        let edited = if added {
+                            None
+                        } else {
+                            self.edits.cells.get(&(index, col))
                         };
-                        let shown: String = text
-                            .chars()
-                            .take(self.widths[col] as usize)
-                            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-                            .collect();
-                        painter
-                            .with_clip_rect(cell.intersect(painter.clip_rect()))
-                            .text(
-                                egui::pos2(x + pad, rect.center().y),
-                                Align2::LEFT_CENTER,
-                                shown,
-                                font.clone(),
-                                color,
-                            );
+                        if edited.is_some() {
+                            painter.rect_filled(cell.shrink(1.0), 2.0, changed_color);
+                        }
+                        let value = match edited {
+                            Some(v) => v.clone(),
+                            None => row_values.get(col).cloned().flatten(),
+                        };
+                        let editing_here = self
+                            .edits
+                            .editing
+                            .as_ref()
+                            .is_some_and(|(r, c, _)| *r == index && *c == col);
+                        if editing_here {
+                            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(cell.shrink(2.0)));
+                            if let Some((_, _, text)) = &mut self.edits.editing {
+                                let field = child.add(
+                                    TextEdit::singleline(text)
+                                        .font(font.clone())
+                                        .desired_width(cell.width() - 6.0)
+                                        .margin(egui::Margin::symmetric(4, 2)),
+                                );
+                                field.request_focus();
+                                if child.input(|i| i.key_pressed(Key::Enter)) {
+                                    commit = Some((index, col, text.clone()));
+                                } else if child.input(|i| i.key_pressed(Key::Escape)) {
+                                    cancel_edit = true;
+                                } else if field.lost_focus() {
+                                    commit = Some((index, col, text.clone()));
+                                }
+                            }
+                        } else {
+                            if picked == Some((index, col)) {
+                                painter.rect_stroke(
+                                    cell.shrink(1.0),
+                                    3.0,
+                                    Stroke::new(1.0, pal.accent),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            let (text, color) = match &value {
+                                Some(text) => (text.as_str(), if deleted { pal.faint } else { pal.text }),
+                                None => ("NULL", pal.faint),
+                            };
+                            let shown: String = text
+                                .chars()
+                                .take(self.widths[col] as usize)
+                                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                                .collect();
+                            let galley = painter
+                                .with_clip_rect(cell.intersect(painter.clip_rect()))
+                                .text(
+                                    egui::pos2(x + pad, rect.center().y),
+                                    Align2::LEFT_CENTER,
+                                    shown,
+                                    font.clone(),
+                                    color,
+                                );
+                            if deleted {
+                                painter.line_segment(
+                                    [galley.left_center(), galley.right_center()],
+                                    Stroke::new(1.0, pal.warn),
+                                );
+                            }
+                        }
                         x += w;
                     }
                     response.context_menu(|ui| {
                         if let Some((r, c)) = picked
                             && r == index
-                            && ui.button("Копировать значение").clicked()
                         {
-                            copy = Some(rows[r][c].clone().unwrap_or_default());
-                            ui.close();
+                            if ui.button("Копировать значение").clicked() {
+                                let value = if added {
+                                    self.edits.added[r - base_rows][c].clone()
+                                } else {
+                                    self.edits
+                                        .cells
+                                        .get(&(r, c))
+                                        .cloned()
+                                        .unwrap_or_else(|| table.rows[r][c].clone())
+                                };
+                                copy = Some(value.unwrap_or_default());
+                                ui.close();
+                            }
+                            if editable && !deleted {
+                                if ui.button("Изменить значение").clicked() {
+                                    start_edit = Some((r, c));
+                                    ui.close();
+                                }
+                                if ui.button("Сделать NULL").clicked() {
+                                    set_null = Some((r, c));
+                                    ui.close();
+                                }
+                            }
                         }
                         if ui.button("Копировать строку").clicked() {
                             copy = Some(
-                                rows[index]
+                                row_values
                                     .iter()
                                     .map(|c| c.as_deref().unwrap_or("NULL"))
                                     .collect::<Vec<_>>()
@@ -841,19 +1559,93 @@ impl DbPanel {
                             );
                             ui.close();
                         }
+                        if editable {
+                            ui.separator();
+                            let label = if added {
+                                "Убрать новую строку"
+                            } else if deleted {
+                                "Не удалять строку"
+                            } else {
+                                "Удалить строку"
+                            };
+                            if ui.button(label).clicked() {
+                                toggle_delete = Some(index);
+                                ui.close();
+                            }
+                        }
                     });
                 }
             });
         self.scroll_x = out.state.clamped_offset().x;
         self.picked = picked;
+        if let Some((row, col)) = start_edit {
+            let current = if row >= base_rows {
+                self.edits.added[row - base_rows][col].clone()
+            } else {
+                self.edits
+                    .cells
+                    .get(&(row, col))
+                    .cloned()
+                    .unwrap_or_else(|| table.rows[row][col].clone())
+            };
+            let long = current.as_ref().is_some_and(|v| v.chars().count() > MAX_CELL);
+            if long {
+                self.status = "Значение длиннее 4000 символов показано не целиком — измените его запросом".into();
+                self.error = true;
+            } else if current.as_deref().is_some_and(|v| v.starts_with("[BLOB")) {
+                self.status = "Двоичные данные в сетке не правятся".into();
+                self.error = true;
+            } else {
+                self.edits.editing = Some((row, col, current.unwrap_or_default()));
+            }
+        }
+        if cancel_edit {
+            self.edits.editing = None;
+        }
+        if let Some((row, col, text)) = commit {
+            self.edits.editing = None;
+            self.set_cell(row, col, Some(text));
+        }
+        if let Some((row, col)) = set_null {
+            self.set_cell(row, col, None);
+        }
+        if let Some(row) = toggle_delete {
+            if row >= base_rows {
+                self.edits.added.remove(row - base_rows);
+            } else if let Some(i) = self.edits.deleted.iter().position(|r| *r == row) {
+                self.edits.deleted.remove(i);
+            } else {
+                self.edits.deleted.push(row);
+            }
+        }
         if let Some((r, c)) = picked
+            && self.edits.editing.is_none()
             && ui.memory(|m| m.focused().is_none())
             && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)))
+            && let Some(table) = &self.result
+            && r < table.rows.len()
         {
-            copy = Some(rows[r][c].clone().unwrap_or_default());
+            copy = Some(table.rows[r][c].clone().unwrap_or_default());
         }
         if let Some(text) = copy {
             ui.ctx().copy_text(text);
+        }
+    }
+
+    fn set_cell(&mut self, row: usize, col: usize, value: Option<String>) {
+        let Some(table) = &self.result else {
+            return;
+        };
+        if row >= table.rows.len() {
+            if let Some(added) = self.edits.added.get_mut(row - table.rows.len()) {
+                added[col] = value;
+            }
+            return;
+        }
+        if table.rows[row][col] == value {
+            self.edits.cells.remove(&(row, col));
+        } else {
+            self.edits.cells.insert((row, col), value);
         }
     }
 
@@ -877,6 +1669,7 @@ impl DbPanel {
     }
 
     pub fn dialogs(&mut self, ctx: &egui::Context, pal: &Palette, store: &mut Store) {
+        self.confirm_dialog(ctx, pal);
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -886,7 +1679,7 @@ impl DbPanel {
         let mut switch = None;
         let mut create = false;
         let modal = dialog("tror_db_editor", pal).show(ctx, |ui| {
-            ui.set_width(440.0);
+            ui.set_width(460.0);
             ui.label(
                 RichText::new("Подключение к базе данных")
                     .family(crate::theme::medium())
@@ -913,13 +1706,38 @@ impl DbPanel {
                 .num_columns(2)
                 .spacing([14.0, 8.0])
                 .show(ui, |ui| {
-                    let wide = 290.0;
+                    let wide = 300.0;
                     ui.label("Название");
                     ui.add(TextEdit::singleline(&mut p.name).desired_width(wide));
                     ui.end_row();
                     ui.label("Тип");
-                    ui.label(RichText::new("MySQL / MariaDB").color(pal.subtext));
+                    ui.horizontal(|ui| {
+                        for kind in [DbKind::MySql, DbKind::Postgres, DbKind::Sqlite] {
+                            if ui.selectable_label(p.kind == kind, kind.label()).clicked() && p.kind != kind {
+                                if p.port == p.kind.default_port() {
+                                    p.port = kind.default_port();
+                                }
+                                p.kind = kind;
+                            }
+                        }
+                    });
                     ui.end_row();
+                    if p.kind == DbKind::Sqlite {
+                        ui.label("Файл базы");
+                        ui.horizontal(|ui| {
+                            ui.add(TextEdit::singleline(&mut p.file).desired_width(wide - 78.0));
+                            if ui.button("Обзор…").clicked()
+                                && let Some(file) = rfd::FileDialog::new()
+                                    .add_filter("SQLite", &["db", "sqlite", "sqlite3", "db3"])
+                                    .add_filter("Все файлы", &["*"])
+                                    .pick_file()
+                            {
+                                p.file = file.display().to_string();
+                            }
+                        });
+                        ui.end_row();
+                        return;
+                    }
                     ui.label("Туннель через SSH");
                     ComboBox::from_id_salt("tror_db_tunnel")
                         .width(wide)
@@ -951,8 +1769,8 @@ impl DbPanel {
                         "Сервер (со стороны хоста)"
                     });
                     ui.horizontal(|ui| {
-                        ui.add(TextEdit::singleline(&mut p.host).desired_width(wide - 78.0));
-                        ui.add(egui::DragValue::new(&mut p.port).range(1..=65535));
+                        ui.add(TextEdit::singleline(&mut p.host).desired_width(wide - 70.0));
+                        crate::widgets::port_field(ui, &mut p.port, 60.0);
                     });
                     ui.end_row();
                     ui.label("Пользователь");
@@ -980,36 +1798,46 @@ impl DbPanel {
                     ui.end_row();
                 });
             ui.add_space(6.0);
-            let sftp_hosts = store
-                .profiles
-                .iter()
-                .filter(|h| h.protocol == remote::Protocol::Sftp)
-                .count();
-            let tunnel_note = if sftp_hosts == 0 {
-                "Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
-                 так устроен почти любой хостинг. В списке туннелей появляются ваши SFTP-профили из панели \
-                 «Удалённые хосты» (F8); сейчас там нет ни одного SFTP-профиля, поэтому выбрать нечего. \
-                 Создайте профиль хоста, подключитесь к нему один раз — и он появится в этом списке."
-            } else if p.tunnel.is_empty() {
-                "Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
-                 так устроен почти любой хостинг. Выберите в списке SFTP-профиль этого сервера: программа \
-                 зайдёт на него по SSH и уже оттуда подключится к базе."
+            if p.kind == DbKind::Sqlite {
+                ui.label(
+                    RichText::new("Файл SQLite открывается напрямую с этого компьютера. Если файла нет, он будет создан.")
+                        .size(12.0)
+                        .color(pal.subtext),
+                );
             } else {
-                "Программа зайдёт на выбранный хост по SSH и подключится к базе оттуда. В поле «Сервер» \
-                 укажите адрес базы так, как его видит сам хост — обычно 127.0.0.1 или localhost, порт 3306 \
-                 (точные значения есть в панели хостинга или в конфиге сайта). К хосту нужно один раз \
-                 подключиться в панели «Удалённые хосты», чтобы подтвердить его ключ."
-            };
-            ui.label(RichText::new(tunnel_note).size(12.0).color(pal.subtext));
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new(
-                    "Пароль хранится в файле профилей в замаскированном, но не зашифрованном виде. \
-                     Соединение без TLS — для удалённых серверов используйте туннель через SSH.",
-                )
-                .size(12.0)
-                .color(pal.faint),
-            );
+                let sftp_hosts = store
+                    .profiles
+                    .iter()
+                    .filter(|h| h.protocol == remote::Protocol::Sftp)
+                    .count();
+                let default_port = p.kind.default_port();
+                let tunnel_note = if sftp_hosts == 0 {
+                    "Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
+                     так устроен почти любой хостинг. В списке туннелей появляются ваши SFTP-профили из панели \
+                     «Удалённые хосты» (F8); сейчас там нет ни одного SFTP-профиля, поэтому выбрать нечего."
+                        .to_owned()
+                } else if p.tunnel.is_empty() {
+                    "Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
+                     так устроен почти любой хостинг. Выберите в списке SFTP-профиль этого сервера: программа \
+                     зайдёт на него по SSH и уже оттуда подключится к базе."
+                        .to_owned()
+                } else {
+                    format!(
+                        "Программа зайдёт на выбранный хост по SSH и подключится к базе оттуда. В поле «Сервер» \
+                         укажите адрес базы так, как его видит сам хост — обычно 127.0.0.1 или localhost, порт {default_port}."
+                    )
+                };
+                ui.label(RichText::new(tunnel_note).size(12.0).color(pal.subtext));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "Пароль хранится в файле профилей в замаскированном, но не зашифрованном виде. \
+                         Соединение без TLS — для удалённых серверов используйте туннель через SSH.",
+                    )
+                    .size(12.0)
+                    .color(pal.faint),
+                );
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if dialog_button(ui, pal, "Сохранить", true) {
@@ -1059,6 +1887,48 @@ impl DbPanel {
             self.editor = None;
         }
     }
+
+    fn confirm_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
+        let Some(statements) = &self.edits.confirm else {
+            return;
+        };
+        let mut run = false;
+        let mut cancel = false;
+        let modal = dialog("tror_db_apply", pal).show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.label(RichText::new("Применить изменения").strong());
+            ui.label(
+                RichText::new("Будут выполнены запросы, в одной транзакции:")
+                    .color(pal.subtext)
+                    .size(12.5),
+            );
+            ui.add_space(6.0);
+            ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                for statement in statements {
+                    ui.add(
+                        egui::Label::new(RichText::new(statement).monospace().size(12.0)).wrap(),
+                    );
+                    ui.add_space(3.0);
+                }
+            });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if dialog_button(ui, pal, "Выполнить", true) {
+                    run = true;
+                }
+                if dialog_button(ui, pal, "Отмена", false) {
+                    cancel = true;
+                }
+            });
+        });
+        if run && let Some(statements) = self.edits.confirm.take() {
+            let refresh = self.last_sql.clone();
+            let source = self.source.clone();
+            self.send(Cmd::Batch(statements, refresh, source));
+        } else if cancel || modal.should_close() {
+            self.edits.confirm = None;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1069,6 +1939,10 @@ mod tests {
     fn names_are_quoted_and_csv_is_escaped() {
         assert_eq!(quote_name("b_user"), "`b_user`");
         assert_eq!(quote_name("we`ird"), "`we``ird`");
+        assert_eq!(DbKind::Postgres.quote("a\"b"), "\"a\"\"b\"");
+        assert_eq!(DbKind::MySql.literal(Some("it's \\")), "'it''s \\\\'");
+        assert_eq!(DbKind::Sqlite.literal(Some("it's \\")), "'it''s \\'");
+        assert_eq!(DbKind::Sqlite.literal(None), "NULL");
         let table = Table {
             columns: vec!["id".into(), "title".into()],
             rows: vec![
@@ -1104,22 +1978,132 @@ mod tests {
     }
 
     #[test]
+    fn sources_are_found_in_simple_selects() {
+        assert_eq!(
+            source_of("SELECT * FROM `shop`.`goods` LIMIT 200", "x"),
+            Some(Source {
+                schema: "shop".into(),
+                table: "goods".into()
+            })
+        );
+        assert_eq!(
+            source_of("select * from b_iblock_element where ID > 5;", "site"),
+            Some(Source {
+                schema: "site".into(),
+                table: "b_iblock_element".into()
+            })
+        );
+        assert_eq!(source_of("SELECT id FROM t", "x"), None);
+        assert_eq!(source_of("SELECT * FROM a JOIN b ON 1", "x"), None);
+    }
+
+    #[test]
+    fn sqlite_editing_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("tror-db-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shop.db");
+        let _ = std::fs::remove_file(&path);
+        let profile = DbProfile {
+            kind: DbKind::Sqlite,
+            file: path.display().to_string(),
+            ..Default::default()
+        };
+        let (mut engine, version) = open_engine(&profile, String::new(), 0).unwrap();
+        assert!(version.starts_with("SQLite"));
+        engine
+            .query("CREATE TABLE goods (id INTEGER PRIMARY KEY, title TEXT, price REAL); INSERT INTO goods (title, price) VALUES ('Чайник', 990.5), ('Кружка', NULL)")
+            .unwrap();
+        assert_eq!(engine.databases().unwrap(), vec!["main"]);
+        assert_eq!(engine.tables("main").unwrap(), vec!["goods"]);
+        let source = Source {
+            schema: "main".into(),
+            table: "goods".into(),
+        };
+        assert_eq!(engine.primary_key(&source), vec!["id"]);
+        let mut panel = DbPanel {
+            kind: DbKind::Sqlite,
+            source: Some(source.clone()),
+            keys: vec!["id".into()],
+            result: Some(engine.query("SELECT * FROM goods").unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(panel.result.as_ref().unwrap().rows[0][1].as_deref(), Some("Чайник"));
+        panel.set_cell(1, 2, Some("150".into()));
+        panel.set_cell(0, 1, Some("Чайник 'Ретро'".into()));
+        panel.set_cell(0, 1, Some("Чайник".into()));
+        panel.edits.deleted.push(0);
+        panel.edits.added.push(vec![None, Some("Ложка".into()), Some("12".into())]);
+        let statements = panel.statements();
+        assert_eq!(
+            statements,
+            vec![
+                "UPDATE \"main\".\"goods\" SET \"price\" = '150' WHERE \"id\" = '2'".to_owned(),
+                "DELETE FROM \"main\".\"goods\" WHERE \"id\" = '1'".to_owned(),
+                "INSERT INTO \"main\".\"goods\" (\"title\", \"price\") VALUES ('Ложка', '12')".to_owned(),
+            ]
+        );
+        engine.batch(&statements).unwrap();
+        let after = engine.query("SELECT title, price FROM goods ORDER BY id").unwrap();
+        assert_eq!(
+            after.rows,
+            vec![
+                vec![Some("Кружка".into()), Some("150".into())],
+                vec![Some("Ложка".into()), Some("12".into())],
+            ]
+        );
+        assert!(engine.batch(&["UPDATE nope SET x = 1".into()]).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     #[ignore]
     fn live_mysql_server() {
-        let opts = mysql::OptsBuilder::new()
-            .ip_or_hostname(Some("127.0.0.1"))
-            .tcp_port(3307)
-            .user(Some("jozef"))
-            .pass(Some("secret"))
-            .prefer_socket(false);
-        let mut conn = mysql::Conn::new(opts).unwrap();
-        let dbs = names(&mut conn, "SHOW DATABASES").unwrap();
+        let profile = DbProfile {
+            user: "jozef".into(),
+            password: "secret".into(),
+            ..Default::default()
+        };
+        let (mut engine, _) = open_engine(&profile, "127.0.0.1".into(), 3307).unwrap();
+        let dbs = engine.databases().unwrap();
         assert!(dbs.iter().any(|d| d == "shop"), "{dbs:?}");
-        let table = run_query(&mut conn, "SELECT id, title, price FROM shop.goods").unwrap();
+        let table = engine.query("SELECT id, title, price FROM shop.goods").unwrap();
         assert_eq!(table.columns, ["id", "title", "price"]);
         assert_eq!(table.rows.len(), 3);
         assert_eq!(table.rows[1][1].as_deref(), Some("Чайник"));
         assert_eq!(table.rows[2][2], None);
-        assert!(run_query(&mut conn, "SELEC nonsense").is_err());
+        assert!(engine.query("SELEC nonsense").is_err());
+    }
+
+    #[test]
+    #[ignore]
+    fn live_postgres_server() {
+        let profile = DbProfile {
+            kind: DbKind::Postgres,
+            user: "jozef".into(),
+            password: "secret".into(),
+            database: "shop".into(),
+            ..Default::default()
+        };
+        let (mut engine, version) = open_engine(&profile, "127.0.0.1".into(), 5432).unwrap();
+        assert!(version.starts_with("PostgreSQL"), "{version}");
+        engine
+            .query("DROP TABLE IF EXISTS goods; CREATE TABLE goods (id serial PRIMARY KEY, title text, price numeric); INSERT INTO goods (title, price) VALUES ('Чайник', 990.5), ('Кружка', NULL)")
+            .unwrap();
+        assert!(engine.databases().unwrap().contains(&"public".to_owned()));
+        assert!(engine.tables("public").unwrap().contains(&"goods".to_owned()));
+        let source = Source {
+            schema: "public".into(),
+            table: "goods".into(),
+        };
+        assert_eq!(engine.primary_key(&source), vec!["id"]);
+        let table = engine.query("SELECT * FROM goods ORDER BY id").unwrap();
+        assert_eq!(table.rows[0][1].as_deref(), Some("Чайник"));
+        assert_eq!(table.rows[1][2], None);
+        engine
+            .batch(&["UPDATE \"public\".\"goods\" SET \"price\" = '5' WHERE \"id\" = '2'".into()])
+            .unwrap();
+        let table = engine.query("SELECT price FROM goods WHERE id = 2").unwrap();
+        assert_eq!(table.rows[0][0].as_deref(), Some("5"));
+        assert!(engine.query("SELEC nonsense").is_err());
     }
 }

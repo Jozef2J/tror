@@ -230,6 +230,8 @@ pub struct Document {
     next_version: u64,
     format_changed: bool,
     pub sel: (usize, usize),
+    pub extra: Vec<(usize, usize)>,
+    pub block: Option<((usize, f64), (usize, f64))>,
     pub goal_x: Option<f64>,
     pub scroll_x: f64,
     pub scroll_y: f64,
@@ -262,6 +264,8 @@ impl Document {
             next_version: 1,
             format_changed: false,
             sel: (0, 0),
+            extra: Vec::new(),
+            block: None,
             goal_x: None,
             scroll_x: 0.0,
             scroll_y: 0.0,
@@ -562,6 +566,8 @@ impl Document {
     }
 
     pub fn replace(&mut self, range: Range<usize>, text: &str, kind: EditKind) {
+        self.extra.clear();
+        self.block = None;
         self.checkpoint(kind);
         let end = self.apply(range, text);
         self.sel = (end, end);
@@ -580,6 +586,8 @@ impl Document {
     }
 
     fn restore(&mut self, snapshot: Snapshot) {
+        self.extra.clear();
+        self.block = None;
         self.hl.replace_all(&self.rope, &snapshot.rope);
         self.rope = snapshot.rope;
         self.sel = snapshot.sel;
@@ -605,6 +613,10 @@ impl Document {
     }
 
     pub fn insert_text(&mut self, text: &str) {
+        if self.multi() {
+            self.insert_each(text);
+            return;
+        }
         let kind = if text.contains('\n') || self.has_selection() {
             EditKind::Other
         } else {
@@ -614,6 +626,21 @@ impl Document {
     }
 
     pub fn newline(&mut self) {
+        if self.multi() {
+            self.edit_each(EditKind::Other, |doc, c| {
+                let start = c.0.min(c.1);
+                let line = doc.rope.char_to_line(start);
+                let line_start = doc.rope.line_to_char(line);
+                let indent: String = doc
+                    .rope
+                    .slice(line_start..start)
+                    .chars()
+                    .take_while(|c| *c == ' ' || *c == '\t')
+                    .collect();
+                (start..c.0.max(c.1), format!("\n{indent}"))
+            });
+            return;
+        }
         let start = self.selection().start;
         let line = self.rope.char_to_line(start);
         let line_start = self.rope.line_to_char(line);
@@ -627,6 +654,20 @@ impl Document {
     }
 
     pub fn backspace(&mut self, word: bool) {
+        if self.multi() {
+            self.edit_each(EditKind::Delete, |doc, c| {
+                if c.0 != c.1 {
+                    (c.0.min(c.1)..c.0.max(c.1), String::new())
+                } else if c.1 == 0 {
+                    (0..0, String::new())
+                } else if word {
+                    (doc.word_left(c.1)..c.1, String::new())
+                } else {
+                    (c.1 - 1..c.1, String::new())
+                }
+            });
+            return;
+        }
         if self.has_selection() {
             self.replace(self.selection(), "", EditKind::Other);
         } else if self.sel.1 > 0 {
@@ -640,6 +681,21 @@ impl Document {
     }
 
     pub fn delete(&mut self, word: bool) {
+        if self.multi() {
+            let len = self.len();
+            self.edit_each(EditKind::Delete, |doc, c| {
+                if c.0 != c.1 {
+                    (c.0.min(c.1)..c.0.max(c.1), String::new())
+                } else if c.1 >= len {
+                    (len..len, String::new())
+                } else if word {
+                    (c.1..doc.word_right(c.1), String::new())
+                } else {
+                    (c.1..c.1 + 1, String::new())
+                }
+            });
+            return;
+        }
         if self.has_selection() {
             self.replace(self.selection(), "", EditKind::Other);
         } else if self.sel.1 < self.len() {
@@ -663,6 +719,10 @@ impl Document {
     }
 
     pub fn indent(&mut self) {
+        if self.multi() {
+            self.insert_each("\t");
+            return;
+        }
         let lines = self.selected_lines();
         if lines.len() < 2 {
             self.insert_text("\t");
@@ -722,7 +782,260 @@ impl Document {
         self.reveal = true;
     }
 
+    pub fn multi(&self) -> bool {
+        !self.extra.is_empty()
+    }
+
+    pub fn cursors(&self) -> Vec<(usize, usize)> {
+        let mut all = Vec::with_capacity(self.extra.len() + 1);
+        all.push(self.sel);
+        all.extend(self.extra.iter().copied());
+        all
+    }
+
+    pub fn set_cursors(&mut self, cursors: Vec<(usize, usize)>, primary: usize) {
+        let len = self.len();
+        let primary_sel = cursors.get(primary).copied();
+        let mut list: Vec<(usize, usize)> = cursors
+            .into_iter()
+            .map(|(a, h)| (a.min(len), h.min(len)))
+            .collect();
+        list.sort_by_key(|(a, h)| (*a.min(h), *a.max(h)));
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(list.len());
+        for cur in list {
+            let (lo, hi) = (cur.0.min(cur.1), cur.0.max(cur.1));
+            if let Some(last) = merged.last_mut() {
+                let (llo, lhi) = (last.0.min(last.1), last.0.max(last.1));
+                if lo < lhi || (lo == llo && hi == lhi) || (lo == lhi && lo == hi) {
+                    let start = llo.min(lo);
+                    let end = lhi.max(hi);
+                    *last = if last.1 >= last.0 { (start, end) } else { (end, start) };
+                    continue;
+                }
+            }
+            merged.push(cur);
+        }
+        let primary = primary_sel
+            .and_then(|p| {
+                merged.iter().position(|c| {
+                    let (lo, hi) = (c.0.min(c.1), c.0.max(c.1));
+                    lo <= p.1.min(len) && p.1.min(len) <= hi
+                })
+            })
+            .unwrap_or(merged.len().saturating_sub(1));
+        if merged.is_empty() {
+            return;
+        }
+        self.sel = merged.remove(primary);
+        self.extra = merged;
+        self.last_edit = None;
+        self.goal_x = None;
+    }
+
+    pub fn clear_extra(&mut self) {
+        self.extra.clear();
+        self.block = None;
+    }
+
+    pub fn edit_each(&mut self, kind: EditKind, f: impl Fn(&Self, (usize, usize)) -> (Range<usize>, String)) {
+        let cursors = self.cursors();
+        let mut edits: Vec<(usize, Range<usize>, String)> = cursors
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let (range, text) = f(self, *c);
+                (i, range, text)
+            })
+            .collect();
+        edits.sort_by_key(|(_, r, _)| (r.start, r.end));
+        let mut last_end = 0;
+        edits.retain(|(_, r, _)| {
+            let keep = r.start >= last_end || r.is_empty() && r.start == last_end;
+            if keep {
+                last_end = r.end;
+            }
+            keep
+        });
+        self.checkpoint(kind);
+        let mut shift: isize = 0;
+        let mut carets = vec![None; cursors.len()];
+        for (i, range, text) in edits {
+            let start = (range.start as isize + shift) as usize;
+            let end = (range.end as isize + shift) as usize;
+            let caret = self.apply(start..end, &text);
+            shift += text.chars().count() as isize - (range.end - range.start) as isize;
+            carets[i] = Some(caret);
+        }
+        let primary = 0;
+        let list: Vec<(usize, usize)> = carets.into_iter().flatten().map(|c| (c, c)).collect();
+        self.block = None;
+        self.set_cursors(list, primary);
+        self.reveal = true;
+    }
+
+    pub fn move_each(&mut self, extend: bool, f: impl Fn(&Self, (usize, usize)) -> usize) {
+        let cursors: Vec<(usize, usize)> = self
+            .cursors()
+            .into_iter()
+            .map(|c| {
+                let head = f(self, c).min(self.len());
+                if extend { (c.0, head) } else { (head, head) }
+            })
+            .collect();
+        self.block = None;
+        self.set_cursors(cursors, 0);
+        self.reveal = true;
+    }
+
+    pub fn texts(&self) -> Vec<String> {
+        let mut cursors = self.cursors();
+        cursors.sort_by_key(|(a, h)| *a.min(h));
+        cursors
+            .iter()
+            .map(|(a, h)| self.rope.slice(*a.min(h)..*a.max(h)).to_string())
+            .collect()
+    }
+
+    pub fn insert_each(&mut self, text: &str) {
+        let count = self.extra.len() + 1;
+        let normalized = text.strip_suffix('\n').unwrap_or(text);
+        let parts: Vec<&str> = normalized.split('\n').collect();
+        let mut order: Vec<usize> = (0..count).collect();
+        let cursors = self.cursors();
+        order.sort_by_key(|i| cursors[*i].0.min(cursors[*i].1));
+        let mut rank = vec![0; count];
+        for (r, i) in order.iter().enumerate() {
+            rank[*i] = r;
+        }
+        let distribute = parts.len() == count && count > 1;
+        let kind = if text.contains('\n') {
+            EditKind::Other
+        } else {
+            EditKind::Insert
+        };
+        let cursors_rank: Vec<((usize, usize), usize)> = cursors.iter().copied().zip(rank).collect();
+        self.edit_each(kind, |_, c| {
+            let r = cursors_rank.iter().find(|(cc, _)| *cc == c).map_or(0, |(_, r)| *r);
+            let range = c.0.min(c.1)..c.0.max(c.1);
+            let piece = if distribute { parts[r].to_owned() } else { text.to_owned() };
+            (range, piece)
+        });
+    }
+
+    pub fn block_paste(&mut self, text: &str) {
+        let head = self.sel.1;
+        let line = self.rope.char_to_line(head);
+        let col = head - self.rope.line_to_char(line);
+        let lines: Vec<&str> = text.strip_suffix('\n').unwrap_or(text).split('\n').collect();
+        self.checkpoint(EditKind::Other);
+        let mut carets = Vec::new();
+        for (i, piece) in lines.iter().enumerate() {
+            let target = line + i;
+            if target >= self.line_count() {
+                let end = self.len();
+                self.apply(end..end, "\n");
+            }
+            let start = self.rope.line_to_char(target);
+            let len = self.line_len(target);
+            let pad = col.saturating_sub(len);
+            let at = start + col.min(len);
+            let insert = format!("{}{piece}", " ".repeat(pad));
+            let caret = self.apply(at..at, &insert);
+            carets.push((caret, caret));
+        }
+        self.set_cursors(carets, 0);
+        self.reveal = true;
+    }
+
+    pub fn add_cursor(&mut self, pos: usize) {
+        let pos = pos.min(self.len());
+        let mut cursors = self.cursors();
+        if let Some(i) = cursors.iter().position(|c| c.1 == pos && c.0 == pos)
+            && cursors.len() > 1
+        {
+            cursors.remove(i);
+            self.set_cursors(cursors, 0);
+            return;
+        }
+        cursors.push((pos, pos));
+        let primary = cursors.len() - 1;
+        self.block = None;
+        self.set_cursors(cursors, primary);
+    }
+
+    pub fn add_cursor_vertical(&mut self, down: bool) {
+        let source = if down {
+            self.cursors().into_iter().max_by_key(|c| c.1)
+        } else {
+            self.cursors().into_iter().min_by_key(|c| c.1)
+        };
+        let Some((_, head)) = source else {
+            return;
+        };
+        let line = self.rope.char_to_line(head);
+        let col = head - self.rope.line_to_char(line);
+        let target = if down {
+            if line + 1 >= self.line_count() {
+                return;
+            }
+            line + 1
+        } else {
+            if line == 0 {
+                return;
+            }
+            line - 1
+        };
+        let pos = self.rope.line_to_char(target) + col.min(self.line_len(target));
+        let mut cursors = self.cursors();
+        cursors.push((pos, pos));
+        let primary = cursors.len() - 1;
+        self.block = None;
+        self.set_cursors(cursors, primary);
+        self.reveal = true;
+    }
+
+    pub fn select_next_match(&mut self) {
+        if !self.has_selection() {
+            let head = self.sel.1;
+            self.select_word_at(head);
+            return;
+        }
+        let needle = self.selected_text();
+        if needle.is_empty() {
+            return;
+        }
+        let text = self.rope.to_string();
+        let mut from = self
+            .cursors()
+            .iter()
+            .map(|c| c.0.max(c.1))
+            .max()
+            .unwrap_or(0);
+        let byte = |chars: usize| self.rope.char_to_byte(chars.min(self.len()));
+        let mut found = None;
+        for _ in 0..2 {
+            if let Some(at) = text[byte(from)..].find(&needle) {
+                let start = self.rope.byte_to_char(byte(from) + at);
+                let end = start + needle.chars().count();
+                if !self.cursors().iter().any(|c| c.0.min(c.1) == start) {
+                    found = Some((start, end));
+                }
+                break;
+            }
+            from = 0;
+        }
+        if let Some(sel) = found {
+            let mut cursors = self.cursors();
+            cursors.push(sel);
+            let primary = cursors.len() - 1;
+            self.set_cursors(cursors, primary);
+            self.reveal = true;
+        }
+    }
+
     pub fn move_to(&mut self, pos: usize, extend: bool) {
+        self.extra.clear();
+        self.block = None;
         let pos = pos.min(self.len());
         self.sel = if extend {
             (self.sel.0, pos)
@@ -735,6 +1048,7 @@ impl Document {
     }
 
     pub fn select_all(&mut self) {
+        self.clear_extra();
         self.sel = (0, self.len());
         self.last_edit = None;
     }
@@ -958,6 +1272,62 @@ mod tests {
         assert_eq!(doc.selected_text(), "foo_bar = $baz->qux;\n");
         assert_eq!(doc.line_home(5), 0);
         assert_eq!(doc.line_end(5), 20);
+    }
+
+    #[test]
+    fn multiple_cursors_type_delete_and_paste() {
+        let mut doc = Document::from_text("ab\ncd\nef");
+        doc.set_cursors(vec![(1, 1), (4, 4), (7, 7)], 0);
+        doc.insert_text("X");
+        assert_eq!(text(&doc), "aXb\ncXd\neXf");
+        assert_eq!(doc.cursors().len(), 3);
+        doc.backspace(false);
+        assert_eq!(text(&doc), "ab\ncd\nef");
+        doc.insert_text("1\n2\n3");
+        assert_eq!(text(&doc), "a1b\nc2d\ne3f");
+        doc.undo();
+        assert_eq!(text(&doc), "ab\ncd\nef");
+        assert!(!doc.multi());
+        doc.set_cursors(vec![(0, 2), (3, 5)], 1);
+        assert_eq!(doc.texts(), vec!["ab", "cd"]);
+        doc.insert_text("Z");
+        assert_eq!(text(&doc), "Z\nZ\nef");
+        doc.move_each(false, |_, c| c.1 - 1);
+        doc.delete(false);
+        assert_eq!(text(&doc), "\n\nef");
+    }
+
+    #[test]
+    fn cursors_merge_and_vertical_add() {
+        let mut doc = Document::from_text("hello\nhi\nworld");
+        doc.set_cursors(vec![(0, 3), (2, 5), (8, 8)], 0);
+        assert_eq!(doc.cursors(), vec![(0, 5), (8, 8)]);
+        doc.move_to(4, false);
+        doc.add_cursor_vertical(true);
+        doc.add_cursor_vertical(true);
+        assert_eq!(doc.cursors().len(), 3);
+        let mut heads: Vec<usize> = doc.cursors().iter().map(|c| c.1).collect();
+        heads.sort();
+        assert_eq!(heads, vec![4, 8, 11]);
+        doc.add_cursor(8);
+        assert_eq!(doc.cursors().len(), 2);
+        let mut words = Document::from_text("foo bar foo baz foo");
+        words.move_to(1, false);
+        words.select_next_match();
+        assert_eq!(words.selected_text(), "foo");
+        words.select_next_match();
+        words.select_next_match();
+        assert_eq!(words.cursors().len(), 3);
+        words.insert_text("x");
+        assert_eq!(text(&words), "x bar x baz x");
+    }
+
+    #[test]
+    fn block_paste_pads_short_lines() {
+        let mut doc = Document::from_text("abcd\nx\n");
+        doc.move_to(2, false);
+        doc.block_paste("12\n34\n56");
+        assert_eq!(text(&doc), "ab12cd\nx 34\n  56");
     }
 
     #[test]

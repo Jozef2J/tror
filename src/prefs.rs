@@ -26,7 +26,16 @@ pub struct Look {
     pub font_size: f32,
     pub line_spacing: f32,
     pub radius: u8,
+    pub log_dark: Colors,
+    pub log_light: Colors,
 }
+
+pub const LOG_PARTS: [(&str, &str, u32, u32); 4] = [
+    ("server", "Ответы сервера", 0x5fcf80, 0x1e8a3c),
+    ("client", "Команды клиента", 0x6fa8ff, 0x1f5fd1),
+    ("error", "Ошибки", 0xff6b6b, 0xd02b2b),
+    ("info", "Служебные сообщения", 0xa0a7b4, 0x5c6370),
+];
 
 impl Default for Look {
     fn default() -> Self {
@@ -45,6 +54,8 @@ impl Default for Look {
             font_size: 14.0,
             line_spacing: 1.5,
             radius: 7,
+            log_dark: Colors::new(),
+            log_light: Colors::new(),
         }
     }
 }
@@ -67,6 +78,21 @@ impl Look {
         }
     }
 
+    pub fn log_colors(&self) -> [Color32; 4] {
+        let custom = if self.dark {
+            &self.log_dark
+        } else {
+            &self.log_light
+        };
+        LOG_PARTS.map(|(key, _, dark, light)| match custom.get(key) {
+            Some([r, g, b]) => Color32::from_rgb(*r, *g, *b),
+            None => {
+                let hex = if self.dark { dark } else { light };
+                Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+            }
+        })
+    }
+
     pub fn clamp(&mut self) {
         self.ui_size = self.ui_size.clamp(10.0, 20.0);
         self.font_size = self.font_size.clamp(8.0, 40.0);
@@ -87,6 +113,14 @@ pub struct Settings {
     pub floats: crate::dock::Floats,
     pub keys: BTreeMap<String, String>,
     pub detached: Vec<crate::dock::Pane>,
+    pub project: Option<PathBuf>,
+    pub recent_projects: Vec<PathBuf>,
+    pub project_tree: bool,
+    pub remote_tree: bool,
+    pub project_size: bool,
+    pub project_date: bool,
+    pub dictionaries: BTreeMap<String, String>,
+    pub hosts: usize,
     migrated: bool,
     session: Vec<PathBuf>,
     dark: bool,
@@ -106,6 +140,14 @@ impl Default for Settings {
             floats: Vec::new(),
             keys: BTreeMap::new(),
             detached: Vec::new(),
+            project: None,
+            recent_projects: Vec::new(),
+            project_tree: true,
+            remote_tree: false,
+            project_size: false,
+            project_date: false,
+            dictionaries: BTreeMap::new(),
+            hosts: 2,
             migrated: false,
             session: Vec::new(),
             dark: look.dark,
@@ -235,9 +277,8 @@ pub struct KeysEdit<'a> {
 pub fn ui(
     ui: &mut Ui,
     pal: &Palette,
-    look: &mut Look,
-    wrap: &mut bool,
-    keys: KeysEdit,
+    settings: &mut Settings,
+    capturing: &mut Option<usize>,
 ) -> Option<String> {
     let mut note = None;
     let ctx = ui.ctx().clone();
@@ -249,12 +290,152 @@ pub fn ui(
                 .inner_margin(egui::Margin::symmetric(22, 4))
                 .show(ui, |ui| {
                     ui.set_max_width(680.0);
-                    body(ui, pal, look, wrap, &ctx, &mut note);
-                    keys_section(ui, pal, keys, &mut note);
+                    body(ui, pal, &mut settings.look, &mut settings.wrap, &ctx, &mut note);
+                    files_section(ui, pal, settings);
+                    log_section(ui, pal, &mut settings.look);
+                    dictionaries_section(ui, pal, &mut settings.dictionaries);
+                    keys_section(
+                        ui,
+                        pal,
+                        KeysEdit {
+                            custom: &mut settings.keys,
+                            capturing,
+                        },
+                        &mut note,
+                    );
                     ui.add_space(24.0);
                 });
         });
     note
+}
+
+fn files_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
+    heading(
+        ui,
+        pal,
+        "Структура файлов",
+        "Как показывать папки: деревом с раскрывающимися папками или списком одной папки, как в обычном файловом менеджере.",
+    );
+    egui::Grid::new("tror_prefs_files")
+        .num_columns(2)
+        .spacing([22.0, 8.0])
+        .show(ui, |ui| {
+            for (label, value) in [
+                ("Папка проекта", &mut settings.project_tree),
+                ("Удалённые хосты", &mut settings.remote_tree),
+            ] {
+                ui.label(label);
+                ui.horizontal(|ui| {
+                    for (tree, text) in [(true, "Дерево"), (false, "Список")] {
+                        let mut button = Button::new(text);
+                        if *value == tree {
+                            button = button.fill(pal.surface);
+                        }
+                        if ui.add(button).clicked() {
+                            *value = tree;
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+        });
+}
+
+fn log_section(ui: &mut Ui, pal: &Palette, look: &mut Look) {
+    let mode = if look.dark { "тёмной" } else { "светлой" };
+    heading(
+        ui,
+        pal,
+        "Цвета журнала",
+        &format!("Подсветка строк в журнале обмена с сервером, как в NppFTP. Для {mode} темы."),
+    );
+    let current = look.log_colors();
+    let colors = if look.dark {
+        &mut look.log_dark
+    } else {
+        &mut look.log_light
+    };
+    egui::Grid::new("tror_prefs_log")
+        .num_columns(2)
+        .spacing([22.0, 7.0])
+        .show(ui, |ui| {
+            for (index, (key, label, _, _)) in LOG_PARTS.iter().enumerate() {
+                ui.label(*label);
+                ui.horizontal(|ui| {
+                    let c = current[index];
+                    let mut value = [c.r(), c.g(), c.b()];
+                    if color_field(ui, &format!("log:{key}"), &mut value) {
+                        colors.insert((*key).to_owned(), value);
+                    }
+                    if colors.contains_key(*key)
+                        && ui.button("↺").on_hover_text("Цвет по умолчанию").clicked()
+                    {
+                        colors.remove(*key);
+                    }
+                });
+                ui.end_row();
+            }
+        });
+}
+
+const DICTIONARY_LANGS: [(&str, &str); 8] = [
+    ("all", "Все языки"),
+    ("php", "PHP"),
+    ("js", "JavaScript"),
+    ("css", "CSS"),
+    ("html", "HTML и Twig"),
+    ("python", "Python"),
+    ("rust", "Rust"),
+    ("sql", "SQL"),
+];
+
+fn dictionaries_section(ui: &mut Ui, pal: &Palette, dictionaries: &mut BTreeMap<String, String>) {
+    heading(
+        ui,
+        pal,
+        "Словари подсказок",
+        "Свои слова для автодополнения — по одному в строке. Строка вида «имя(параметры)» добавляет и сигнатуру: она появится в подсказке, когда вы наберёте «имя(». После сигнатуры через « — » можно дописать описание.",
+    );
+    let id = ui.scope_id().with("tror_dict_lang");
+    let mut lang: String = ui
+        .data(|d| d.get_temp(id))
+        .unwrap_or_else(|| "php".to_owned());
+    ui.horizontal(|ui| {
+        ui.label("Язык");
+        ComboBox::from_id_salt("tror_dict_combo")
+            .width(180.0)
+            .selected_text(
+                DICTIONARY_LANGS
+                    .iter()
+                    .find(|(key, _)| *key == lang)
+                    .map_or("", |(_, label)| *label),
+            )
+            .show_ui(ui, |ui| {
+                for (key, label) in DICTIONARY_LANGS {
+                    let count = dictionaries
+                        .get(key)
+                        .map_or(0, |t| t.lines().filter(|l| !l.trim().is_empty()).count());
+                    let text = if count > 0 {
+                        format!("{label} ({count})")
+                    } else {
+                        label.to_owned()
+                    };
+                    ui.selectable_value(&mut lang, key.to_owned(), text);
+                }
+            });
+    });
+    ui.data_mut(|d| d.insert_temp(id, lang.clone()));
+    let text = dictionaries.entry(lang.clone()).or_default();
+    ui.add(
+        egui::TextEdit::multiline(text)
+            .font(egui::TextStyle::Monospace)
+            .desired_rows(6)
+            .desired_width(f32::INFINITY)
+            .hint_text("CIBlockElement::GetList($arOrder, $arFilter, $arGroupBy, $arNavStartParams, $arSelectFields) — элементы инфоблока\nLocalRedirect($url)\nmyHelper"),
+    );
+    if dictionaries.get(&lang).is_some_and(|t| t.is_empty()) {
+        dictionaries.remove(&lang);
+    }
 }
 
 fn keys_section(ui: &mut Ui, pal: &Palette, keys: KeysEdit, note: &mut Option<String>) {

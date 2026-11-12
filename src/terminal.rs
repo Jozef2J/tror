@@ -1,14 +1,12 @@
 use eframe::egui::{
-    self, Button, Color32, Event, EventFilter, FontId, Key, Modifiers, Rect, RichText, Sense,
-    Stroke, Ui,
+    self, Color32, Event, EventFilter, FontId, Key, Modifiers, Rect, Sense, Stroke, Ui,
     text::{LayoutJob, TextFormat},
 };
 
-use crate::app::{dialog, dialog_button};
-use crate::remote::{self, Profile, Protocol, Shell, ShellCmd, ShellEvent};
 use crate::theme::Palette;
 
 const SCROLLBACK: usize = 5000;
+const HISTORY: usize = 1024 * 1024;
 
 const DARK: [u32; 16] = [
     0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, 0x585b70,
@@ -19,6 +17,198 @@ const LIGHT: [u32; 16] = [
     0xd20f39, 0x40a02b, 0xb8860b, 0x1e66f5, 0xea76cb, 0x179299, 0x4c4f69,
 ];
 
+pub struct Scheme {
+    pub name: &'static str,
+    pub bg: u32,
+    pub fg: u32,
+    pub cursor: u32,
+    pub selection: u32,
+    pub ansi: [u32; 16],
+}
+
+pub const SCHEMES: &[Scheme] = &[
+    Scheme {
+        name: "Termius Dark",
+        bg: 0x141729,
+        fg: 0xd4d7e3,
+        cursor: 0x21b568,
+        selection: 0x2f3a5c,
+        ansi: [
+            0x343851, 0xf24e50, 0x21b568, 0xfdb200, 0x2d8bff, 0xbb6ffc, 0x00d0d6, 0xd4d7e3,
+            0x6c7086, 0xff6567, 0x2ed47e, 0xffcd47, 0x56a2ff, 0xcb8cff, 0x3fe9ef, 0xffffff,
+        ],
+    },
+    Scheme {
+        name: "Termius Light",
+        bg: 0xffffff,
+        fg: 0x32364a,
+        cursor: 0x1d9e5a,
+        selection: 0xc9dcff,
+        ansi: [
+            0x32364a, 0xd5373d, 0x1d9e5a, 0xc98a00, 0x2672e8, 0x9a52da, 0x0a9ea3, 0x8b8fa3,
+            0x5b6077, 0xf24e50, 0x21b568, 0xe5a100, 0x2d8bff, 0xbb6ffc, 0x00b8bd, 0xb7bacb,
+        ],
+    },
+    Scheme {
+        name: "Dracula",
+        bg: 0x282a36,
+        fg: 0xf8f8f2,
+        cursor: 0xf8f8f2,
+        selection: 0x44475a,
+        ansi: [
+            0x21222c, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xf8f8f2,
+            0x6272a4, 0xff6e6e, 0x69ff94, 0xffffa5, 0xd6acff, 0xff92df, 0xa4ffff, 0xffffff,
+        ],
+    },
+    Scheme {
+        name: "Monokai",
+        bg: 0x272822,
+        fg: 0xf8f8f2,
+        cursor: 0xf8f8f0,
+        selection: 0x49483e,
+        ansi: [
+            0x272822, 0xf92672, 0xa6e22e, 0xf4bf75, 0x66d9ef, 0xae81ff, 0xa1efe4, 0xf8f8f2,
+            0x75715e, 0xf92672, 0xa6e22e, 0xf4bf75, 0x66d9ef, 0xae81ff, 0xa1efe4, 0xf9f8f5,
+        ],
+    },
+    Scheme {
+        name: "Nord",
+        bg: 0x2e3440,
+        fg: 0xd8dee9,
+        cursor: 0xd8dee9,
+        selection: 0x434c5e,
+        ansi: [
+            0x3b4252, 0xbf616a, 0xa3be8c, 0xebcb8b, 0x81a1c1, 0xb48ead, 0x88c0d0, 0xe5e9f0,
+            0x4c566a, 0xbf616a, 0xa3be8c, 0xebcb8b, 0x81a1c1, 0xb48ead, 0x8fbcbb, 0xeceff4,
+        ],
+    },
+    Scheme {
+        name: "Solarized Dark",
+        bg: 0x002b36,
+        fg: 0x839496,
+        cursor: 0x93a1a1,
+        selection: 0x073642,
+        ansi: [
+            0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
+            0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
+        ],
+    },
+    Scheme {
+        name: "Solarized Light",
+        bg: 0xfdf6e3,
+        fg: 0x657b83,
+        cursor: 0x586e75,
+        selection: 0xeee8d5,
+        ansi: [
+            0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
+            0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
+        ],
+    },
+    Scheme {
+        name: "Gruvbox Dark",
+        bg: 0x282828,
+        fg: 0xebdbb2,
+        cursor: 0xebdbb2,
+        selection: 0x504945,
+        ansi: [
+            0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,
+            0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
+        ],
+    },
+    Scheme {
+        name: "One Dark",
+        bg: 0x282c34,
+        fg: 0xabb2bf,
+        cursor: 0x528bff,
+        selection: 0x3e4451,
+        ansi: [
+            0x282c34, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf,
+            0x5c6370, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xffffff,
+        ],
+    },
+    Scheme {
+        name: "Tomorrow Night",
+        bg: 0x1d1f21,
+        fg: 0xc5c8c6,
+        cursor: 0xc5c8c6,
+        selection: 0x373b41,
+        ansi: [
+            0x1d1f21, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6,
+            0x969896, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xffffff,
+        ],
+    },
+    Scheme {
+        name: "Material",
+        bg: 0x263238,
+        fg: 0xeeffff,
+        cursor: 0xffcc00,
+        selection: 0x37474f,
+        ansi: [
+            0x000000, 0xff5370, 0xc3e88d, 0xffcb6b, 0x82aaff, 0xc792ea, 0x89ddff, 0xffffff,
+            0x546e7a, 0xff5370, 0xc3e88d, 0xffcb6b, 0x82aaff, 0xc792ea, 0x89ddff, 0xffffff,
+        ],
+    },
+    Scheme {
+        name: "Catppuccin Mocha",
+        bg: 0x1e1e2e,
+        fg: 0xcdd6f4,
+        cursor: 0xf5e0dc,
+        selection: 0x45475a,
+        ansi: DARK,
+    },
+    Scheme {
+        name: "Catppuccin Latte",
+        bg: 0xeff1f5,
+        fg: 0x4c4f69,
+        cursor: 0xdc8a78,
+        selection: 0xccd0da,
+        ansi: LIGHT,
+    },
+    Scheme {
+        name: "Зелёный монитор",
+        bg: 0x0a0f0a,
+        fg: 0x33ff66,
+        cursor: 0x33ff66,
+        selection: 0x14421f,
+        ansi: [
+            0x0a0f0a, 0x2fd35a, 0x33ff66, 0x7dff9a, 0x1fb84a, 0x52ff7e, 0x8affa8, 0x33ff66,
+            0x1c5a2b, 0x5aff82, 0x8affa8, 0xb3ffc5, 0x4dff79, 0x7dff9a, 0xc9ffd6, 0xe6fff0,
+        ],
+    },
+];
+
+#[derive(Clone, Copy)]
+pub struct Colors {
+    pub bg: Color32,
+    pub fg: Color32,
+    pub cursor: Color32,
+    pub selection: Color32,
+    pub ansi: [Color32; 16],
+}
+
+fn rgb(hex: u32) -> Color32 {
+    Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+pub fn colors(name: &str, pal: &Palette, dark: bool) -> Colors {
+    match SCHEMES.iter().find(|s| s.name == name) {
+        Some(s) => Colors {
+            bg: rgb(s.bg),
+            fg: rgb(s.fg),
+            cursor: rgb(s.cursor),
+            selection: rgb(s.selection),
+            ansi: s.ansi.map(rgb),
+        },
+        None => Colors {
+            bg: pal.base,
+            fg: pal.text,
+            cursor: pal.accent,
+            selection: pal.selection,
+            ansi: if dark { DARK } else { LIGHT }.map(rgb),
+        },
+    }
+}
+
 fn nz(value: u16) -> std::num::NonZeroU16 {
     std::num::NonZeroU16::new(value.max(1)).unwrap_or(std::num::NonZeroU16::MIN)
 }
@@ -27,13 +217,9 @@ fn new_parser(cols: u16, rows: u16) -> vt100::Parser {
     vt100::Parser::new(nz(rows), nz(cols), SCROLLBACK)
 }
 
-fn rgb(hex: u32) -> Color32 {
-    Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
-}
-
-fn indexed(index: u8, dark: bool) -> Color32 {
+fn indexed(index: u8, c: &Colors) -> Color32 {
     match index {
-        0..=15 => rgb(if dark { DARK } else { LIGHT }[index as usize]),
+        0..=15 => c.ansi[index as usize],
         16..=231 => {
             let i = index - 16;
             let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
@@ -46,10 +232,10 @@ fn indexed(index: u8, dark: bool) -> Color32 {
     }
 }
 
-fn resolve(color: vt100::Color, dark: bool) -> Option<Color32> {
+fn resolve(color: vt100::Color, c: &Colors) -> Option<Color32> {
     match color {
         vt100::Color::Default => None,
-        vt100::Color::Idx(i) => Some(indexed(i, dark)),
+        vt100::Color::Idx(i) => Some(indexed(i, c)),
         vt100::Color::Rgb(r, g, b) => Some(Color32::from_rgb(r, g, b)),
     }
 }
@@ -91,228 +277,119 @@ pub fn key_bytes(key: Key, modifiers: Modifiers, app_cursor: bool) -> Option<Vec
         Key::F5 => b"\x1b[15~".to_vec(),
         Key::F6 => b"\x1b[17~".to_vec(),
         Key::F7 => b"\x1b[18~".to_vec(),
+        Key::F8 => b"\x1b[19~".to_vec(),
+        Key::F9 => b"\x1b[20~".to_vec(),
         Key::F10 => b"\x1b[21~".to_vec(),
+        Key::F11 => b"\x1b[23~".to_vec(),
+        Key::F12 => b"\x1b[24~".to_vec(),
         _ => return None,
     })
 }
 
-pub enum TermEvent {
-    Trust { host: String, fingerprint: String },
+pub struct Look<'a> {
+    pub colors: &'a Colors,
+    pub font: FontId,
+    pub cursor: bool,
+    pub active: bool,
 }
 
-pub struct Terminal {
-    pub focused: bool,
-    shell: Option<Shell>,
-    connected: bool,
-    host_key: Option<(String, bool)>,
-    address: String,
+pub struct Screen {
     parser: vt100::Parser,
+    history: Vec<u8>,
     size: (u16, u16),
-    status: String,
     wheel: f32,
-    grab_focus: bool,
     select: Option<((u16, u16), (u16, u16))>,
+    pub grab_focus: bool,
+    pub focused: bool,
 }
 
-impl Terminal {
+impl Screen {
     pub fn new() -> Self {
         Self {
-            focused: false,
-            shell: None,
-            connected: false,
-            host_key: None,
-            address: String::new(),
             parser: new_parser(80, 24),
+            history: Vec::new(),
             size: (80, 24),
-            status: String::new(),
             wheel: 0.0,
-            grab_focus: false,
             select: None,
+            grab_focus: false,
+            focused: false,
         }
     }
 
-    pub fn modal_open(&self) -> bool {
-        self.host_key.is_some()
+    pub fn size(&self) -> (u16, u16) {
+        self.size
     }
 
-    fn connect(&mut self, profile: &Profile, known: Option<String>, ctx: &egui::Context) {
-        let ctx = ctx.clone();
+    pub fn reset(&mut self) {
         self.parser = new_parser(self.size.0, self.size.1);
-        self.address = format!("{}:{}", profile.host.trim(), profile.port);
-        self.shell = Some(remote::open_shell(profile, known, self.size, move || {
-            ctx.request_repaint()
-        }));
-        self.connected = false;
-        self.status = "подключение…".into();
+        self.history.clear();
+        self.select = None;
     }
 
-    fn disconnect(&mut self, status: &str) {
-        self.shell = None;
-        self.connected = false;
-        self.host_key = None;
-        self.status = status.to_owned();
-    }
-
-    fn send(&self, bytes: Vec<u8>) {
-        if let Some(shell) = &self.shell
-            && self.connected
-        {
-            let _ = shell.tx.send(ShellCmd::Input(bytes));
+    pub fn process(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+        self.history.extend_from_slice(bytes);
+        if self.history.len() > HISTORY {
+            let mut cut = self.history.len() - HISTORY / 2;
+            if let Some(nl) = self.history[cut..].iter().position(|b| *b == b'\n') {
+                cut += nl + 1;
+            }
+            self.history.drain(..cut);
         }
     }
 
-    pub fn poll(&mut self) -> Vec<TermEvent> {
-        let mut out = Vec::new();
-        let mut events = Vec::new();
-        if let Some(shell) = &self.shell {
-            while let Ok(event) = shell.rx.try_recv() {
-                events.push(event);
-            }
+    pub fn resize(&mut self, cols: u16, rows: u16) -> bool {
+        if (cols, rows) == self.size {
+            return false;
         }
-        for event in events {
-            match event {
-                ShellEvent::HostKey {
-                    fingerprint,
-                    changed,
-                } => self.host_key = Some((fingerprint, changed)),
-                ShellEvent::Connected { fingerprint } => {
-                    self.connected = true;
-                    self.grab_focus = true;
-                    self.focused = true;
-                    self.status.clear();
-                    if let Some(fingerprint) = fingerprint {
-                        out.push(TermEvent::Trust {
-                            host: self.address.clone(),
-                            fingerprint,
-                        });
-                    }
-                }
-                ShellEvent::Output(bytes) => self.parser.process(&bytes),
-                ShellEvent::Closed(message) => self.disconnect(&message),
-            }
-        }
-        out
+        self.size = (cols, rows);
+        let mut parser = new_parser(cols, rows);
+        parser.process(&self.history);
+        self.parser = parser;
+        self.select = None;
+        true
     }
 
-    pub fn dialogs(&mut self, ctx: &egui::Context, pal: &Palette) {
-        let Some((fingerprint, changed)) = self.host_key.clone() else {
-            return;
-        };
-        let mut answer = None;
-        dialog("tror_shell_host_key", pal).show(ctx, |ui| {
-            ui.set_width(460.0);
-            if changed {
-                ui.label(
-                    RichText::new("Ключ сервера изменился")
-                        .color(pal.warn)
-                        .strong(),
-                );
-                ui.label(
-                    "Сохранённый ключ этого сервера отличается от присланного. Так бывает после \
-                     переустановки сервера, но так же выглядит перехват соединения.",
-                );
-            } else {
-                ui.label(RichText::new("Новый сервер").strong());
-                ui.label(
-                    "К этому серверу вы подключаетесь впервые. Отпечаток его ключа (SHA-256):",
-                );
-            }
-            ui.add_space(4.0);
-            ui.label(RichText::new(&fingerprint).monospace().size(12.0));
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                let accept = if changed {
-                    "Заменить ключ и подключиться"
-                } else {
-                    "Доверять и подключиться"
-                };
-                if dialog_button(ui, pal, accept, !changed) {
-                    answer = Some(true);
-                }
-                if dialog_button(ui, pal, "Отмена", changed) {
-                    answer = Some(false);
-                }
-            });
-        });
-        match answer {
-            Some(true) => {
-                self.host_key = None;
-                if let Some(shell) = &self.shell {
-                    let _ = shell.tx.send(ShellCmd::TrustHost(true));
-                }
-            }
-            Some(false) => self.disconnect("подключение отменено"),
-            None => {}
-        }
+    fn selection(&self) -> Option<((u16, u16), (u16, u16))> {
+        let (a, b) = self.select?;
+        let (start, end) = if a <= b { (a, b) } else { (b, a) };
+        (start != end).then_some((start, end))
     }
 
-    pub fn header(
-        &mut self,
-        ui: &mut Ui,
-        pal: &Palette,
-        profile: Option<&Profile>,
-        known: Option<String>,
-    ) {
-        let ctx = ui.ctx().clone();
-        {
-            if let Some(shell) = &self.shell {
-                ui.label(RichText::new(&shell.host).color(pal.subtext).size(12.5));
-            }
-            if !self.status.is_empty() {
-                ui.label(RichText::new(&self.status).color(pal.faint).size(12.5));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.shell.is_some() {
-                    if ui.add(Button::new("Отключить").fill(pal.surface)).clicked() {
-                        self.disconnect("отключено");
-                    }
-                } else {
-                    match profile {
-                        Some(p) if p.protocol == Protocol::Sftp => {
-                            let label = format!("Подключить: {}", p.name);
-                            if ui.add(Button::new(label).fill(pal.surface)).clicked() {
-                                self.connect(p, known, &ctx);
-                            }
-                        }
-                        Some(_) => {
-                            ui.label(
-                                RichText::new("для консоли выберите профиль SFTP")
-                                    .color(pal.faint)
-                                    .size(12.5),
-                            );
-                        }
-                        None => {
-                            ui.label(
-                                RichText::new("создайте профиль в панели «Удалённые хосты» (F8)")
-                                    .color(pal.faint)
-                                    .size(12.5),
-                            );
-                        }
-                    }
-                }
-            });
-        }
+    pub fn has_selection(&self) -> bool {
+        self.selection().is_some()
     }
 
-    pub fn body(&mut self, ui: &mut Ui, pal: &Palette, dark: bool, font_size: f32) {
-        let font = FontId::monospace(font_size);
-        let (char_w, row_h) = ui.fonts_mut(|f| (f.glyph_width(&font, '0'), f.row_height(&font)));
-        let row_h = row_h.round().max(1.0);
-        let rect = ui.available_rect_before_wrap();
-        ui.allocate_rect(rect, Sense::hover());
-        ui.painter().rect_filled(rect, 0.0, pal.base);
+    pub fn selected_text(&self) -> Option<String> {
+        let ((r0, c0), (r1, c1)) = self.selection()?;
+        let text = self.parser.screen().contents_between(r0, c0, r1, c1);
+        let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+        Some(lines.join("\n"))
+    }
+
+    #[cfg(test)]
+    pub fn text(&self) -> String {
+        self.parser.screen().contents()
+    }
+
+    pub fn grid(&self, font: &FontId, ui: &Ui, rect: Rect) -> (u16, u16) {
+        let (char_w, row_h) = ui.fonts_mut(|f| (f.glyph_width(font, '0'), f.row_height(font)));
         let area = rect.shrink2(egui::vec2(8.0, 4.0));
-        let cols = ((area.width() / char_w) as u16).clamp(20, 400);
-        let rows = ((area.height() / row_h) as u16).clamp(2, 200);
-        if (cols, rows) != self.size {
-            self.size = (cols, rows);
-            self.parser.screen_mut().set_size(nz(rows), nz(cols));
-            if let Some(shell) = &self.shell {
-                let _ = shell.tx.send(ShellCmd::Resize(cols, rows));
-            }
-        }
+        let cols = ((area.width() / char_w.max(1.0)) as u16).clamp(10, 500);
+        let rows = ((area.height() / row_h.round().max(1.0)) as u16).clamp(2, 300);
+        (cols, rows)
+    }
 
-        let id = egui::Id::unique("tror_terminal");
+    pub fn show(&mut self, ui: &mut Ui, rect: Rect, id: egui::Id, look: &Look) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let font = &look.font;
+        let c = look.colors;
+        let (char_w, row_h) = ui.fonts_mut(|f| (f.glyph_width(font, '0'), f.row_height(font)));
+        let row_h = row_h.round().max(1.0);
+        ui.painter().rect_filled(rect, 0.0, c.bg);
+        let area = rect.shrink2(egui::vec2(8.0, 4.0));
+        let (cols, rows) = self.size;
+
         let response = ui.interact(rect, id, Sense::click_and_drag());
         if response.clicked() || response.drag_started() || std::mem::take(&mut self.grab_focus) {
             ui.memory_mut(|m| m.request_focus(id));
@@ -334,13 +411,37 @@ impl Terminal {
             && let (Some(pos), Some((anchor, _))) = (response.interact_pointer_pos(), self.select)
         {
             self.select = Some((anchor, cell_at(pos)));
+        } else if response.double_clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let (row, col) = cell_at(pos);
+            let screen = self.parser.screen();
+            let word = |col: u16| {
+                screen
+                    .cell(row, col)
+                    .is_some_and(|cell| {
+                        let text = cell.contents();
+                        !text.is_empty() && !text.chars().all(char::is_whitespace)
+                    })
+            };
+            let mut from = col.min(cols.saturating_sub(1));
+            let mut to = from;
+            while from > 0 && word(from - 1) {
+                from -= 1;
+            }
+            while to < cols && word(to) {
+                to += 1;
+            }
+            self.select = Some(((row, from), (row, to)));
         } else if response.clicked() {
             self.select = None;
         }
         if response.secondary_clicked() {
-            if self.selection().is_some() {
-                self.copy_selection(ui);
+            if let Some(text) = self.selected_text() {
+                ui.ctx().copy_text(text);
+                self.select = None;
             } else {
+                ui.memory_mut(|m| m.request_focus(id));
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
             }
@@ -358,7 +459,7 @@ impl Terminal {
                     },
                 )
             });
-            self.input(ui);
+            out = self.input(ui);
         }
         if response.hovered() {
             let delta = ui.input(|i| i.smooth_scroll_delta.y);
@@ -376,7 +477,15 @@ impl Terminal {
 
         let screen = self.parser.screen();
         let painter = ui.painter_at(rect);
-        let plain = |color| TextFormat::simple(font.clone(), color);
+        let format = |color, background, underline: bool, italic: bool| {
+            let mut format = TextFormat::simple(font.clone(), color);
+            format.background = background;
+            format.italics = italic;
+            if underline {
+                format.underline = Stroke::new(1.0, color);
+            }
+            format
+        };
         for row in 0..rows {
             if let Some(((r0, c0), (r1, c1))) = selection
                 && row >= r0
@@ -396,24 +505,19 @@ impl Terminal {
                         ),
                     ),
                     0.0,
-                    pal.selection,
+                    c.selection,
                 );
             }
             let mut job = LayoutJob::default();
             job.wrap.max_width = f32::INFINITY;
             let mut run = String::new();
-            let mut run_style: Option<(Color32, Option<Color32>)> = None;
-            let flush = |job: &mut LayoutJob,
-                         run: &mut String,
-                         style: Option<(Color32, Option<Color32>)>| {
-                if let Some((fg, bg)) = style
+            type Style = (Color32, Color32, bool, bool);
+            let mut run_style: Option<Style> = None;
+            let flush = |job: &mut LayoutJob, run: &mut String, style: Option<Style>| {
+                if let Some((fg, bg, underline, italic)) = style
                     && !run.is_empty()
                 {
-                    let mut format = plain(fg);
-                    if let Some(bg) = bg {
-                        format.background = bg;
-                    }
-                    job.append(run, 0.0, format);
+                    job.append(run, 0.0, format(fg, bg, underline, italic));
                     run.clear();
                 }
             };
@@ -424,17 +528,27 @@ impl Terminal {
                 if cell.is_wide_continuation() {
                     continue;
                 }
-                let mut fg = resolve(cell.fgcolor(), dark).unwrap_or(pal.text);
-                let mut bg = resolve(cell.bgcolor(), dark);
+                let mut fg = resolve(cell.fgcolor(), c).unwrap_or(c.fg);
+                if cell.bold()
+                    && let vt100::Color::Idx(i @ 0..=7) = cell.fgcolor()
+                {
+                    fg = indexed(i + 8, c);
+                }
+                let mut bg = resolve(cell.bgcolor(), c);
                 if cell.inverse() {
                     let old_fg = fg;
-                    fg = bg.unwrap_or(pal.base);
+                    fg = bg.unwrap_or(c.bg);
                     bg = Some(old_fg);
                 }
                 if cell.dim() {
                     fg = fg.gamma_multiply(0.65);
                 }
-                let style = Some((fg, bg));
+                let style = Some((
+                    fg,
+                    bg.unwrap_or(Color32::TRANSPARENT),
+                    cell.underline(),
+                    cell.italic(),
+                ));
                 if style != run_style {
                     flush(&mut job, &mut run, run_style);
                     run_style = style;
@@ -456,11 +570,11 @@ impl Terminal {
                 painter.galley(
                     egui::pos2(area.left(), area.top() + row as f32 * row_h),
                     galley,
-                    pal.text,
+                    c.fg,
                 );
             }
         }
-        if self.connected && !screen.hide_cursor() && screen.scrollback() == 0 {
+        if look.cursor && !screen.hide_cursor() && screen.scrollback() == 0 {
             let (row, col) = screen.cursor_position();
             let cursor = Rect::from_min_size(
                 egui::pos2(
@@ -470,23 +584,32 @@ impl Terminal {
                 egui::vec2(char_w, row_h),
             );
             if self.focused {
-                painter.rect_filled(cursor, 1.0, pal.accent.gamma_multiply(0.55));
+                painter.rect_filled(cursor, 1.0, c.cursor.gamma_multiply(0.6));
             } else {
                 painter.rect_stroke(
                     cursor,
                     1.0,
-                    Stroke::new(1.0, pal.faint),
+                    Stroke::new(1.0, c.cursor.gamma_multiply(0.7)),
                     egui::StrokeKind::Inside,
                 );
             }
         }
+        if look.active {
+            painter.rect_stroke(
+                rect.shrink(0.5),
+                0.0,
+                Stroke::new(1.0, c.cursor.gamma_multiply(0.5)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        out
     }
 
-    fn input(&mut self, ui: &Ui) {
+    fn input(&mut self, ui: &Ui) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
         let events = ui.input(|i| i.events.clone());
         let app_cursor = self.parser.screen().application_cursor();
         let bracketed = self.parser.screen().bracketed_paste();
-        let mut typed = false;
         for event in events {
             let bytes = match event {
                 Event::Text(text) => Some(text.into_bytes()),
@@ -499,8 +622,11 @@ impl Terminal {
                         text.into_bytes()
                     })
                 }
-                Event::Copy if self.select.is_some() => {
-                    self.copy_selection(ui);
+                Event::Copy if self.has_selection() => {
+                    if let Some(text) = self.selected_text() {
+                        ui.ctx().copy_text(text);
+                    }
+                    self.select = None;
                     None
                 }
                 Event::Copy => Some(vec![0x03]),
@@ -516,29 +642,14 @@ impl Terminal {
             if let Some(bytes) = bytes
                 && !bytes.is_empty()
             {
-                self.send(bytes);
-                typed = true;
+                out.push(bytes);
             }
         }
-        if typed {
+        if !out.is_empty() {
             self.parser.screen_mut().set_scrollback(0);
             self.select = None;
         }
-    }
-
-    fn selection(&self) -> Option<((u16, u16), (u16, u16))> {
-        let (a, b) = self.select?;
-        let (start, end) = if a <= b { (a, b) } else { (b, a) };
-        (start != end).then_some((start, end))
-    }
-
-    fn copy_selection(&mut self, ui: &Ui) {
-        if let Some(((r0, c0), (r1, c1))) = self.selection() {
-            let text = self.parser.screen().contents_between(r0, c0, r1, c1);
-            let text: Vec<&str> = text.lines().map(str::trim_end).collect();
-            ui.ctx().copy_text(text.join("\n"));
-        }
-        self.select = None;
+        out
     }
 }
 
@@ -569,20 +680,42 @@ mod tests {
 
     #[test]
     fn palette_covers_all_indices() {
-        assert_eq!(indexed(16, true), Color32::from_rgb(0, 0, 0));
-        assert_eq!(indexed(231, true), Color32::from_rgb(255, 255, 255));
-        assert_eq!(indexed(232, true), Color32::from_rgb(8, 8, 8));
-        assert_eq!(indexed(255, true), Color32::from_rgb(238, 238, 238));
-        assert_ne!(indexed(1, true), indexed(1, false));
+        let pal = crate::theme::palette(true, 0, &Default::default());
+        let dark = colors("", &pal, true);
+        let light = colors("", &pal, false);
+        assert_eq!(indexed(16, &dark), Color32::from_rgb(0, 0, 0));
+        assert_eq!(indexed(231, &dark), Color32::from_rgb(255, 255, 255));
+        assert_eq!(indexed(232, &dark), Color32::from_rgb(8, 8, 8));
+        assert_eq!(indexed(255, &dark), Color32::from_rgb(238, 238, 238));
+        assert_ne!(indexed(1, &dark), indexed(1, &light));
+        let dracula = colors("Dracula", &pal, true);
+        assert_eq!(dracula.bg, Color32::from_rgb(0x28, 0x2a, 0x36));
+        assert!(SCHEMES.iter().all(|s| !s.name.is_empty()));
     }
 
     #[test]
     fn output_is_parsed_into_cells_with_colors() {
-        let mut t = Terminal::new();
-        t.parser.process(b"ok \x1b[31mred\x1b[0m\r\n$ ");
+        let mut t = Screen::new();
+        t.process(b"ok \x1b[31mred\x1b[0m\r\n$ ");
         let screen = t.parser.screen();
         assert_eq!(screen.cell(0, 0).unwrap().contents(), "o");
         assert_eq!(screen.cell(0, 3).unwrap().fgcolor(), vt100::Color::Idx(1));
         assert_eq!(screen.cursor_position(), (1, 2));
+    }
+
+    #[test]
+    fn shrinking_and_growing_keeps_all_output() {
+        let mut t = Screen::new();
+        let line = "0123456789".repeat(7);
+        for i in 0..5 {
+            t.process(format!("{i}:{line}\r\n").as_bytes());
+        }
+        t.resize(20, 6);
+        t.resize(30, 4);
+        t.resize(120, 24);
+        let text = t.text();
+        for i in 0..5 {
+            assert!(text.contains(&format!("{i}:{line}")), "{text}");
+        }
     }
 }

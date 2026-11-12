@@ -130,10 +130,33 @@ pub fn medium() -> egui::FontFamily {
     egui::FontFamily::Name("medium".into())
 }
 
+static TERM_FONTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static PENDING_FONTS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+pub fn commit_term_fonts() {
+    if let Some(list) = PENDING_FONTS.lock().ok().and_then(|mut p| p.take())
+        && let Ok(mut fonts) = TERM_FONTS.lock()
+    {
+        *fonts = list;
+    }
+}
+
+pub fn term_family(path: &str) -> Option<egui::FontFamily> {
+    if path.is_empty() {
+        return None;
+    }
+    let fonts = TERM_FONTS.lock().ok()?;
+    fonts
+        .iter()
+        .position(|p| p == path)
+        .map(|i| egui::FontFamily::Name(format!("term{i}").into()))
+}
+
 pub fn install_fonts(
     ctx: &egui::Context,
     ui_font: Option<&Path>,
     code_font: Option<&Path>,
+    term_fonts: &[std::path::PathBuf],
 ) -> Result<(), String> {
     use egui::{FontData, FontDefinitions, FontFamily};
     let mut fonts = FontDefinitions::default();
@@ -202,7 +225,30 @@ pub fn install_fonts(
     } else {
         with(FontFamily::Monospace, &["jbmono", "Hack"]);
     }
+    let mut registered = Vec::new();
+    for path in term_fonts {
+        let name = format!("term-font-{}", registered.len());
+        if let Ok(bytes) = std::fs::read(path)
+            && bytes.len() > 4
+            && matches!(&bytes[..4], [0, 1, 0, 0] | b"OTTO" | b"true" | b"ttcf")
+        {
+            fonts
+                .font_data
+                .insert(name.clone(), std::sync::Arc::new(FontData::from_owned(bytes)));
+            let family = FontFamily::Name(format!("term{}", registered.len()).into());
+            let mut list = vec![name, "jbmono".to_owned(), "Hack".to_owned()];
+            list.extend(fallback.iter().cloned());
+            fonts.families.insert(family, list);
+            registered.push(path.display().to_string());
+        }
+    }
     ctx.set_fonts(fonts);
+    if let Ok(mut list) = TERM_FONTS.lock() {
+        list.clear();
+    }
+    if let Ok(mut pending) = PENDING_FONTS.lock() {
+        *pending = Some(registered);
+    }
     failed.map_or(Ok(()), Err)
 }
 
