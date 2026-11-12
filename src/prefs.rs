@@ -84,6 +84,8 @@ pub struct Settings {
     pub recent: Vec<PathBuf>,
     pub open: Vec<(u64, PathBuf)>,
     pub active: usize,
+    pub floats: crate::dock::Floats,
+    pub keys: BTreeMap<String, String>,
     migrated: bool,
     session: Vec<PathBuf>,
     dark: bool,
@@ -100,6 +102,8 @@ impl Default for Settings {
             recent: Vec::new(),
             open: Vec::new(),
             active: 0,
+            floats: Vec::new(),
+            keys: BTreeMap::new(),
             migrated: false,
             session: Vec::new(),
             dark: look.dark,
@@ -221,7 +225,18 @@ fn font_row(ui: &mut Ui, pal: &Palette, label: &str, builtin: &str, font: &mut O
     ui.end_row();
 }
 
-pub fn ui(ui: &mut Ui, pal: &Palette, look: &mut Look, wrap: &mut bool) -> Option<String> {
+pub struct KeysEdit<'a> {
+    pub custom: &'a mut BTreeMap<String, String>,
+    pub capturing: &'a mut Option<usize>,
+}
+
+pub fn ui(
+    ui: &mut Ui,
+    pal: &Palette,
+    look: &mut Look,
+    wrap: &mut bool,
+    keys: KeysEdit,
+) -> Option<String> {
     let mut note = None;
     let ctx = ui.ctx().clone();
     ScrollArea::vertical()
@@ -233,10 +248,111 @@ pub fn ui(ui: &mut Ui, pal: &Palette, look: &mut Look, wrap: &mut bool) -> Optio
                 .show(ui, |ui| {
                     ui.set_max_width(680.0);
                     body(ui, pal, look, wrap, &ctx, &mut note);
+                    keys_section(ui, pal, keys, &mut note);
                     ui.add_space(24.0);
                 });
         });
     note
+}
+
+fn keys_section(ui: &mut Ui, pal: &Palette, keys: KeysEdit, note: &mut Option<String>) {
+    use crate::keys::{self, COMMANDS};
+    heading(
+        ui,
+        pal,
+        "Горячие клавиши",
+        "Нажмите на сочетание и введите новое. Esc — отмена. Подходят сочетания с Ctrl или Alt и клавиши F1–F12.",
+    );
+    let current: Vec<String> = COMMANDS
+        .iter()
+        .map(|(id, _, default, _)| {
+            keys.custom
+                .get(*id)
+                .cloned()
+                .unwrap_or_else(|| (*default).to_owned())
+        })
+        .collect();
+    if let Some(index) = *keys.capturing {
+        let pressed = ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => Some(egui::KeyboardShortcut::new(*modifiers, *key)),
+                _ => None,
+            })
+        });
+        if let Some(shortcut) = pressed {
+            *keys.capturing = None;
+            if shortcut.logical_key != egui::Key::Escape {
+                let text = keys::format(&shortcut).replace('⌘', "Ctrl");
+                let taken = current
+                    .iter()
+                    .position(|c| keys::parse(c) == keys::parse(&text))
+                    .filter(|other| *other != index);
+                if !keys::usable(&shortcut) {
+                    *note = Some(format!(
+                        "{text}: нужно сочетание с Ctrl или Alt либо F1–F12"
+                    ));
+                } else if let Some(other) = taken {
+                    *note = Some(format!("{text} уже занято: {}", COMMANDS[other].1));
+                } else {
+                    keys.custom.insert(COMMANDS[index].0.to_owned(), text);
+                }
+            }
+        }
+    }
+    egui::Grid::new("tror_prefs_keys")
+        .num_columns(2)
+        .spacing([22.0, 6.0])
+        .show(ui, |ui| {
+            for (index, (id, label, default, _)) in COMMANDS.iter().enumerate() {
+                ui.label(*label);
+                ui.horizontal(|ui| {
+                    let capturing = *keys.capturing == Some(index);
+                    let text = if capturing {
+                        "нажмите сочетание…".to_owned()
+                    } else if current[index].is_empty() {
+                        "не задано".to_owned()
+                    } else {
+                        keys::parse(&current[index])
+                            .map(|s| keys::format(&s))
+                            .unwrap_or_else(|| current[index].clone())
+                    };
+                    let color = if capturing {
+                        pal.accent
+                    } else if current[index].is_empty() {
+                        pal.faint
+                    } else {
+                        pal.text
+                    };
+                    let button = Button::new(RichText::new(text).color(color))
+                        .fill(pal.surface)
+                        .min_size(egui::vec2(150.0, 0.0));
+                    if ui.add(button).clicked() {
+                        *keys.capturing = if capturing { None } else { Some(index) };
+                    }
+                    if !current[index].is_empty() && ui.button("Убрать").clicked() {
+                        keys.custom.insert((*id).to_owned(), String::new());
+                    }
+                    if keys.custom.contains_key(*id)
+                        && ui
+                            .button("↺")
+                            .on_hover_text(if default.is_empty() {
+                                "По умолчанию: не задано".to_owned()
+                            } else {
+                                format!("По умолчанию: {default}")
+                            })
+                            .clicked()
+                    {
+                        keys.custom.remove(*id);
+                    }
+                });
+                ui.end_row();
+            }
+        });
 }
 
 fn body(

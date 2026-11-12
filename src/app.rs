@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{
-    self, Align, Button, CentralPanel, Color32, FontId, Frame, Key, KeyboardShortcut, Layout,
-    Margin, MenuBar, Modal, Modifiers, Panel, PopupCloseBehavior, Rect, RichText, ScrollArea,
-    Sense, Stroke, TextEdit, Ui, ViewportCommand,
+    self, Align, Button, CentralPanel, Color32, FontId, Frame, Key, Layout, Margin, MenuBar, Modal,
+    Modifiers, Panel, PopupCloseBehavior, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui,
+    ViewportCommand,
     containers::menu::{MenuButton, MenuConfig},
 };
 use egui_stack::{DockArea, DockState, TabViewer};
@@ -72,6 +72,9 @@ enum Action {
     Preview,
     Compare,
     Goto(u64, usize),
+    Plugin(usize),
+    PluginsFolder,
+    PluginsReload,
     NextTab,
     PrevTab,
 }
@@ -100,7 +103,7 @@ pub(crate) fn dialog_button(ui: &mut Ui, pal: &Palette, text: &str, primary: boo
     .clicked()
 }
 
-pub(crate) fn dialog(id: &'static str, pal: &Palette) -> Modal {
+pub(crate) fn dialog(id: impl std::hash::Hash + std::fmt::Debug, pal: &Palette) -> Modal {
     Modal::new(egui::Id::unique(id)).frame(
         Frame::new()
             .fill(pal.mantle)
@@ -195,12 +198,16 @@ pub struct TrorApp {
     search: SearchState,
     complete: Completion,
     remote: RemotePanel,
+    remote2: RemotePanel,
+    log: Vec<(String, bool)>,
     terminal: Terminal,
     dock: DockState<Pane>,
     diff: DiffPanel,
     db: DbPanel,
     preview: Preview,
+    plugins: crate::plugins::Plugins,
     console_shown: bool,
+    settings_shown: bool,
     logo: Option<egui::TextureHandle>,
     ctx: egui::Context,
     checked: (u64, bool),
@@ -211,6 +218,7 @@ pub struct TrorApp {
     lang_filter: String,
     toast: Option<(String, f64)>,
     applied: Option<Look>,
+    capturing: Option<usize>,
 }
 
 impl TrorApp {
@@ -237,13 +245,19 @@ impl TrorApp {
             settings,
             search: SearchState::default(),
             complete: Completion::default(),
-            remote: RemotePanel::new(false),
+            remote: RemotePanel::new(0),
+            remote2: RemotePanel::new(1),
+            log: Vec::new(),
             terminal: Terminal::new(),
             dock,
             diff: DiffPanel::default(),
             db: DbPanel::default(),
             preview: Preview::default(),
+            plugins: crate::plugins::Plugins::new(
+                eframe::storage_dir("Tror").map(|dir| dir.join("plugins")),
+            ),
             console_shown: false,
+            settings_shown: false,
             logo: eframe::icon_data::from_png_bytes(include_bytes!("../assets/tror.png"))
                 .ok()
                 .map(|icon| {
@@ -263,6 +277,7 @@ impl TrorApp {
             lang_filter: String::new(),
             toast: None,
             applied: None,
+            capturing: None,
         };
         let open = std::mem::take(&mut app.settings.open);
         let active = app.settings.active;
@@ -282,6 +297,115 @@ impl TrorApp {
             app.open_path(&path, 0.0);
         }
         app
+    }
+
+    fn run_plugin(&mut self, index: usize, ctx: &egui::Context) {
+        use crate::plugins::{Context, Input};
+        let now = ctx.input(|i| i.time);
+        let Some(plugin) = self.plugins.list.get(index).cloned() else {
+            return;
+        };
+        let doc = self.docs.get(self.active);
+        if doc.is_none() && plugin.input != Input::None {
+            self.notify(
+                format!("Плагину «{}» нужен открытый файл", plugin.name),
+                now,
+            );
+            return;
+        }
+        let mut context = Context {
+            file: String::new(),
+            dir: None,
+            line: 1,
+            column: 1,
+            syntax: String::new(),
+        };
+        let mut input = String::new();
+        let mut range = 0..0;
+        let (mut id, mut version) = (0, 0);
+        if let Some(doc) = doc {
+            let (line, column) = doc.cursor_line_col();
+            context = Context {
+                file: doc.location().unwrap_or_default(),
+                dir: doc
+                    .path
+                    .as_deref()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.to_path_buf()),
+                line,
+                column,
+                syntax: doc.syntax.clone(),
+            };
+            range = match plugin.input {
+                Input::Selection if doc.has_selection() => doc.selection(),
+                Input::None => doc.selection(),
+                _ => 0..doc.len(),
+            };
+            if plugin.input != Input::None {
+                input = doc.rope.slice(range.clone()).to_string();
+            }
+            id = doc.id;
+            version = doc.version;
+        }
+        let wake = ctx.clone();
+        self.plugins
+            .start(plugin, context, input, (id, version), range, move || {
+                wake.request_repaint()
+            });
+    }
+
+    fn plugin_results(&mut self, now: f64) {
+        use crate::plugins::Output;
+        for done in self.plugins.poll() {
+            let name = done.plugin.name.clone();
+            for line in done.stderr.lines() {
+                crate::trace::line(format!("[plugin {name}] {line}"), done.result.is_err());
+            }
+            let text = match done.result {
+                Ok(text) => text,
+                Err(e) => {
+                    crate::trace::line(format!("[plugin {name}] {e}"), true);
+                    self.notify(format!("Плагин «{name}»: {e}"), now);
+                    continue;
+                }
+            };
+            let doc = self.docs.iter_mut().find(|d| d.id == done.doc);
+            match (done.plugin.output, doc) {
+                (Output::None, _) => {}
+                (Output::Message, _) => {
+                    for line in text.lines() {
+                        crate::trace::line(format!("[plugin {name}] {line}"), false);
+                    }
+                    let first = text.lines().next().unwrap_or("готово").to_owned();
+                    self.notify(format!("{name}: {first}"), now);
+                }
+                (Output::NewTab, _) => {
+                    self.new_doc();
+                    if let Some(doc) = self.docs.last_mut() {
+                        doc.insert_text(&text);
+                        doc.move_to(0, false);
+                    }
+                }
+                (Output::Replace | Output::Insert, Some(doc)) if doc.version == done.version => {
+                    let source = doc.rope.slice(done.range.clone()).to_string();
+                    let text = match text.strip_suffix('\n') {
+                        Some(cut) if !source.ends_with('\n') => {
+                            cut.strip_suffix('\r').unwrap_or(cut)
+                        }
+                        _ => &text,
+                    };
+                    if done.plugin.output == Output::Insert {
+                        doc.insert_text(text);
+                    } else if source != text {
+                        doc.replace(done.range, text, crate::document::EditKind::Other);
+                    }
+                }
+                _ => self.notify(
+                    format!("Плагин «{name}»: файл изменился или закрыт, результат не применён"),
+                    now,
+                ),
+            }
+        }
     }
 
     fn palette(&self) -> Palette {
@@ -365,10 +489,42 @@ impl TrorApp {
         }
     }
 
-    fn remote_events(&mut self, ctx: &egui::Context, events: Vec<PanelEvent>) {
+    fn transfers(&mut self) {
+        fn push(from: &mut RemotePanel, to: &RemotePanel) {
+            if let Some(files) = from.outgoing.take()
+                && to.peer_label().is_some()
+            {
+                from.relay(files, to.cwd());
+            }
+        }
+        push(&mut self.remote, &self.remote2);
+        push(&mut self.remote2, &self.remote);
+        if let Some(dragged) = self.remote.incoming.take() {
+            let dir = self.remote.cwd().to_owned();
+            self.remote2.relay(dragged.paths, &dir);
+        }
+        if let Some(dragged) = self.remote2.incoming.take() {
+            let dir = self.remote2.cwd().to_owned();
+            self.remote.relay(dragged.paths, &dir);
+        }
+    }
+
+    fn remote_events(&mut self, ctx: &egui::Context, events: Vec<PanelEvent>, from: usize) {
         let now = ctx.input(|i| i.time);
         for event in events {
             match event {
+                PanelEvent::Relay { path, data } => {
+                    let target = if from == 0 {
+                        &mut self.remote2
+                    } else {
+                        &mut self.remote
+                    };
+                    if target.peer_label().is_some() {
+                        target.receive(path, data);
+                    } else {
+                        self.notify("Передача отменена: второй сервер отключён", now);
+                    }
+                }
                 PanelEvent::Toast(text) => self.notify(text, now),
                 PanelEvent::OpenLocal(paths) => {
                     for path in paths {
@@ -458,6 +614,7 @@ impl TrorApp {
             && self.confirm.is_none()
             && self.goto.is_none()
             && !self.remote.modal_open()
+            && !self.remote2.modal_open()
         {
             self.confirm = Some(Confirm::Missing(doc.id));
         }
@@ -492,9 +649,12 @@ impl TrorApp {
         };
         if let Some((profile, path)) = doc.remote.clone() {
             let ctx = self.ctx.clone();
-            let result =
-                self.remote
-                    .upload(&ctx, &profile, &path, doc.encoded(), (doc.id, doc.version));
+            let panel = if self.remote2.serves(&profile) && !self.remote.serves(&profile) {
+                &mut self.remote2
+            } else {
+                &mut self.remote
+            };
+            let result = panel.upload(&ctx, &profile, &path, doc.encoded(), (doc.id, doc.version));
             match result {
                 Ok(text) => self.notify(text, now),
                 Err(e) => self.notify(format!("Не сохранено: {e}"), now),
@@ -664,8 +824,8 @@ impl TrorApp {
             }
             Action::ToggleTheme => self.settings.look.dark = !self.settings.look.dark,
             Action::ToggleWrap => self.settings.wrap = !self.settings.wrap,
-            Action::Toggle(pane) => dock::toggle(&mut self.dock, pane),
-            Action::Show(pane) => dock::show(&mut self.dock, pane),
+            Action::Toggle(pane) => dock::toggle(&mut self.dock, pane, &self.settings.floats),
+            Action::Show(pane) => dock::show(&mut self.dock, pane, &self.settings.floats),
             Action::ResetLayout => {
                 self.dock = dock::new();
                 self.focus_editor = true;
@@ -701,7 +861,37 @@ impl TrorApp {
                             .map(|d| d.id);
                     }
                 }
-                dock::show(&mut self.dock, Pane::Diff);
+                dock::show(&mut self.dock, Pane::Diff, &self.settings.floats);
+            }
+            Action::Plugin(index) => self.run_plugin(index, ctx),
+            Action::PluginsFolder => {
+                let opened = self
+                    .plugins
+                    .prepare()
+                    .and_then(|dir| preview::open_folder(&dir).map(|()| dir));
+                match opened {
+                    Ok(dir) => self.notify(format!("Папка плагинов: {}", dir.display()), now),
+                    Err(e) => self.notify(format!("Папка плагинов: {e}"), now),
+                }
+            }
+            Action::PluginsReload => {
+                self.plugins.reload();
+                let errors = self.plugins.errors.clone();
+                for error in &errors {
+                    crate::trace::line(format!("[plugin] {error}"), true);
+                }
+                self.notify(
+                    if errors.is_empty() {
+                        format!("Плагинов загружено: {}", self.plugins.list.len())
+                    } else {
+                        format!(
+                            "Плагинов загружено: {}, с ошибками: {} (подробности в журнале)",
+                            self.plugins.list.len(),
+                            errors.len()
+                        )
+                    },
+                    now,
+                );
             }
             Action::Goto(id, line) => {
                 if let Some(i) = self.docs.iter().position(|d| d.id == id) {
@@ -726,56 +916,54 @@ impl TrorApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        let cmd = Modifiers::COMMAND;
-        let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-        let table = [
-            (cmd_shift, Key::S, 0),
-            (cmd_shift, Key::Tab, 1),
-            (cmd, Key::N, 2),
-            (cmd, Key::O, 3),
-            (cmd, Key::S, 4),
-            (cmd, Key::W, 5),
-            (cmd, Key::F, 6),
-            (cmd, Key::H, 7),
-            (cmd, Key::G, 8),
-            (cmd, Key::Comma, 15),
-            (Modifiers::NONE, Key::F8, 12),
-            (Modifiers::NONE, Key::F9, 13),
-            (Modifiers::NONE, Key::F12, 16),
-            (Modifiers::ALT, Key::Z, 14),
-            (cmd, Key::Tab, 9),
-            (Modifiers::SHIFT, Key::F3, 10),
-            (Modifiers::NONE, Key::F3, 11),
-        ];
-        for (modifiers, key, code) in table {
-            if self.terminal.focused && code < 12 {
+        if self.capturing.is_some() {
+            return;
+        }
+        let keys = crate::keys::Keys::new(&self.settings.keys);
+        for (index, shortcut) in keys.bound() {
+            let (id, _, _, editing) = crate::keys::COMMANDS[*index];
+            if self.terminal.focused && editing {
                 continue;
             }
-            if !ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key))) {
+            if !ctx.input_mut(|i| i.consume_shortcut(shortcut)) {
                 continue;
             }
-            actions.push(match code {
-                0 => Action::SaveAs,
-                1 => Action::PrevTab,
-                2 => Action::New,
-                3 => Action::Open,
-                4 => Action::Save,
-                5 => Action::CloseTab(self.active),
-                6 => Action::Find,
-                7 => Action::Replace,
-                8 => Action::GotoLine,
-                12 => Action::Toggle(Pane::Hosts),
-                13 => Action::Toggle(Pane::Console),
-                15 => Action::Show(Pane::Settings),
-                16 => Action::Preview,
-                14 => {
-                    ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
-                    Action::ToggleWrap
-                }
-                9 => Action::NextTab,
-                10 => Action::FindPrev,
-                _ => Action::FindNext,
+            if shortcut.modifiers.alt {
+                ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
+            }
+            actions.push(match id {
+                "new" => Action::New,
+                "open" => Action::Open,
+                "save" => Action::Save,
+                "save_as" => Action::SaveAs,
+                "save_all" => Action::SaveAll,
+                "close_tab" => Action::CloseTab(self.active),
+                "next_tab" => Action::NextTab,
+                "prev_tab" => Action::PrevTab,
+                "find" => Action::Find,
+                "replace" => Action::Replace,
+                "find_next" => Action::FindNext,
+                "find_prev" => Action::FindPrev,
+                "goto" => Action::GotoLine,
+                "wrap" => Action::ToggleWrap,
+                "theme" => Action::ToggleTheme,
+                "settings" => Action::Show(Pane::Settings),
+                "hosts" => Action::Toggle(Pane::Hosts),
+                "console" => Action::Toggle(Pane::Console),
+                "log" => Action::Toggle(Pane::Log),
+                "server_search" => Action::Toggle(Pane::ServerSearch),
+                "db" => Action::Toggle(Pane::Db),
+                "compare" => Action::Compare,
+                _ => Action::Preview,
             });
+        }
+        for (index, plugin) in self.plugins.list.iter().enumerate() {
+            if let Some(shortcut) = crate::keys::parse(&plugin.shortcut)
+                && crate::keys::usable(&shortcut)
+                && ctx.input_mut(|i| i.consume_shortcut(&shortcut))
+            {
+                actions.push(Action::Plugin(index));
+            }
         }
         if self.search.open
             && self.goto.is_none()
@@ -793,13 +981,8 @@ impl TrorApp {
             ui.add_enabled(enabled, Button::new(label).shortcut_text(shortcut))
                 .clicked()
         };
-        let key = |s: &str| {
-            if cfg!(target_os = "macos") {
-                s.replace("Ctrl", "⌘")
-            } else {
-                s.to_owned()
-            }
-        };
+        let keys = crate::keys::Keys::new(&self.settings.keys);
+        let key = |id: &str| keys.label(id);
         MenuBar::new().ui(ui, |ui| {
             if let Some(logo) = &self.logo {
                 ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(18.0, 18.0)));
@@ -807,10 +990,10 @@ impl TrorApp {
             }
             ui.menu_button("Файл", |ui| {
                 ui.set_min_width(240.0);
-                if item(ui, "Новый", &key("Ctrl+N"), true) {
+                if item(ui, "Новый", &key("new"), true) {
                     actions.push(Action::New);
                 }
-                if item(ui, "Открыть…", &key("Ctrl+O"), true) {
+                if item(ui, "Открыть…", &key("open"), true) {
                     actions.push(Action::Open);
                 }
                 ui.menu_button("Недавние", |ui| {
@@ -824,24 +1007,24 @@ impl TrorApp {
                     }
                 });
                 ui.separator();
-                if item(ui, "Сохранить", &key("Ctrl+S"), has_doc) {
+                if item(ui, "Сохранить", &key("save"), has_doc) {
                     actions.push(Action::Save);
                 }
-                if item(ui, "Сохранить как…", &key("Ctrl+Shift+S"), has_doc) {
+                if item(ui, "Сохранить как…", &key("save_as"), has_doc) {
                     actions.push(Action::SaveAs);
                 }
                 if item(ui, "Сохранить все", "", has_doc) {
                     actions.push(Action::SaveAll);
                 }
                 ui.separator();
-                if item(ui, "Закрыть вкладку", &key("Ctrl+W"), has_doc) {
+                if item(ui, "Закрыть вкладку", &key("close_tab"), has_doc) {
                     actions.push(Action::CloseTab(self.active));
                 }
                 if item(ui, "Закрыть все", "", has_doc) {
                     actions.push(Action::CloseAll);
                 }
                 ui.separator();
-                if item(ui, "Настройки", &key("Ctrl+,"), true) {
+                if item(ui, "Настройки", &key("settings"), true) {
                     actions.push(Action::Show(Pane::Settings));
                 }
                 ui.separator();
@@ -851,10 +1034,10 @@ impl TrorApp {
             });
             ui.menu_button("Поиск", |ui| {
                 ui.set_min_width(240.0);
-                if item(ui, "Найти…", &key("Ctrl+F"), has_doc) {
+                if item(ui, "Найти…", &key("find"), has_doc) {
                     actions.push(Action::Find);
                 }
-                if item(ui, "Заменить…", &key("Ctrl+H"), has_doc) {
+                if item(ui, "Заменить…", &key("replace"), has_doc) {
                     actions.push(Action::Replace);
                 }
                 if item(ui, "Найти далее", "F3", has_doc) {
@@ -864,7 +1047,7 @@ impl TrorApp {
                     actions.push(Action::FindPrev);
                 }
                 ui.separator();
-                if item(ui, "Перейти к строке…", &key("Ctrl+G"), has_doc) {
+                if item(ui, "Перейти к строке…", &key("goto"), has_doc) {
                     actions.push(Action::GotoLine);
                 }
             });
@@ -883,7 +1066,7 @@ impl TrorApp {
                 } else {
                     "Перенос строк"
                 };
-                if item(ui, wrap, "Alt+Z", true) {
+                if item(ui, wrap, &key("wrap"), true) {
                     actions.push(Action::ToggleWrap);
                 }
                 ui.separator();
@@ -892,17 +1075,28 @@ impl TrorApp {
                         Pane::Hosts,
                         "Удалённые хосты (SFTP/FTP)",
                         "Скрыть удалённые хосты",
-                        "F8",
+                        "hosts",
                     ),
-                    (Pane::Console, "SSH-консоль", "Скрыть SSH-консоль", "F9"),
-                    (Pane::Log, "Журнал", "Скрыть журнал", ""),
+                    (
+                        Pane::Hosts2,
+                        "Второе подключение (SFTP/FTP)",
+                        "Скрыть второе подключение",
+                        "",
+                    ),
+                    (
+                        Pane::Console,
+                        "SSH-консоль",
+                        "Скрыть SSH-консоль",
+                        "console",
+                    ),
+                    (Pane::Log, "Журнал", "Скрыть журнал", "log"),
                     (
                         Pane::ServerSearch,
                         "Поиск на сервере",
                         "Скрыть поиск на сервере",
-                        "",
+                        "server_search",
                     ),
-                    (Pane::Db, "База данных", "Скрыть базу данных", ""),
+                    (Pane::Db, "База данных", "Скрыть базу данных", "db"),
                     (
                         Pane::Diff,
                         "Сравнение файлов",
@@ -917,7 +1111,7 @@ impl TrorApp {
                     } else {
                         show
                     };
-                    if item(ui, label, shortcut, true) {
+                    if item(ui, label, &key(shortcut), true) {
                         actions.push(Action::Toggle(pane));
                     }
                 }
@@ -926,14 +1120,16 @@ impl TrorApp {
                     actions.push(Action::ResetLayout);
                 }
                 ui.separator();
-                ui.weak(key("Масштаб: Ctrl + / Ctrl − / Ctrl 0"));
+                ui.weak("Масштаб: Ctrl + / Ctrl − / Ctrl 0");
             });
             ui.menu_button("Инструменты", |ui| {
                 ui.set_min_width(260.0);
-                if item(ui, "Сравнить с другим файлом", "", has_doc) {
+                if item(ui, "Сравнить с другим файлом", &key("compare"), has_doc)
+                {
                     actions.push(Action::Compare);
                 }
-                if item(ui, "Предпросмотр в браузере", "F12", has_doc) {
+                if item(ui, "Предпросмотр в браузере", &key("preview"), has_doc)
+                {
                     actions.push(Action::Preview);
                 }
                 ui.separator();
@@ -942,6 +1138,27 @@ impl TrorApp {
                 }
                 if item(ui, "Поиск на сервере", "", true) {
                     actions.push(Action::Show(Pane::ServerSearch));
+                }
+            });
+            ui.menu_button("Плагины", |ui| {
+                ui.set_min_width(260.0);
+                for (index, plugin) in self.plugins.list.iter().enumerate() {
+                    let shortcut = crate::keys::parse(&plugin.shortcut)
+                        .map(|s| crate::keys::format(&s))
+                        .unwrap_or_default();
+                    if item(ui, &plugin.name, &shortcut, true) {
+                        actions.push(Action::Plugin(index));
+                    }
+                }
+                if self.plugins.list.is_empty() {
+                    ui.weak("Плагинов пока нет");
+                }
+                ui.separator();
+                if item(ui, "Открыть папку плагинов", "", true) {
+                    actions.push(Action::PluginsFolder);
+                }
+                if item(ui, "Перечитать", "", true) {
+                    actions.push(Action::PluginsReload);
                 }
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -954,8 +1171,7 @@ impl TrorApp {
                 if Self::tool_button(ui, pal, 3, false, theme_hint) {
                     actions.push(Action::ToggleTheme);
                 }
-                if Self::tool_button(ui, pal, 2, self.settings.wrap, "Перенос строк (Alt+Z)")
-                {
+                if Self::tool_button(ui, pal, 2, self.settings.wrap, "Перенос строк") {
                     actions.push(Action::ToggleWrap);
                 }
                 if Self::tool_button(
@@ -963,7 +1179,7 @@ impl TrorApp {
                     pal,
                     1,
                     dock::has(&self.dock, Pane::Console),
-                    "SSH-консоль (F9)",
+                    "SSH-консоль",
                 ) {
                     actions.push(Action::Toggle(Pane::Console));
                 }
@@ -972,11 +1188,11 @@ impl TrorApp {
                     pal,
                     0,
                     dock::has(&self.dock, Pane::Hosts),
-                    "Удалённые хосты (F8)",
+                    "Удалённые хосты",
                 ) {
                     actions.push(Action::Toggle(Pane::Hosts));
                 }
-                if Self::tool_button(ui, pal, 4, false, "Новая вкладка (Ctrl+N)") {
+                if Self::tool_button(ui, pal, 4, false, "Новая вкладка") {
                     actions.push(Action::New);
                 }
             });
@@ -1091,8 +1307,9 @@ impl TrorApp {
             }
             clicked
         };
-        let field_w = (ui.available_width() - 440.0).clamp(70.0, 260.0);
+        let field_w = (ui.available_width() - 196.0).max(60.0);
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
             let query = ui.add(
                 TextEdit::singleline(&mut s.query)
                     .hint_text("Найти")
@@ -1130,12 +1347,41 @@ impl TrorApp {
             {
                 s.pending = Some(Pending::Next);
             }
+            if icon_button(ui, pal, Icon::Close)
+                .on_hover_text("Закрыть (Esc)")
+                .clicked()
+            {
+                actions.push(Action::CloseSearch);
+            }
+        });
+        if s.replace_mode {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.add(
+                    TextEdit::singleline(&mut s.replacement)
+                        .hint_text(if s.regex {
+                            "Заменить на ($1, ${name})"
+                        } else {
+                            "Заменить на"
+                        })
+                        .desired_width(field_w)
+                        .margin(Margin::symmetric(8, 5)),
+                );
+                if ui.button("Заменить").clicked() {
+                    s.pending = Some(Pending::Replace);
+                }
+                if ui.button("Все").on_hover_text("Заменить все").clicked() {
+                    s.pending = Some(Pending::ReplaceAll);
+                }
+            });
+        }
+        ui.horizontal(|ui| {
             let info = if let Some(error) = &s.error {
                 RichText::new(error).color(pal.warn)
             } else if let Some(n) = s.last_replaced {
                 RichText::new(format!("заменено: {n}")).color(pal.subtext)
             } else if s.query.is_empty() {
-                RichText::new("")
+                RichText::new("введите текст").color(pal.faint)
             } else if s.searching() {
                 RichText::new("поиск…").color(pal.subtext)
             } else if s.matches.is_empty() {
@@ -1148,47 +1394,30 @@ impl TrorApp {
                 };
                 match selection.and_then(|sel| s.current(sel)) {
                     Some(i) => RichText::new(format!("{} из {total}", i + 1)),
-                    None => RichText::new(total),
+                    None => RichText::new(format!("совпадений: {total}")),
                 }
                 .color(pal.subtext)
             };
-            ui.label(info);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_button(ui, pal, Icon::Close)
-                    .on_hover_text("Закрыть (Esc)")
-                    .clicked()
-                {
-                    actions.push(Action::CloseSearch);
-                }
                 let label = if s.replace_mode {
                     "Скрыть замену"
                 } else {
                     "Замена"
                 };
-                if ui.button(label).clicked() {
+                if ui
+                    .add(
+                        Button::new(RichText::new(label).size(12.0).color(pal.subtext))
+                            .frame(false),
+                    )
+                    .clicked()
+                {
                     s.replace_mode = !s.replace_mode;
                 }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(info.size(12.0)).truncate());
+                });
             });
         });
-        if s.replace_mode {
-            ui.horizontal(|ui| {
-                ui.add(
-                    TextEdit::singleline(&mut s.replacement)
-                        .hint_text("Заменить на")
-                        .desired_width(field_w)
-                        .margin(Margin::symmetric(8, 5)),
-                );
-                if ui.button("Заменить").clicked() {
-                    s.pending = Some(Pending::Replace);
-                }
-                if ui.button("Заменить все").clicked() {
-                    s.pending = Some(Pending::ReplaceAll);
-                }
-                if s.regex {
-                    ui.weak("группы: $1, ${name}");
-                }
-            });
-        }
     }
 
     fn status_bar(&mut self, ui: &mut Ui, pal: &Palette) {
@@ -1484,13 +1713,7 @@ impl TrorApp {
             return;
         };
         let active = index == self.active;
-        if active && self.search.open {
-            Frame::new()
-                .fill(pal.base)
-                .inner_margin(Margin::symmetric(10, 8))
-                .stroke(Stroke::new(1.0, pal.border))
-                .show(ui, |ui| self.search_bar(ui, pal, actions));
-        }
+        let pane = ui.available_rect_before_wrap();
         let look = &self.settings.look;
         let (wrap, font_size, line_spacing) =
             (self.settings.wrap, look.font_size, look.line_spacing);
@@ -1513,6 +1736,25 @@ impl TrorApp {
                     complete: &mut self.complete,
                 },
             );
+            if self.search.open {
+                let width = (pane.width() - 44.0).clamp(250.0, 430.0);
+                egui::Area::new(egui::Id::unique("tror_find"))
+                    .order(egui::Order::Middle)
+                    .pivot(egui::Align2::RIGHT_TOP)
+                    .fixed_pos(pane.right_top() + egui::vec2(-22.0, 8.0))
+                    .show(ui.ctx(), |ui| {
+                        Frame::new()
+                            .fill(pal.mantle)
+                            .stroke(Stroke::new(1.0, pal.border))
+                            .corner_radius(self.settings.look.radius.saturating_add(2))
+                            .shadow(ui.style().visuals.popup_shadow)
+                            .inner_margin(Margin::same(8))
+                            .show(ui, |ui| {
+                                ui.set_width(width);
+                                self.search_bar(ui, pal, actions);
+                            });
+                    });
+            }
             return;
         }
         let mut search = SearchState::default();
@@ -1543,10 +1785,10 @@ impl TrorApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(8.0);
                 if ui.add(Button::new("Очистить").fill(pal.surface)).clicked() {
-                    self.remote.log.clear();
+                    self.log.clear();
                 }
                 if ui.add(Button::new("Копировать всё").fill(pal.surface)).clicked() {
-                    let text: Vec<&str> = self.remote.log.iter().map(|(t, _)| t.as_str()).collect();
+                    let text: Vec<&str> = self.log.iter().map(|(t, _)| t.as_str()).collect();
                     ui.ctx().copy_text(text.join("\n"));
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
@@ -1571,8 +1813,8 @@ impl TrorApp {
             .id_salt("tror_log")
             .auto_shrink(false)
             .stick_to_bottom(true)
-            .show_rows(ui, row_h, self.remote.log.len(), |ui, range| {
-                for (text, error) in &self.remote.log[range] {
+            .show_rows(ui, row_h, self.log.len(), |ui, range| {
+                for (text, error) in &self.log[range] {
                     ui.add(
                         egui::Label::new(
                             RichText::new(format!("  {text}"))
@@ -1672,11 +1914,26 @@ impl TabViewer for Viewer<'_> {
         let look = &app.settings.look;
         let (dark, font_size) = (look.dark, look.font_size);
         let side = Frame::new().inner_margin(Margin::symmetric(8, 0));
-        match *tab {
-            Pane::Welcome => app.welcome(ui, &pal, self.actions),
-            Pane::Doc(id) => app.doc_pane(ui, id, &pal, self.actions, self.modal_open),
+        let pane = *tab;
+        let actions = &mut *self.actions;
+        let modal_open = self.modal_open;
+        let min_width = match pane {
+            Pane::Welcome | Pane::Doc(_) => 0.0,
+            Pane::Hosts | Pane::Hosts2 => 190.0,
+            Pane::Log => 250.0,
+            Pane::Console => 280.0,
+            Pane::ServerSearch => 300.0,
+            Pane::Db => 340.0,
+            Pane::Settings | Pane::Diff => 430.0,
+        };
+        let mut body = |ui: &mut Ui| match pane {
+            Pane::Welcome => app.welcome(ui, &pal, actions),
+            Pane::Doc(id) => app.doc_pane(ui, id, &pal, actions, modal_open),
             Pane::Hosts => {
                 side.show(ui, |ui| app.remote.ui(ui, &pal));
+            }
+            Pane::Hosts2 => {
+                side.show(ui, |ui| app.remote2.ui(ui, &pal));
             }
             Pane::Console => {
                 app.console_shown = true;
@@ -1696,7 +1953,17 @@ impl TabViewer for Viewer<'_> {
                 side.show(ui, |ui| app.remote.search_ui(ui, &pal));
             }
             Pane::Settings => {
-                let note = prefs::ui(ui, &pal, &mut app.settings.look, &mut app.settings.wrap);
+                app.settings_shown = true;
+                let note = prefs::ui(
+                    ui,
+                    &pal,
+                    &mut app.settings.look,
+                    &mut app.settings.wrap,
+                    prefs::KeysEdit {
+                        custom: &mut app.settings.keys,
+                        capturing: &mut app.capturing,
+                    },
+                );
                 if let Some(text) = note {
                     let now = ui.input(|i| i.time);
                     app.notify(text, now);
@@ -1704,10 +1971,21 @@ impl TabViewer for Viewer<'_> {
             }
             Pane::Diff => {
                 if let Some((id, line)) = app.diff.ui(ui, &pal, &app.docs, dark, font_size) {
-                    self.actions.push(Action::Goto(id, line));
+                    actions.push(Action::Goto(id, line));
                 }
             }
             Pane::Db => app.db.ui(ui, &pal, &mut app.remote.store, font_size),
+        };
+        if ui.available_width() < min_width {
+            ScrollArea::horizontal()
+                .id_salt(("tror_narrow", pane))
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    ui.set_width(min_width);
+                    body(ui);
+                });
+        } else {
+            body(ui);
         }
     }
 
@@ -1761,6 +2039,7 @@ impl eframe::App for TrorApp {
             self.confirm = Some(Confirm::Quit);
         }
         self.remote.visible = dock::has(&self.dock, Pane::Hosts);
+        self.remote2.visible = dock::has(&self.dock, Pane::Hosts2);
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -1770,6 +2049,8 @@ impl eframe::App for TrorApp {
         });
         if !dropped.is_empty() && self.remote.can_upload() {
             self.remote.offer_drop(dropped);
+        } else if !dropped.is_empty() && self.remote2.can_upload() {
+            self.remote2.offer_drop(dropped);
         } else {
             for path in dropped {
                 actions.push(Action::OpenPath(path));
@@ -1783,14 +2064,25 @@ impl eframe::App for TrorApp {
         let modal_open = self.goto.is_some()
             || self.confirm.is_some()
             || self.remote.modal_open()
+            || self.remote2.modal_open()
             || self.terminal.modal_open()
             || self.db.modal_open();
         if std::mem::take(&mut self.remote.want_search) {
-            dock::show(&mut self.dock, Pane::ServerSearch);
+            dock::show(&mut self.dock, Pane::ServerSearch, &self.settings.floats);
+        }
+        self.log.extend(crate::trace::take());
+        if self.log.len() > 2000 {
+            self.log.drain(..500);
         }
         let events = self.remote.poll();
-        self.remote_events(&ctx, events);
+        self.remote_events(&ctx, events, 0);
+        let events = self.remote2.poll();
+        self.remote_events(&ctx, events, 1);
+        self.remote.peer = self.remote2.peer_label();
+        self.remote2.peer = self.remote.peer_label();
+        self.transfers();
         self.db.poll();
+        self.plugin_results(ctx.input(|i| i.time));
         for event in self.terminal.poll() {
             let TermEvent::Trust { host, fingerprint } = event;
             if let Err(e) = self.remote.trust(host, fingerprint) {
@@ -1830,6 +2122,7 @@ impl eframe::App for TrorApp {
         let mut dock = std::mem::replace(&mut self.dock, DockState::new(Vec::new()));
         let style = dock::style(&pal, ui.style(), self.settings.look.radius);
         self.console_shown = false;
+        self.settings_shown = false;
         CentralPanel::no_frame().show(ui, |ui| {
             let mut viewer = Viewer {
                 app: self,
@@ -1850,10 +2143,14 @@ impl eframe::App for TrorApp {
             self.active = index;
             self.complete.close();
         }
+        dock::remember(&dock, &mut self.settings.floats);
         self.dock = dock;
         self.focus_editor = false;
         if !self.console_shown {
             self.terminal.focused = false;
+        }
+        if !self.settings_shown {
+            self.capturing = None;
         }
 
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
@@ -1881,7 +2178,9 @@ impl eframe::App for TrorApp {
         self.goto_modal(&ctx, &pal);
         self.confirm_modal(&ctx);
         let events = self.remote.dialogs(&ctx, &pal);
-        self.remote_events(&ctx, events);
+        self.remote_events(&ctx, events, 0);
+        let events = self.remote2.dialogs(&ctx, &pal);
+        self.remote_events(&ctx, events, 1);
         self.terminal.dialogs(&ctx, &pal);
         self.db.dialogs(&ctx, &pal, &mut self.remote.store);
 

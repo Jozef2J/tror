@@ -203,6 +203,17 @@ fn quiet(command: &mut Command) {
 #[cfg(not(windows))]
 fn quiet(_command: &mut Command) {}
 
+pub fn open_folder(path: &Path) -> Result<(), String> {
+    if cfg!(target_os = "windows") {
+        return Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    }
+    open_url(&path.display().to_string())
+}
+
 fn free_port() -> Result<u16, String> {
     TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())

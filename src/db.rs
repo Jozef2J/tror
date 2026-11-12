@@ -469,7 +469,7 @@ impl DbPanel {
         self.poll();
         ui.add_space(8.0);
         if store.databases.is_empty() {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add_space(8.0);
                 ui.label(RichText::new("Подключений к базам пока нет.").color(pal.subtext));
                 if ui
@@ -483,12 +483,13 @@ impl DbPanel {
         }
         self.selected = self.selected.min(store.databases.len() - 1);
         let active = self.conn.is_some();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add_space(8.0);
             let mut edit = false;
+            let combo_w = (ui.available_width() - 150.0).clamp(120.0, 220.0);
             ui.add_enabled_ui(!active, |ui| {
                 ComboBox::from_id_salt("tror_db_profile")
-                    .width(220.0)
+                    .width(combo_w)
                     .selected_text(store.databases[self.selected].name.clone())
                     .show_ui(ui, |ui| {
                         for (i, profile) in store.databases.iter().enumerate() {
@@ -534,12 +535,22 @@ impl DbPanel {
             return;
         }
         let rect = ui.available_rect_before_wrap();
-        let tree_w = (rect.width() * 0.24).clamp(150.0, 280.0);
-        let (tree_rect, main_rect) = rect.split_left_right_at_x(rect.left() + tree_w);
-        ui.painter().line_segment(
-            [tree_rect.right_top(), tree_rect.right_bottom()],
-            Stroke::new(1.0, pal.border),
-        );
+        let (tree_rect, main_rect) = if rect.width() < 520.0 {
+            let (top, bottom) = rect.split_top_bottom_at_fraction(0.32);
+            ui.painter().line_segment(
+                [top.left_bottom(), top.right_bottom()],
+                Stroke::new(1.0, pal.border),
+            );
+            (top, bottom.shrink2(egui::vec2(0.0, 4.0)))
+        } else {
+            let tree_w = (rect.width() * 0.24).clamp(150.0, 280.0);
+            let (left, right) = rect.split_left_right_at_x(rect.left() + tree_w);
+            ui.painter().line_segment(
+                [left.right_top(), left.right_bottom()],
+                Stroke::new(1.0, pal.border),
+            );
+            (left, right)
+        };
         let mut tree_ui =
             ui.new_child(egui::UiBuilder::new().max_rect(tree_rect.shrink2(egui::vec2(8.0, 0.0))));
         self.tree(&mut tree_ui, pal);
@@ -663,7 +674,7 @@ impl DbPanel {
                     .collect::<String>()
             });
         let mut export = None;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let run = ui
                 .add_enabled(
                     !self.busy,
@@ -969,6 +980,28 @@ impl DbPanel {
                     ui.end_row();
                 });
             ui.add_space(6.0);
+            let sftp_hosts = store
+                .profiles
+                .iter()
+                .filter(|h| h.protocol == remote::Protocol::Sftp)
+                .count();
+            let tunnel_note = if sftp_hosts == 0 {
+                "Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
+                 так устроен почти любой хостинг. В списке туннелей появляются ваши SFTP-профили из панели \
+                 «Удалённые хосты» (F8); сейчас там нет ни одного SFTP-профиля, поэтому выбрать нечего. \
+                 Создайте профиль хоста, подключитесь к нему один раз — и он появится в этом списке."
+            } else if p.tunnel.is_empty() {
+                "Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
+                 так устроен почти любой хостинг. Выберите в списке SFTP-профиль этого сервера: программа \
+                 зайдёт на него по SSH и уже оттуда подключится к базе."
+            } else {
+                "Программа зайдёт на выбранный хост по SSH и подключится к базе оттуда. В поле «Сервер» \
+                 укажите адрес базы так, как его видит сам хост — обычно 127.0.0.1 или localhost, порт 3306 \
+                 (точные значения есть в панели хостинга или в конфиге сайта). К хосту нужно один раз \
+                 подключиться в панели «Удалённые хосты», чтобы подтвердить его ключ."
+            };
+            ui.label(RichText::new(tunnel_note).size(12.0).color(pal.subtext));
+            ui.add_space(4.0);
             ui.label(
                 RichText::new(
                     "Пароль хранится в файле профилей в замаскированном, но не зашифрованном виде. \

@@ -1,0 +1,141 @@
+use std::collections::BTreeMap;
+
+use eframe::egui::{Key, KeyboardShortcut, Modifiers};
+
+pub const COMMANDS: [(&str, &str, &str, bool); 23] = [
+    ("new", "Новый файл", "Ctrl+N", true),
+    ("open", "Открыть файл", "Ctrl+O", true),
+    ("save", "Сохранить", "Ctrl+S", true),
+    ("save_as", "Сохранить как", "Ctrl+Shift+S", true),
+    ("save_all", "Сохранить все", "", true),
+    ("close_tab", "Закрыть вкладку", "Ctrl+W", true),
+    ("next_tab", "Следующая вкладка", "Ctrl+Tab", true),
+    ("prev_tab", "Предыдущая вкладка", "Ctrl+Shift+Tab", true),
+    ("find", "Найти", "Ctrl+F", true),
+    ("replace", "Заменить", "Ctrl+H", true),
+    ("find_next", "Найти далее", "F3", true),
+    ("find_prev", "Найти ранее", "Shift+F3", true),
+    ("goto", "Перейти к строке", "Ctrl+G", true),
+    ("wrap", "Перенос строк", "Alt+Z", false),
+    ("theme", "Сменить тему", "", false),
+    ("settings", "Настройки", "Ctrl+Comma", false),
+    ("hosts", "Удалённые хосты", "F8", false),
+    ("console", "SSH-консоль", "F9", false),
+    ("log", "Журнал", "", false),
+    ("server_search", "Поиск на сервере", "", false),
+    ("db", "База данных", "", false),
+    ("compare", "Сравнить файлы", "", false),
+    ("preview", "Предпросмотр в браузере", "F12", false),
+];
+
+pub fn parse(text: &str) -> Option<KeyboardShortcut> {
+    let mut modifiers = Modifiers::NONE;
+    let mut key = None;
+    for part in text.split('+').map(str::trim) {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "cmd" | "⌘" => modifiers |= Modifiers::COMMAND,
+            "shift" => modifiers |= Modifiers::SHIFT,
+            "alt" => modifiers |= Modifiers::ALT,
+            _ => key = Some(Key::from_name(part)?),
+        }
+    }
+    Some(KeyboardShortcut::new(modifiers, key?))
+}
+
+pub fn format(shortcut: &KeyboardShortcut) -> String {
+    let mut parts = Vec::new();
+    let m = shortcut.modifiers;
+    if m.command || m.ctrl || m.mac_cmd {
+        parts.push(if cfg!(target_os = "macos") {
+            "⌘"
+        } else {
+            "Ctrl"
+        });
+    }
+    if m.alt {
+        parts.push("Alt");
+    }
+    if m.shift {
+        parts.push("Shift");
+    }
+    parts.push(shortcut.logical_key.name());
+    parts.join("+")
+}
+
+pub fn usable(shortcut: &KeyboardShortcut) -> bool {
+    let m = shortcut.modifiers;
+    let plain = !(m.command || m.ctrl || m.mac_cmd || m.alt);
+    let function =
+        shortcut.logical_key.name().starts_with('F') && shortcut.logical_key.name().len() > 1;
+    !plain || function
+}
+
+pub struct Keys {
+    bound: Vec<(usize, KeyboardShortcut)>,
+}
+
+impl Keys {
+    pub fn new(custom: &BTreeMap<String, String>) -> Self {
+        let mut bound: Vec<(usize, KeyboardShortcut)> = COMMANDS
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (id, _, default, _))| {
+                let text = custom.get(*id).map(String::as_str).unwrap_or(default);
+                Some((index, parse(text)?))
+            })
+            .collect();
+        let weight = |s: &KeyboardShortcut| {
+            let m = s.modifiers;
+            m.shift as u8 + m.alt as u8 + (m.command || m.ctrl || m.mac_cmd) as u8
+        };
+        bound.sort_by_key(|(_, shortcut)| std::cmp::Reverse(weight(shortcut)));
+        Self { bound }
+    }
+
+    pub fn bound(&self) -> &[(usize, KeyboardShortcut)] {
+        &self.bound
+    }
+
+    pub fn label(&self, id: &str) -> String {
+        self.bound
+            .iter()
+            .find(|(index, _)| COMMANDS[*index].0 == id)
+            .map(|(_, shortcut)| format(shortcut))
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shortcuts_parse_format_and_override() {
+        let s = parse("Ctrl+Shift+S").unwrap();
+        assert!(s.modifiers.command && s.modifiers.shift && !s.modifiers.alt);
+        assert_eq!(s.logical_key, Key::S);
+        assert_eq!(parse(&format(&s).replace('⌘', "Ctrl")), Some(s));
+        assert_eq!(parse("F8").unwrap().logical_key, Key::F8);
+        assert_eq!(parse("Ctrl+Comma").unwrap().logical_key, Key::Comma);
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("Ctrl+"), None);
+        assert_eq!(parse("Ctrl+Nonsense"), None);
+        assert!(usable(&parse("F5").unwrap()) && usable(&parse("Alt+Z").unwrap()));
+        assert!(!usable(&parse("A").unwrap()) && !usable(&parse("Shift+A").unwrap()));
+
+        for (id, _, default, _) in COMMANDS {
+            assert!(default.is_empty() || parse(default).is_some(), "{id}");
+        }
+        let mut custom = BTreeMap::new();
+        custom.insert("save".to_owned(), "Ctrl+Alt+S".to_owned());
+        custom.insert("hosts".to_owned(), String::new());
+        custom.insert("db".to_owned(), "F6".to_owned());
+        let keys = Keys::new(&custom);
+        assert!(keys.label("save").ends_with("+Alt+S"));
+        assert_eq!(keys.label("hosts"), "");
+        assert_eq!(keys.label("db"), "F6");
+        assert_eq!(keys.label("console"), "F9");
+        let first = keys.bound()[0].1;
+        assert!(first.modifiers.shift || first.modifiers.alt);
+    }
+}

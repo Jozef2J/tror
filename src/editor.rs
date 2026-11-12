@@ -819,6 +819,36 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         pal,
     );
     doc.scroll_y = scrolled_y;
+    if search.open && !search.matches.is_empty() {
+        let top = full.top();
+        let height = text_rect.bottom() - top;
+        let total = doc.line_count();
+        let chars = doc.rope.len_chars();
+        let slots = ((height / 2.0) as usize).clamp(1, total.max(1));
+        let painter = ui.painter();
+        for slot in 0..slots {
+            let first = slot * total / slots;
+            let last = ((slot + 1) * total / slots).max(first + 1);
+            let from = doc.rope.line_to_char(first.min(total));
+            let to = if last >= total {
+                chars + 1
+            } else {
+                doc.rope.line_to_char(last)
+            };
+            let at = search.matches.partition_point(|m| m.0 < from);
+            if search.matches.get(at).is_some_and(|m| m.0 < to) {
+                let y = top + height * slot as f32 / slots as f32;
+                painter.rect_filled(
+                    Rect::from_min_size(
+                        egui::pos2(full.right() - 6.0, y),
+                        egui::vec2(5.0, (height / slots as f32).clamp(2.0, 3.0)),
+                    ),
+                    1.0,
+                    pal.match_current,
+                );
+            }
+        }
+    }
     let scrolled_x = scrollbar(
         ui,
         id.with("hbar"),

@@ -21,6 +21,7 @@ pub enum Protocol {
     #[default]
     Sftp,
     Ftp,
+    Ftps,
 }
 
 impl Protocol {
@@ -28,13 +29,14 @@ impl Protocol {
         match self {
             Protocol::Sftp => "SFTP",
             Protocol::Ftp => "FTP",
+            Protocol::Ftps => "FTPS",
         }
     }
 
     pub fn default_port(self) -> u16 {
         match self {
             Protocol::Sftp => 22,
-            Protocol::Ftp => 21,
+            Protocol::Ftp | Protocol::Ftps => 21,
         }
     }
 }
@@ -88,6 +90,7 @@ pub struct Profile {
     pub key_file: String,
     pub directory: String,
     pub url: String,
+    pub insecure_tls: bool,
 }
 
 impl Profile {
@@ -117,6 +120,8 @@ pub struct Store {
     path: Option<PathBuf>,
 }
 
+static STORE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl Store {
     pub fn load(path: Option<PathBuf>) -> Self {
         let mut store: Store = path
@@ -134,7 +139,13 @@ impl Store {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, text).map_err(|e| e.to_string())
+        std::fs::write(path, text).map_err(|e| e.to_string())?;
+        STORE_GENERATION.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn generation() -> u64 {
+        STORE_GENERATION.load(Ordering::Relaxed)
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -234,7 +245,7 @@ enum Backend {
         _session: ssh2::Session,
         sftp: ssh2::Sftp,
     },
-    Ftp(Box<suppaftp::FtpStream>),
+    Ftp(Box<suppaftp::NativeTlsFtpStream>),
 }
 
 fn tcp(profile: &Profile) -> Result<TcpStream, String> {
@@ -503,8 +514,29 @@ fn connect_ftp(profile: &Profile) -> Result<(Backend, String), String> {
     stream
         .set_read_timeout(Some(Duration::from_millis(IO_TIMEOUT_MS as u64)))
         .ok();
-    let mut ftp =
-        suppaftp::FtpStream::connect_with_stream(stream).map_err(|e| format!("ошибка FTP: {e}"))?;
+    let mut ftp = suppaftp::NativeTlsFtpStream::connect_with_stream(stream)
+        .map_err(|e| format!("ошибка FTP: {e}"))?;
+    if profile.protocol == Protocol::Ftps {
+        let connector = native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(profile.insecure_tls)
+            .danger_accept_invalid_hostnames(profile.insecure_tls)
+            .build()
+            .map_err(|e| format!("TLS: {e}"))?;
+        trace::line(
+            format!(
+                "[FTPS] AUTH TLS, certificate check {}",
+                if profile.insecure_tls { "OFF" } else { "on" }
+            ),
+            profile.insecure_tls,
+        );
+        ftp = ftp
+            .into_secure(
+                suppaftp::NativeTlsConnector::from(connector),
+                profile.host.trim(),
+            )
+            .map_err(|e| format!("защищённое соединение не установлено: {e}"))?;
+        trace::line("[FTPS] TLS session established", false);
+    }
     let user = if profile.user.trim().is_empty() {
         "anonymous"
     } else {
@@ -727,11 +759,15 @@ fn serve(
         wake();
     };
     let sftp = profile.protocol == Protocol::Sftp;
-    let tag = if sftp { "[SFTP]" } else { "[FTP]" };
+    let tag = match profile.protocol {
+        Protocol::Sftp => "[SFTP]",
+        Protocol::Ftp => "[FTP]",
+        Protocol::Ftps => "[FTPS]",
+    };
     let mut known = known;
     let open = |known: Option<&str>| match profile.protocol {
         Protocol::Sftp => connect_sftp(&profile, known, &events, &cmds, wake),
-        Protocol::Ftp => connect_ftp(&profile).map(|(b, home)| (b, home, None)),
+        Protocol::Ftp | Protocol::Ftps => connect_ftp(&profile).map(|(b, home)| (b, home, None)),
     };
     log(
         format!(
@@ -1117,7 +1153,7 @@ pub fn search(
                         "обход каталогов",
                     ))
                 }
-                Protocol::Ftp => {
+                Protocol::Ftp | Protocol::Ftps => {
                     let (mut backend, _) = connect_ftp(&profile)?;
                     Ok((
                         search_walk(&mut backend, &params, &flag, &emit),
@@ -1324,6 +1360,7 @@ mod tests {
             key_file: String::new(),
             directory: "/www".into(),
             url: "https://example.org".into(),
+            insecure_tls: false,
         });
         store
             .known_hosts
@@ -1382,6 +1419,7 @@ mod tests {
             key_file: String::new(),
             directory: String::new(),
             url: String::new(),
+            insecure_tls: protocol == Protocol::Ftps,
         };
         let conn = connect(&profile, None, || {});
         let next = || loop {
@@ -1474,6 +1512,22 @@ mod tests {
     #[ignore]
     fn live_ftp_server() {
         exercise(Protocol::Ftp, 2121);
+    }
+
+    #[test]
+    #[ignore]
+    fn live_ftps_server() {
+        exercise(Protocol::Ftps, 2122);
+        let mut profile = Profile::new("x".into());
+        profile.protocol = Protocol::Ftps;
+        profile.host = "127.0.0.1".into();
+        profile.port = 2122;
+        profile.user = "jozef".into();
+        profile.password = "secret".into();
+        let error = connect_ftp(&profile)
+            .err()
+            .expect("самоподписанный сертификат принят");
+        assert!(error.contains("защищённое соединение"), "{error}");
     }
 
     #[test]

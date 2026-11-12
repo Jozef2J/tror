@@ -10,8 +10,6 @@ use crate::app::{dialog, dialog_button, size_label};
 use crate::remote::{self, Cmd, Connection, Entry, Event, Profile, Protocol, Store};
 use crate::theme::Palette;
 
-const MAX_LOG: usize = 600;
-
 pub enum PanelEvent {
     Open {
         profile: String,
@@ -30,6 +28,16 @@ pub enum PanelEvent {
     },
     OpenLocal(Vec<PathBuf>),
     Toast(String),
+    Relay {
+        path: String,
+        data: Vec<u8>,
+    },
+}
+
+#[derive(Clone)]
+pub struct Dragged {
+    panel: u8,
+    pub paths: Vec<(String, bool)>,
 }
 
 enum Prompt {
@@ -53,7 +61,12 @@ struct Saver {
 
 pub struct RemotePanel {
     pub visible: bool,
-    pub log: Vec<(String, bool)>,
+    pub id: u8,
+    pub peer: Option<String>,
+    pub outgoing: Option<Vec<(String, bool)>>,
+    pub incoming: Option<Dragged>,
+    relay: HashMap<String, String>,
+    store_seen: u64,
     pub store: Store,
     selected: usize,
     conn: Option<Connection>,
@@ -193,12 +206,17 @@ fn refresh_button(ui: &mut Ui, pal: &Palette) -> egui::Response {
 }
 
 impl RemotePanel {
-    pub fn new(visible: bool) -> Self {
+    pub fn new(id: u8) -> Self {
         let path = eframe::storage_dir("Tror").map(|dir| dir.join("connections.json"));
         let store = Store::load(path);
         Self {
-            visible,
-            log: Vec::new(),
+            visible: false,
+            id,
+            peer: None,
+            outgoing: None,
+            incoming: None,
+            relay: HashMap::new(),
+            store_seen: Store::generation(),
             want_search: false,
             search_query: String::new(),
             search_content: true,
@@ -439,10 +457,54 @@ impl RemotePanel {
         }
     }
 
+    pub fn peer_label(&self) -> Option<String> {
+        let conn = self.conn.as_ref().filter(|_| self.connected)?;
+        Some(format!("{}: {}", conn.profile, self.cwd))
+    }
+
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
+    pub fn serves(&self, profile: &str) -> bool {
+        self.conn.as_ref().is_some_and(|c| c.profile == profile)
+    }
+
+    pub fn relay(&mut self, items: Vec<(String, bool)>, target_dir: &str) {
+        for (path, dir) in items {
+            let name = remote::file_name(&path).to_owned();
+            if dir {
+                self.push_log(
+                    format!("Папка {name} пропущена: между серверами передаются только файлы"),
+                    true,
+                );
+                continue;
+            }
+            self.relay
+                .insert(path.clone(), remote::join(target_dir, &name));
+            self.send(Cmd::Download(path), format!("Передача {name}…"));
+        }
+    }
+
+    pub fn receive(&mut self, path: String, data: Vec<u8>) {
+        let name = remote::file_name(&path).to_owned();
+        self.send(
+            Cmd::Upload {
+                path,
+                data,
+                doc: None,
+            },
+            format!("Приём {name}…"),
+        );
+    }
+
     pub fn poll(&mut self) -> Vec<PanelEvent> {
-        self.log.extend(crate::trace::take());
-        if self.log.len() > MAX_LOG {
-            self.log.drain(..MAX_LOG / 4);
+        if self.store_seen != Store::generation() {
+            self.store_seen = Store::generation();
+            self.store = Store::load(self.store.path().map(|p| p.to_path_buf()));
+            self.selected = self
+                .selected
+                .min(self.store.profiles.len().saturating_sub(1));
         }
         let mut out = Vec::new();
         self.poll_saver(&mut out);
@@ -523,6 +585,10 @@ impl RemotePanel {
                 }
                 Event::Downloaded { path, data } => {
                     self.busy = None;
+                    if let Some(target) = self.relay.remove(&path) {
+                        out.push(PanelEvent::Relay { path: target, data });
+                        continue;
+                    }
                     match self.save_to.remove(&path) {
                         Some(local) => {
                             let (text, error) = match std::fs::write(&local, data) {
@@ -748,12 +814,13 @@ impl RemotePanel {
             return;
         }
         let mut start = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add_space(6.0);
+            let field_w = (ui.available_width() - 20.0).clamp(120.0, 280.0);
             let field = ui.add(
                 TextEdit::singleline(&mut self.search_query)
                     .hint_text(format!("Искать в {}", self.cwd))
-                    .desired_width(280.0),
+                    .desired_width(field_w),
             );
             if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 start = true;
@@ -879,7 +946,7 @@ impl RemotePanel {
         let mut download: Vec<String> = Vec::new();
         let mut moves: Vec<(String, String)> = Vec::new();
         let reserve = if self.busy.is_some() { 26.0 } else { 0.0 };
-        ScrollArea::vertical()
+        let area = ScrollArea::vertical()
             .auto_shrink(false)
             .max_height((ui.available_height() - reserve).max(40.0))
             .show_rows(ui, row_h, total, |ui, rows| {
@@ -900,8 +967,11 @@ impl RemotePanel {
                     };
                     let drop_target = is_dir
                         && response
-                            .dnd_hover_payload::<Vec<String>>()
-                            .is_some_and(|dragged| !dragged.contains(&path));
+                            .dnd_hover_payload::<Dragged>()
+                            .is_some_and(|dragged| {
+                                dragged.panel == self.id
+                                    && !dragged.paths.iter().any(|(p, _)| *p == path)
+                            });
                     let painter = ui.painter_at(rect);
                     if drop_target {
                         painter.rect_filled(rect, 5.0, pal.selection);
@@ -990,15 +1060,18 @@ impl RemotePanel {
                         }
                     }
                     if entry.is_some() && response.drag_started() {
-                        let dragged: Vec<String> = self
-                            .selection_paths(&name)
-                            .into_iter()
-                            .map(|(p, _)| p)
-                            .collect();
-                        response.dnd_set_drag_payload(dragged);
+                        response.dnd_set_drag_payload(Dragged {
+                            panel: self.id,
+                            paths: self.selection_paths(&name),
+                        });
                     }
-                    if is_dir && let Some(dragged) = response.dnd_release_payload::<Vec<String>>() {
-                        for from in dragged.iter() {
+                    if is_dir
+                        && response
+                            .dnd_hover_payload::<Dragged>()
+                            .is_some_and(|d| d.panel == self.id)
+                        && let Some(dragged) = response.dnd_release_payload::<Dragged>()
+                    {
+                        for (from, _) in dragged.paths.iter() {
                             let to = remote::join(&path, remote::file_name(from));
                             if *from != path && remote::parent(from) != path {
                                 moves.push((from.clone(), to));
@@ -1035,6 +1108,13 @@ impl RemotePanel {
                                     download.push(file.clone());
                                 }
                             }
+                            if let Some(peer) = &self.peer
+                                && !files.is_empty()
+                                && ui.button(format!("Передать на «{peer}»")).clicked()
+                            {
+                                self.outgoing =
+                                    Some(files.iter().map(|f| (f.clone(), false)).collect());
+                            }
                             if chosen.len() == 1 && ui.button("Переименовать…").clicked()
                             {
                                 self.prompt = Some(Prompt::Rename {
@@ -1053,15 +1133,32 @@ impl RemotePanel {
                         });
                     }
                 }
-            });
+            })
+            .inner_rect;
+        if let Some(dragged) = egui::DragAndDrop::payload::<Dragged>(ui.ctx())
+            && dragged.panel != self.id
+            && ui.rect_contains_pointer(area)
+        {
+            ui.painter().rect_stroke(
+                area.shrink(1.0),
+                6.0,
+                egui::Stroke::new(1.5, pal.accent),
+                egui::StrokeKind::Inside,
+            );
+            if ui.input(|i| i.pointer.any_released()) {
+                self.incoming =
+                    egui::DragAndDrop::take_payload::<Dragged>(ui.ctx()).map(|d| (*d).clone());
+            }
+        }
         if ui.ctx().dragged_id().is_some()
-            && let Some(dragged) = egui::DragAndDrop::payload::<Vec<String>>(ui.ctx())
+            && let Some(dragged) = egui::DragAndDrop::payload::<Dragged>(ui.ctx())
+            && dragged.panel == self.id
             && let Some(pos) = ui.ctx().pointer_interact_pos()
         {
-            let text = if dragged.len() == 1 {
-                remote::file_name(&dragged[0]).to_owned()
+            let text = if dragged.paths.len() == 1 {
+                remote::file_name(&dragged.paths[0].0).to_owned()
             } else {
-                format!("объектов: {}", dragged.len())
+                format!("объектов: {}", dragged.paths.len())
             };
             ui.ctx()
                 .layer_painter(egui::LayerId::new(
@@ -1103,7 +1200,7 @@ impl RemotePanel {
         };
         let mut choice = None;
         let count = paths.len();
-        let modal = dialog("tror_drop_choice", pal).show(ctx, |ui| {
+        let modal = dialog(("tror_drop_choice", self.id), pal).show(ctx, |ui| {
             ui.set_width(420.0);
             ui.label(format!("Что сделать с перетащенными файлами ({count})?"));
             ui.add_space(10.0);
@@ -1137,7 +1234,7 @@ impl RemotePanel {
             return;
         };
         let mut answer = None;
-        dialog("tror_host_key", pal).show(ctx, |ui| {
+        dialog(("tror_host_key", self.id), pal).show(ctx, |ui| {
             ui.set_width(460.0);
             if changed {
                 ui.label(
@@ -1188,7 +1285,7 @@ impl RemotePanel {
         };
         let mut confirmed = false;
         let mut cancelled = false;
-        let modal = dialog("tror_remote_prompt", pal).show(ctx, |ui| {
+        let modal = dialog(("tror_remote_prompt", self.id), pal).show(ctx, |ui| {
             ui.set_width(340.0);
             let (title, input, action) = match prompt {
                 Prompt::NewFolder(name) => ("Новая папка", Some(name), "Создать"),
@@ -1295,7 +1392,7 @@ impl RemotePanel {
             .path()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        let modal = dialog("tror_profiles", pal).show(ctx, |ui| {
+        let modal = dialog(("tror_profiles", self.id), pal).show(ctx, |ui| {
             ui.set_width(620.0);
             ui.label(RichText::new("Профили подключений").strong());
             ui.add_space(8.0);
@@ -1351,7 +1448,7 @@ impl RemotePanel {
                             ui.end_row();
                             ui.label("Протокол");
                             ui.horizontal(|ui| {
-                                for protocol in [Protocol::Sftp, Protocol::Ftp] {
+                                for protocol in [Protocol::Sftp, Protocol::Ftp, Protocol::Ftps] {
                                     if ui
                                         .selectable_label(p.protocol == protocol, protocol.label())
                                         .clicked()
@@ -1410,6 +1507,11 @@ impl RemotePanel {
                                 });
                                 ui.end_row();
                             }
+                            if p.protocol == Protocol::Ftps {
+                                ui.label("Сертификат");
+                                ui.checkbox(&mut p.insecure_tls, "не проверять (самоподписанный)");
+                                ui.end_row();
+                            }
                             ui.label("Начальная папка");
                             ui.add(
                                 TextEdit::singleline(&mut p.directory)
@@ -1435,13 +1537,28 @@ impl RemotePanel {
                             .color(pal.subtext)
                             .size(12.0),
                         );
-                    } else {
+                    } else if p.protocol == Protocol::Ftp {
                         ui.add_space(4.0);
                         ui.label(
                             RichText::new("FTP передаёт пароль и файлы без шифрования.")
                                 .color(pal.warn)
                                 .size(12.0),
                         );
+                    } else {
+                        ui.add_space(4.0);
+                        let (text, color) = if p.insecure_tls {
+                            (
+                                "Соединение шифруется, но подлинность сервера не проверяется — \
+                                 включайте только для своего сервера с самоподписанным сертификатом.",
+                                pal.warn,
+                            )
+                        } else {
+                            (
+                                "FTPS с явным TLS (AUTH TLS, обычно порт 21): шифруются и команды, и данные.",
+                                pal.subtext,
+                            )
+                        };
+                        ui.label(RichText::new(text).color(color).size(12.0));
                     }
                 });
             });

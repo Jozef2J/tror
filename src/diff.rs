@@ -175,7 +175,7 @@ impl DiffPanel {
         self.refresh(docs);
         let mut open = None;
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add_space(8.0);
             let name = |id: Option<u64>| {
                 id.and_then(|id| docs.iter().find(|d| d.id == id))

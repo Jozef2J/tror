@@ -9,6 +9,7 @@ pub enum Pane {
     Welcome,
     Doc(u64),
     Hosts,
+    Hosts2,
     Console,
     Log,
     ServerSearch,
@@ -30,6 +31,7 @@ impl Pane {
             Pane::Welcome => "Tror",
             Pane::Doc(_) => "",
             Pane::Hosts => "Удалённые хосты",
+            Pane::Hosts2 => "Второе подключение",
             Pane::Console => "SSH-консоль",
             Pane::Log => "Журнал",
             Pane::ServerSearch => "Поиск на сервере",
@@ -41,7 +43,7 @@ impl Pane {
 
     fn zone(self) -> Zone {
         match self {
-            Pane::Hosts => Zone::Left,
+            Pane::Hosts | Pane::Hosts2 => Zone::Left,
             Pane::Console | Pane::Log | Pane::ServerSearch => Zone::Bottom,
             _ => Zone::Center,
         }
@@ -93,12 +95,52 @@ fn zone_leaf(dock: &DockState<Pane>, zone: Zone) -> Option<NodePath> {
     main.or_else(|| dock.iter_leaves().map(|(path, _)| path).find(|p| fits(*p)))
 }
 
-pub fn show(dock: &mut DockState<Pane>, pane: Pane) {
+pub type Floats = Vec<(Pane, [f32; 4])>;
+
+pub fn remember(dock: &DockState<Pane>, floats: &mut Floats) {
+    for (path, tab) in dock.iter_all_tabs() {
+        if matches!(tab, Pane::Doc(_) | Pane::Welcome) {
+            continue;
+        }
+        floats.retain(|(pane, _)| pane != tab);
+        if path.surface == SurfaceIndex::main() {
+            continue;
+        }
+        if let Some(rect) = dock.get_window_state(path.surface).map(|w| w.rect())
+            && rect.is_finite()
+            && rect.width() > 40.0
+            && rect.height() > 40.0
+        {
+            floats.push((*tab, [rect.min.x, rect.min.y, rect.width(), rect.height()]));
+        }
+    }
+}
+
+pub fn show(dock: &mut DockState<Pane>, pane: Pane, floats: &Floats) {
     if let Some(path) = dock.find_tab(&pane) {
         let _ = dock.focus_tab(path);
         return;
     }
-    if let Some(path) = zone_leaf(dock, pane.zone()) {
+    if let Some((_, [x, y, w, h])) = floats.iter().find(|(p, _)| *p == pane) {
+        let surface = dock.add_window(vec![pane]);
+        if let Some(window) = dock.get_window_state_mut(surface) {
+            window.set_position(egui::pos2(*x, *y));
+            window.set_size(egui::vec2(*w, *h));
+        }
+        if let Some(path) = dock.find_tab(&pane) {
+            let _ = dock.focus_tab(path);
+        }
+        return;
+    }
+    let twin = match pane {
+        Pane::Hosts => dock.find_tab(&Pane::Hosts2),
+        Pane::Hosts2 => dock.find_tab(&Pane::Hosts),
+        _ => None,
+    };
+    if let Some(twin) = twin.filter(|path| path.surface == SurfaceIndex::main()) {
+        dock.main_surface_mut()
+            .split_below(twin.node, 0.5, vec![pane]);
+    } else if let Some(path) = zone_leaf(dock, pane.zone()) {
         if let Ok(leaf) = dock.leaf_mut(path) {
             leaf.append_tab(pane);
         }
@@ -126,21 +168,21 @@ pub fn show(dock: &mut DockState<Pane>, pane: Pane) {
     }
 }
 
-pub fn toggle(dock: &mut DockState<Pane>, pane: Pane) {
+pub fn toggle(dock: &mut DockState<Pane>, pane: Pane, floats: &Floats) {
     if has(dock, pane) {
         hide(dock, pane);
     } else {
-        show(dock, pane);
+        show(dock, pane, floats);
     }
 }
 
 pub fn sync(dock: &mut DockState<Pane>, docs: &[u64]) {
     if docs.is_empty() && !has(dock, Pane::Welcome) {
-        show(dock, Pane::Welcome);
+        show(dock, Pane::Welcome, &Vec::new());
     }
     for id in docs {
         if !has(dock, Pane::Doc(*id)) {
-            show(dock, Pane::Doc(*id));
+            show(dock, Pane::Doc(*id), &Vec::new());
         }
     }
     let stale: Vec<Pane> = dock
@@ -232,10 +274,10 @@ mod tests {
         let mut dock = new();
         sync(&mut dock, &[1, 2]);
         assert_eq!(zones(&dock), [vec![Pane::Doc(1), Pane::Doc(2)]]);
-        show(&mut dock, Pane::Hosts);
-        show(&mut dock, Pane::Console);
-        show(&mut dock, Pane::Log);
-        show(&mut dock, Pane::Settings);
+        show(&mut dock, Pane::Hosts, &Vec::new());
+        show(&mut dock, Pane::Console, &Vec::new());
+        show(&mut dock, Pane::Log, &Vec::new());
+        show(&mut dock, Pane::Settings, &Vec::new());
         let mut leaves = zones(&dock);
         leaves.sort_by_key(|l| format!("{l:?}"));
         assert_eq!(
@@ -246,7 +288,7 @@ mod tests {
                 vec![Pane::Hosts],
             ]
         );
-        toggle(&mut dock, Pane::Hosts);
+        toggle(&mut dock, Pane::Hosts, &Vec::new());
         assert!(!has(&dock, Pane::Hosts));
         sync(&mut dock, &[]);
         assert!(has(&dock, Pane::Welcome) && !has(&dock, Pane::Doc(1)));
@@ -259,11 +301,35 @@ mod tests {
     }
 
     #[test]
+    fn hidden_floating_pane_returns_to_its_window() {
+        let mut dock = new();
+        sync(&mut dock, &[1]);
+        let mut floats = Floats::new();
+        show(&mut dock, Pane::Log, &floats);
+        let path = dock.find_tab(&Pane::Log).unwrap();
+        let rect = egui::Rect::from_min_size(egui::pos2(300.0, 200.0), egui::vec2(420.0, 260.0));
+        dock.detach_tab(path, rect);
+        let surface = dock.find_tab(&Pane::Log).unwrap().surface;
+        assert_ne!(surface, SurfaceIndex::main());
+        floats.push((Pane::Log, [300.0, 200.0, 420.0, 260.0]));
+        hide(&mut dock, Pane::Log);
+        assert!(!has(&dock, Pane::Log));
+        show(&mut dock, Pane::Log, &floats);
+        let surface = dock.find_tab(&Pane::Log).unwrap().surface;
+        assert_ne!(surface, SurfaceIndex::main());
+        show(&mut dock, Pane::Hosts, &floats);
+        assert_eq!(
+            dock.find_tab(&Pane::Hosts).unwrap().surface,
+            SurfaceIndex::main()
+        );
+    }
+
+    #[test]
     fn layout_survives_serialization() {
         let mut dock = new();
         sync(&mut dock, &[3]);
-        show(&mut dock, Pane::Hosts);
-        show(&mut dock, Pane::Log);
+        show(&mut dock, Pane::Hosts, &Vec::new());
+        show(&mut dock, Pane::Log, &Vec::new());
         let text = ron::ser::to_string(&dock).unwrap();
         let back: DockState<Pane> = ron::from_str(&text).unwrap();
         assert_eq!(zones(&back), zones(&dock));

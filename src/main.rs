@@ -8,6 +8,8 @@ mod dock;
 mod document;
 mod editor;
 mod highlight;
+mod keys;
+mod plugins;
 mod prefs;
 mod preview;
 mod remote;
