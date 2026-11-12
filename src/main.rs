@@ -18,6 +18,7 @@ mod search;
 mod terminal;
 mod theme;
 mod trace;
+mod webview;
 
 use eframe::egui;
 

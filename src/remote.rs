@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::{Cursor, Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -176,6 +176,7 @@ pub enum Cmd {
         path: String,
         dir: bool,
     },
+    Walk(String),
 }
 
 pub enum Event {
@@ -200,6 +201,14 @@ pub enum Event {
         doc: Option<(u64, u64)>,
     },
     Changed(String),
+    Progress {
+        done: u64,
+        total: u64,
+    },
+    Walked {
+        root: String,
+        files: Vec<(String, u64)>,
+    },
     Log(String, bool),
     Error(String),
     Closed(String),
@@ -550,6 +559,24 @@ fn connect_ftp(profile: &Profile) -> Result<(Backend, String), String> {
     Ok((Backend::Ftp(Box::new(ftp)), home))
 }
 
+const CHUNK: usize = 64 * 1024;
+
+struct Counting<'a> {
+    data: &'a [u8],
+    done: usize,
+    progress: &'a dyn Fn(u64, u64),
+}
+
+impl Read for Counting<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = buf.len().min(self.data.len() - self.done);
+        buf[..n].copy_from_slice(&self.data[self.done..self.done + n]);
+        self.done += n;
+        (self.progress)(self.done as u64, self.data.len() as u64);
+        Ok(n)
+    }
+}
+
 impl Backend {
     fn list(&mut self, path: &str) -> Result<Vec<Entry>, String> {
         let mut entries = match self {
@@ -593,32 +620,106 @@ impl Backend {
         Ok(entries)
     }
 
-    fn download(&mut self, path: &str) -> Result<Vec<u8>, String> {
+    fn download(&mut self, path: &str, progress: &dyn Fn(u64, u64)) -> Result<Vec<u8>, String> {
+        let mut data = Vec::new();
+        let mut buf = vec![0u8; CHUNK];
         match self {
             Backend::Sftp { sftp, .. } => {
                 let mut file = sftp.open(Path::new(path)).map_err(|e| e.to_string())?;
-                let mut data = Vec::new();
-                file.read_to_end(&mut data).map_err(|e| e.to_string())?;
-                Ok(data)
+                let total = file.stat().ok().and_then(|s| s.size).unwrap_or(0);
+                loop {
+                    let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+                    if n == 0 {
+                        break;
+                    }
+                    data.extend_from_slice(&buf[..n]);
+                    progress(data.len() as u64, total);
+                }
             }
-            Backend::Ftp(ftp) => ftp
-                .retr_as_buffer(path)
-                .map(Cursor::into_inner)
-                .map_err(|e| e.to_string()),
+            Backend::Ftp(ftp) => {
+                let total = ftp.size(path).unwrap_or(0) as u64;
+                ftp.retr(path, |reader| {
+                    loop {
+                        let n = reader
+                            .read(&mut buf)
+                            .map_err(suppaftp::FtpError::ConnectionError)?;
+                        if n == 0 {
+                            break;
+                        }
+                        data.extend_from_slice(&buf[..n]);
+                        progress(data.len() as u64, total);
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+            }
         }
+        Ok(data)
     }
 
-    fn upload(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
+    fn write(
+        &mut self,
+        path: &str,
+        data: &[u8],
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<(), String> {
+        let total = data.len() as u64;
         match self {
             Backend::Sftp { sftp, .. } => {
                 let mut file = sftp.create(Path::new(path)).map_err(|e| e.to_string())?;
-                file.write_all(data).map_err(|e| e.to_string())
+                let mut done = 0;
+                for chunk in data.chunks(CHUNK) {
+                    file.write_all(chunk).map_err(|e| e.to_string())?;
+                    done += chunk.len() as u64;
+                    progress(done, total);
+                }
+                Ok(())
             }
-            Backend::Ftp(ftp) => ftp
-                .put_file(path, &mut Cursor::new(data))
-                .map(|_| ())
-                .map_err(|e| e.to_string()),
+            Backend::Ftp(ftp) => {
+                let mut reader = Counting {
+                    data,
+                    done: 0,
+                    progress,
+                };
+                ftp.put_file(path, &mut reader)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
         }
+    }
+
+    fn upload(
+        &mut self,
+        path: &str,
+        data: &[u8],
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<(), String> {
+        let first = match self.write(path, data, progress) {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        let dir = parent(path);
+        if dir == "/" || self.list(&dir).is_ok() {
+            return Err(first);
+        }
+        let mut current = String::new();
+        for part in dir.split('/').filter(|p| !p.is_empty()) {
+            current = format!("{current}/{part}");
+            let _ = self.mkdir(&current);
+        }
+        self.write(path, data, progress)
+    }
+
+    fn walk(&mut self, root: &str, files: &mut Vec<(String, u64)>) -> Result<(), String> {
+        for entry in self.list(root)? {
+            let path = join(root, &entry.name);
+            if entry.is_dir {
+                self.walk(&path, files)?;
+            } else {
+                files.push((path, entry.size));
+            }
+        }
+        Ok(())
     }
 
     fn mkdir(&mut self, path: &str) -> Result<(), String> {
@@ -687,12 +788,17 @@ fn describe(cmd: &Cmd) -> String {
         }
         Cmd::Mkdir(path) => format!("[SFTP] mkdir {path}"),
         Cmd::Rename(from, to) => format!("[SFTP] rename {from} -> {to}"),
+        Cmd::Walk(path) => format!("[SFTP] readdir (recursive) {path}"),
         Cmd::Delete { path, dir: true } => format!("[SFTP] rmdir (recursive) {path}"),
         Cmd::Delete { path, .. } => format!("[SFTP] unlink {path}"),
     }
 }
 
-fn execute(backend: &mut Backend, cmd: &Cmd) -> Result<(Event, String), String> {
+fn execute(
+    backend: &mut Backend,
+    cmd: &Cmd,
+    progress: &dyn Fn(u64, u64),
+) -> Result<(Event, String), String> {
     Ok(match cmd {
         Cmd::TrustHost(_) => (Event::Log(String::new(), false), String::new()),
         Cmd::List(path) => {
@@ -707,7 +813,7 @@ fn execute(backend: &mut Backend, cmd: &Cmd) -> Result<(Event, String), String> 
             )
         }
         Cmd::Download(path) => {
-            let data = backend.download(path)?;
+            let data = backend.download(path, progress)?;
             let summary = format!("{} bytes read", data.len());
             (
                 Event::Downloaded {
@@ -718,7 +824,7 @@ fn execute(backend: &mut Backend, cmd: &Cmd) -> Result<(Event, String), String> 
             )
         }
         Cmd::Upload { path, data, doc } => {
-            backend.upload(path, data)?;
+            backend.upload(path, data, progress)?;
             (
                 Event::Uploaded {
                     path: path.clone(),
@@ -734,6 +840,18 @@ fn execute(backend: &mut Backend, cmd: &Cmd) -> Result<(Event, String), String> 
         Cmd::Rename(from, to) => {
             backend.rename(from, to)?;
             (Event::Changed(parent(to)), "ok".into())
+        }
+        Cmd::Walk(root) => {
+            let mut files = Vec::new();
+            backend.walk(root, &mut files)?;
+            let summary = format!("{} files", files.len());
+            (
+                Event::Walked {
+                    root: root.clone(),
+                    files,
+                },
+                summary,
+            )
         }
         Cmd::Delete { path, dir } => {
             let mut removed = 0;
@@ -757,6 +875,13 @@ fn serve(
     let log = |text: String, error: bool| {
         trace::line(text, error);
         wake();
+    };
+    let last = std::cell::Cell::new(std::time::Instant::now());
+    let progress = |done: u64, total: u64| {
+        if done >= total || last.get().elapsed() > Duration::from_millis(60) {
+            last.set(std::time::Instant::now());
+            send(Event::Progress { done, total });
+        }
     };
     let sftp = profile.protocol == Protocol::Sftp;
     let tag = match profile.protocol {
@@ -818,7 +943,7 @@ fn serve(
             log(describe(&cmd), false);
         }
         let mut result = if alive {
-            execute(&mut backend, &cmd)
+            execute(&mut backend, &cmd, &progress)
         } else {
             Err("connection closed".into())
         };
@@ -838,7 +963,7 @@ fn serve(
                     if sftp {
                         log(describe(&cmd), false);
                     }
-                    result = execute(&mut backend, &cmd);
+                    result = execute(&mut backend, &cmd, &progress);
                 }
                 Err(e) => {
                     log(format!("{tag} reconnect failed: {e}"), true);
@@ -1096,7 +1221,7 @@ fn search_walk(
             if entry.is_dir || entry.size > MAX_GREP_FILE || BINARY.contains(&ext.as_str()) {
                 continue;
             }
-            let Ok(data) = backend.download(&path) else {
+            let Ok(data) = backend.download(&path, &|_, _| {}) else {
                 continue;
             };
             if data.contains(&0) {
@@ -1428,7 +1553,7 @@ mod tests {
                 .recv_timeout(Duration::from_secs(20))
                 .expect("ответ сервера")
             {
-                Event::Log(..) => {}
+                Event::Log(..) | Event::Progress { .. } => {}
                 event => break event,
             }
         };
@@ -1484,6 +1609,29 @@ mod tests {
         let moved = join(&dir, "moved.txt");
         conn.tx.send(Cmd::Rename(file, moved.clone())).unwrap();
         assert!(matches!(next(), Event::Changed(p) if p == dir));
+        let deep = join(&dir, "a/b/deep.bin");
+        let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        conn.tx
+            .send(Cmd::Upload {
+                path: deep.clone(),
+                data: big.clone(),
+                doc: None,
+            })
+            .unwrap();
+        assert!(matches!(next(), Event::Uploaded { .. }));
+        conn.tx.send(Cmd::Walk(dir.clone())).unwrap();
+        let Event::Walked { files, .. } = next() else {
+            panic!("нет обхода")
+        };
+        assert_eq!(
+            files,
+            vec![(deep.clone(), 300_000), (moved.clone(), body.len() as u64)]
+        );
+        conn.tx.send(Cmd::Download(deep)).unwrap();
+        let Event::Downloaded { data, .. } = next() else {
+            panic!("нет файла")
+        };
+        assert!(data == big);
         conn.tx
             .send(Cmd::Delete {
                 path: dir.clone(),
@@ -1541,7 +1689,7 @@ mod tests {
         let conn = connect(&profile, Some("00".repeat(32)), || {});
         let next = || loop {
             match conn.rx.recv_timeout(Duration::from_secs(20)) {
-                Ok(Event::Log(..)) => {}
+                Ok(Event::Log(..)) | Ok(Event::Progress { .. }) => {}
                 other => break other,
             }
         };

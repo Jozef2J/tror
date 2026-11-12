@@ -73,6 +73,8 @@ enum Action {
     Compare,
     Goto(u64, usize),
     Plugin(usize),
+    Detach(Pane),
+    Attach(Pane),
     PluginsFolder,
     PluginsReload,
     NextTab,
@@ -206,6 +208,9 @@ pub struct TrorApp {
     db: DbPanel,
     preview: Preview,
     plugins: crate::plugins::Plugins,
+    embedded: crate::webview::Embedded,
+    page: Option<String>,
+    page_area: Option<Rect>,
     console_shown: bool,
     settings_shown: bool,
     logo: Option<egui::TextureHandle>,
@@ -253,6 +258,9 @@ impl TrorApp {
             diff: DiffPanel::default(),
             db: DbPanel::default(),
             preview: Preview::default(),
+            embedded: crate::webview::Embedded::default(),
+            page: None,
+            page_area: None,
             plugins: crate::plugins::Plugins::new(
                 eframe::storage_dir("Tror").map(|dir| dir.join("plugins")),
             ),
@@ -489,6 +497,22 @@ impl TrorApp {
         }
     }
 
+    fn pane_dialogs(&mut self, pane: Pane, ctx: &egui::Context, pal: &Palette) {
+        match pane {
+            Pane::Hosts => {
+                let events = self.remote.dialogs(ctx, pal);
+                self.remote_events(ctx, events, 0);
+            }
+            Pane::Hosts2 => {
+                let events = self.remote2.dialogs(ctx, pal);
+                self.remote_events(ctx, events, 1);
+            }
+            Pane::Console => self.terminal.dialogs(ctx, pal),
+            Pane::Db => self.db.dialogs(ctx, pal, &mut self.remote.store),
+            _ => {}
+        }
+    }
+
     fn transfers(&mut self) {
         fn push(from: &mut RemotePanel, to: &RemotePanel) {
             if let Some(files) = from.outgoing.take()
@@ -555,6 +579,7 @@ impl TrorApp {
                     if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc.0) {
                         d.mark_saved(doc.1);
                     }
+                    self.embedded.reload();
                     self.notify(format!("Сохранено на сервере: {path}"), now);
                 }
                 PanelEvent::Open {
@@ -668,6 +693,9 @@ impl TrorApp {
             Ok(()) => {
                 let title = doc.title();
                 self.preview.touch();
+                if self.page.as_deref().is_some_and(|url| url.contains(".php")) {
+                    self.embedded.reload();
+                }
                 self.notify(format!("Сохранено: {title}"), now);
                 true
             }
@@ -824,8 +852,30 @@ impl TrorApp {
             }
             Action::ToggleTheme => self.settings.look.dark = !self.settings.look.dark,
             Action::ToggleWrap => self.settings.wrap = !self.settings.wrap,
-            Action::Toggle(pane) => dock::toggle(&mut self.dock, pane, &self.settings.floats),
-            Action::Show(pane) => dock::show(&mut self.dock, pane, &self.settings.floats),
+            Action::Toggle(pane) => {
+                if self.settings.detached.contains(&pane) {
+                    self.settings.detached.retain(|p| *p != pane);
+                } else {
+                    dock::toggle(&mut self.dock, pane, &self.settings.floats);
+                }
+            }
+            Action::Detach(pane) => {
+                dock::hide(&mut self.dock, pane);
+                if !self.settings.detached.contains(&pane) {
+                    self.settings.detached.push(pane);
+                }
+            }
+            Action::Attach(pane) => {
+                self.settings.detached.retain(|p| *p != pane);
+                if !matches!(pane, Pane::Doc(_)) {
+                    dock::show(&mut self.dock, pane, &self.settings.floats);
+                }
+            }
+            Action::Show(pane) => {
+                if !self.settings.detached.contains(&pane) {
+                    dock::show(&mut self.dock, pane, &self.settings.floats);
+                }
+            }
             Action::ResetLayout => {
                 self.dock = dock::new();
                 self.focus_editor = true;
@@ -842,8 +892,15 @@ impl TrorApp {
                         _ => Err("Сначала сохраните файл на диск".to_owned()),
                     },
                 };
-                match url.and_then(|url| preview::open_url(&url).map(|()| url)) {
-                    Ok(url) => self.notify(format!("Открыто в браузере: {url}"), now),
+                match url {
+                    Ok(url) if crate::webview::AVAILABLE => {
+                        self.page = Some(url);
+                        dock::show(&mut self.dock, Pane::Preview, &self.settings.floats);
+                    }
+                    Ok(url) => match preview::open_url(&url) {
+                        Ok(()) => self.notify(format!("Открыто в браузере: {url}"), now),
+                        Err(e) => self.notify(format!("Предпросмотр: {e}"), now),
+                    },
                     Err(e) => self.notify(format!("Предпросмотр: {e}"), now),
                 }
             }
@@ -1106,11 +1163,12 @@ impl TrorApp {
                     (Pane::Settings, "Настройки", "Скрыть настройки", ""),
                 ];
                 for (pane, show, hide, shortcut) in panes {
-                    let label = if dock::has(&self.dock, pane) {
-                        hide
-                    } else {
-                        show
-                    };
+                    let label =
+                        if dock::has(&self.dock, pane) || self.settings.detached.contains(&pane) {
+                            hide
+                        } else {
+                            show
+                        };
                     if item(ui, label, &key(shortcut), true) {
                         actions.push(Action::Toggle(pane));
                     }
@@ -1778,6 +1836,51 @@ impl TrorApp {
         }
     }
 
+    fn preview_pane(&mut self, ui: &mut Ui, pal: &Palette) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            if ui.add(Button::new("Обновить").fill(pal.surface)).clicked() {
+                self.embedded.reload();
+            }
+            if let Some(url) = &self.page {
+                if ui
+                    .add(Button::new("В браузере").fill(pal.surface))
+                    .clicked()
+                {
+                    let _ = preview::open_url(url);
+                }
+                ui.add(
+                    egui::Label::new(RichText::new(url).size(12.5).color(pal.subtext)).truncate(),
+                );
+            }
+        });
+        ui.add_space(4.0);
+        let area = ui.available_rect_before_wrap();
+        ui.painter().rect_filled(area, 0.0, pal.base);
+        let note = if let Some(error) = &self.embedded.error {
+            format!(
+                "Встроенный просмотр не запустился: {error}\nСтраницу можно открыть кнопкой «В браузере»."
+            )
+        } else if !crate::webview::AVAILABLE {
+            "Встроенный предпросмотр есть в сборках для Windows и macOS.\nЗдесь F12 открывает страницу в системном браузере.".to_owned()
+        } else if self.page.is_none() {
+            "Откройте файл и нажмите F12".to_owned()
+        } else {
+            "Страница скрыта, пока открыто меню или диалог".to_owned()
+        };
+        ui.painter().text(
+            area.center(),
+            egui::Align2::CENTER_CENTER,
+            note,
+            FontId::proportional(13.0),
+            pal.faint,
+        );
+        if self.page.is_some() {
+            self.page_area = Some(area);
+        }
+    }
+
     fn log_pane(&mut self, ui: &mut Ui, pal: &Palette) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -1925,6 +2028,7 @@ impl TabViewer for Viewer<'_> {
             Pane::ServerSearch => 300.0,
             Pane::Db => 340.0,
             Pane::Settings | Pane::Diff => 430.0,
+            Pane::Preview => 200.0,
         };
         let mut body = |ui: &mut Ui| match pane {
             Pane::Welcome => app.welcome(ui, &pal, actions),
@@ -1975,6 +2079,7 @@ impl TabViewer for Viewer<'_> {
                 }
             }
             Pane::Db => app.db.ui(ui, &pal, &mut app.remote.store, font_size),
+            Pane::Preview => app.preview_pane(ui, &pal),
         };
         if ui.available_width() < min_width {
             ScrollArea::horizontal()
@@ -1986,6 +2091,15 @@ impl TabViewer for Viewer<'_> {
                 });
         } else {
             body(ui);
+        }
+    }
+
+    fn context_menu(&mut self, ui: &mut Ui, tab: &mut Pane, _path: egui_stack::TabPath) {
+        if !matches!(*tab, Pane::Welcome | Pane::Preview)
+            && ui.button("В отдельное окно системы").clicked()
+        {
+            self.actions.push(Action::Detach(*tab));
+            ui.close();
         }
     }
 
@@ -2024,7 +2138,7 @@ impl TabViewer for Viewer<'_> {
 }
 
 impl eframe::App for TrorApp {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let started = std::time::Instant::now();
         let ctx = ui.ctx().clone();
         self.apply_look(&ctx);
@@ -2038,8 +2152,10 @@ impl eframe::App for TrorApp {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.confirm = Some(Confirm::Quit);
         }
-        self.remote.visible = dock::has(&self.dock, Pane::Hosts);
-        self.remote2.visible = dock::has(&self.dock, Pane::Hosts2);
+        let detached = self.settings.detached.clone();
+        self.remote.visible = dock::has(&self.dock, Pane::Hosts) || detached.contains(&Pane::Hosts);
+        self.remote2.visible =
+            dock::has(&self.dock, Pane::Hosts2) || detached.contains(&Pane::Hosts2);
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -2111,8 +2227,17 @@ impl eframe::App for TrorApp {
             .show_separator_line(true)
             .show(ui, |ui| self.status_bar(ui, &pal));
 
-        let ids: Vec<u64> = self.docs.iter().map(|d| d.id).collect();
-        dock::sync(&mut self.dock, &ids);
+        self.settings.detached.retain(|pane| match pane {
+            Pane::Doc(id) => self.docs.iter().any(|d| d.id == *id),
+            _ => true,
+        });
+        let ids: Vec<u64> = self
+            .docs
+            .iter()
+            .map(|d| d.id)
+            .filter(|id| !self.settings.detached.contains(&Pane::Doc(*id)))
+            .collect();
+        dock::sync_with(&mut self.dock, &ids, self.docs.is_empty());
         if self.focus_editor
             && let Some(doc) = self.docs.get(self.active)
             && let Some(path) = self.dock.find_tab(&Pane::Doc(doc.id))
@@ -2123,6 +2248,7 @@ impl eframe::App for TrorApp {
         let style = dock::style(&pal, ui.style(), self.settings.look.radius);
         self.console_shown = false;
         self.settings_shown = false;
+        self.page_area = None;
         CentralPanel::no_frame().show(ui, |ui| {
             let mut viewer = Viewer {
                 app: self,
@@ -2145,12 +2271,59 @@ impl eframe::App for TrorApp {
         }
         dock::remember(&dock, &mut self.settings.floats);
         self.dock = dock;
+        for pane in self.settings.detached.clone() {
+            let title = match pane {
+                Pane::Doc(id) => self
+                    .docs
+                    .iter()
+                    .find(|d| d.id == id)
+                    .map(|d| format!("{} — Tror", d.title()))
+                    .unwrap_or_default(),
+                _ => format!("{} — Tror", pane.title()),
+            };
+            let mut closed = false;
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of(("tror_window", pane)),
+                egui::ViewportBuilder::default()
+                    .with_title(title)
+                    .with_inner_size([860.0, 580.0]),
+                |ui, _class| {
+                    closed = ui.input(|i| i.viewport().close_requested());
+                    if !modal_open {
+                        self.shortcuts(ui.ctx(), &mut actions);
+                    }
+                    CentralPanel::default()
+                        .frame(Frame::new().fill(pal.mantle))
+                        .show(ui, |ui| {
+                            let mut viewer = Viewer {
+                                app: self,
+                                pal,
+                                actions: &mut actions,
+                                modal_open,
+                            };
+                            let mut tab = pane;
+                            viewer.ui(ui, &mut tab);
+                        });
+                    self.pane_dialogs(pane, ui.ctx(), &pal);
+                },
+            );
+            if closed {
+                actions.push(Action::Attach(pane));
+            }
+        }
         self.focus_editor = false;
         if !self.console_shown {
             self.terminal.focused = false;
         }
         if !self.settings_shown {
             self.capturing = None;
+        }
+        let covered = modal_open || ctx.any_popup_open() || ctx.dragged_id().is_some();
+        match (&self.page, self.page_area) {
+            (Some(url), Some(area)) if !covered => {
+                self.embedded.show(frame, url, area, ctx.zoom_factor());
+            }
+            _ => self.embedded.hide(),
         }
 
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
@@ -2177,12 +2350,11 @@ impl eframe::App for TrorApp {
 
         self.goto_modal(&ctx, &pal);
         self.confirm_modal(&ctx);
-        let events = self.remote.dialogs(&ctx, &pal);
-        self.remote_events(&ctx, events, 0);
-        let events = self.remote2.dialogs(&ctx, &pal);
-        self.remote_events(&ctx, events, 1);
-        self.terminal.dialogs(&ctx, &pal);
-        self.db.dialogs(&ctx, &pal, &mut self.remote.store);
+        for pane in [Pane::Hosts, Pane::Hosts2, Pane::Console, Pane::Db] {
+            if !self.settings.detached.contains(&pane) {
+                self.pane_dialogs(pane, &ctx, &pal);
+            }
+        }
 
         for action in actions {
             self.run(action, &ctx);

@@ -111,6 +111,7 @@ pub struct Terminal {
     status: String,
     wheel: f32,
     grab_focus: bool,
+    select: Option<((u16, u16), (u16, u16))>,
 }
 
 impl Terminal {
@@ -126,6 +127,7 @@ impl Terminal {
             status: String::new(),
             wheel: 0.0,
             grab_focus: false,
+            select: None,
         }
     }
 
@@ -311,9 +313,37 @@ impl Terminal {
         }
 
         let id = egui::Id::unique("tror_terminal");
-        let response = ui.interact(rect, id, Sense::click());
-        if response.clicked() || std::mem::take(&mut self.grab_focus) {
+        let response = ui.interact(rect, id, Sense::click_and_drag());
+        if response.clicked() || response.drag_started() || std::mem::take(&mut self.grab_focus) {
             ui.memory_mut(|m| m.request_focus(id));
+        }
+        let cell_at = |pos: egui::Pos2| {
+            let row = ((pos.y - area.top()) / row_h)
+                .floor()
+                .clamp(0.0, rows as f32 - 1.0);
+            let col = ((pos.x - area.left()) / char_w)
+                .round()
+                .clamp(0.0, cols as f32);
+            (row as u16, col as u16)
+        };
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(pos) = ui.input(|i| i.pointer.press_origin())
+        {
+            self.select = Some((cell_at(pos), cell_at(pos)));
+        } else if response.dragged_by(egui::PointerButton::Primary)
+            && let (Some(pos), Some((anchor, _))) = (response.interact_pointer_pos(), self.select)
+        {
+            self.select = Some((anchor, cell_at(pos)));
+        } else if response.clicked() {
+            self.select = None;
+        }
+        if response.secondary_clicked() {
+            if self.selection().is_some() {
+                self.copy_selection(ui);
+            } else {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            }
         }
         self.focused = ui.memory(|m| m.has_focus(id));
         if self.focused {
@@ -339,13 +369,36 @@ impl Terminal {
                 let screen = self.parser.screen_mut();
                 let target = (screen.scrollback() as isize + lines).max(0) as usize;
                 screen.set_scrollback(target);
+                self.select = None;
             }
         }
+        let selection = self.selection();
 
         let screen = self.parser.screen();
         let painter = ui.painter_at(rect);
         let plain = |color| TextFormat::simple(font.clone(), color);
         for row in 0..rows {
+            if let Some(((r0, c0), (r1, c1))) = selection
+                && row >= r0
+                && row <= r1
+            {
+                let from = if row == r0 { c0 } else { 0 };
+                let to = if row == r1 { c1 } else { cols };
+                painter.rect_filled(
+                    Rect::from_min_max(
+                        egui::pos2(
+                            area.left() + from as f32 * char_w,
+                            area.top() + row as f32 * row_h,
+                        ),
+                        egui::pos2(
+                            area.left() + to as f32 * char_w,
+                            area.top() + (row + 1) as f32 * row_h,
+                        ),
+                    ),
+                    0.0,
+                    pal.selection,
+                );
+            }
             let mut job = LayoutJob::default();
             job.wrap.max_width = f32::INFINITY;
             let mut run = String::new();
@@ -446,6 +499,10 @@ impl Terminal {
                         text.into_bytes()
                     })
                 }
+                Event::Copy if self.select.is_some() => {
+                    self.copy_selection(ui);
+                    None
+                }
                 Event::Copy => Some(vec![0x03]),
                 Event::Cut => Some(vec![0x18]),
                 Event::Key {
@@ -465,7 +522,23 @@ impl Terminal {
         }
         if typed {
             self.parser.screen_mut().set_scrollback(0);
+            self.select = None;
         }
+    }
+
+    fn selection(&self) -> Option<((u16, u16), (u16, u16))> {
+        let (a, b) = self.select?;
+        let (start, end) = if a <= b { (a, b) } else { (b, a) };
+        (start != end).then_some((start, end))
+    }
+
+    fn copy_selection(&mut self, ui: &Ui) {
+        if let Some(((r0, c0), (r1, c1))) = self.selection() {
+            let text = self.parser.screen().contents_between(r0, c0, r1, c1);
+            let text: Vec<&str> = text.lines().map(str::trim_end).collect();
+            ui.ctx().copy_text(text.join("\n"));
+        }
+        self.select = None;
     }
 }
 

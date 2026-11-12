@@ -34,6 +34,12 @@ pub enum PanelEvent {
     },
 }
 
+enum Walk {
+    Size,
+    Download(PathBuf),
+    Relay(String),
+}
+
 #[derive(Clone)]
 pub struct Dragged {
     panel: u8,
@@ -66,6 +72,9 @@ pub struct RemotePanel {
     pub outgoing: Option<Vec<(String, bool)>>,
     pub incoming: Option<Dragged>,
     relay: HashMap<String, String>,
+    walks: HashMap<String, Walk>,
+    pending: usize,
+    progress: Option<(u64, u64)>,
     store_seen: u64,
     pub store: Store,
     selected: usize,
@@ -216,6 +225,9 @@ impl RemotePanel {
             outgoing: None,
             incoming: None,
             relay: HashMap::new(),
+            walks: HashMap::new(),
+            pending: 0,
+            progress: None,
             store_seen: Store::generation(),
             want_search: false,
             search_query: String::new(),
@@ -292,6 +304,15 @@ impl RemotePanel {
             && conn.tx.send(cmd).is_ok()
         {
             self.busy = Some(busy.into());
+            self.pending += 1;
+        }
+    }
+
+    fn finished(&mut self) {
+        self.pending = self.pending.saturating_sub(1);
+        self.progress = None;
+        if self.pending == 0 {
+            self.busy = None;
         }
     }
 
@@ -306,6 +327,10 @@ impl RemotePanel {
         self.entries.clear();
         self.marked.clear();
         self.busy = None;
+        self.pending = 0;
+        self.progress = None;
+        self.relay.clear();
+        self.walks.clear();
         self.host_key = None;
     }
 
@@ -378,30 +403,46 @@ impl RemotePanel {
     }
 
     pub fn upload_local(&mut self, paths: Vec<PathBuf>) {
-        for local in paths {
-            let Some(name) = local.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-                continue;
-            };
-            if local.is_dir() {
-                self.push_log(
-                    format!("Папка {name} пропущена: загружаются только файлы"),
-                    true,
-                );
+        let mut files: Vec<(PathBuf, String)> = Vec::new();
+        let mut stack: Vec<(PathBuf, String)> = paths
+            .into_iter()
+            .filter_map(|p| {
+                let name = p.file_name()?.to_string_lossy().into_owned();
+                Some((p, name))
+            })
+            .collect();
+        while let Some((local, relative)) = stack.pop() {
+            if !local.is_dir() {
+                files.push((local, relative));
                 continue;
             }
+            match std::fs::read_dir(&local) {
+                Ok(entries) => {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        stack.push((entry.path(), format!("{relative}/{name}")));
+                    }
+                }
+                Err(e) => {
+                    self.push_log(format!("Не удалось прочитать папку {relative}: {e}"), true)
+                }
+            }
+        }
+        files.sort_by(|a, b| a.1.cmp(&b.1));
+        for (local, relative) in files {
             match std::fs::read(&local) {
                 Ok(data) => {
-                    let path = remote::join(&self.cwd, &name);
+                    let path = remote::join(&self.cwd, &relative);
                     self.send(
                         Cmd::Upload {
                             path,
                             data,
                             doc: None,
                         },
-                        format!("Загрузка {name}…"),
+                        format!("Загрузка {relative}…"),
                     );
                 }
-                Err(e) => self.push_log(format!("Не удалось прочитать {name}: {e}"), true),
+                Err(e) => self.push_log(format!("Не удалось прочитать {relative}: {e}"), true),
             }
         }
     }
@@ -474,10 +515,9 @@ impl RemotePanel {
         for (path, dir) in items {
             let name = remote::file_name(&path).to_owned();
             if dir {
-                self.push_log(
-                    format!("Папка {name} пропущена: между серверами передаются только файлы"),
-                    true,
-                );
+                self.walks
+                    .insert(path.clone(), Walk::Relay(target_dir.to_owned()));
+                self.send(Cmd::Walk(path), format!("Чтение папки {name}…"));
                 continue;
             }
             self.relay
@@ -548,11 +588,12 @@ impl RemotePanel {
                     fingerprint,
                     changed,
                 } => {
-                    self.busy = None;
+                    self.finished();
                     self.host_key = Some((fingerprint, changed));
                 }
                 Event::Connected { home, fingerprint } => {
                     self.connected = true;
+                    self.pending = 0;
                     if let (Some(print), Some(p)) =
                         (fingerprint, self.store.profiles.get(self.selected))
                     {
@@ -567,7 +608,7 @@ impl RemotePanel {
                     self.list(home);
                 }
                 Event::Listing { path, entries } => {
-                    self.busy = None;
+                    self.finished();
                     out.push(PanelEvent::Listed {
                         profile: profile.clone(),
                         dir: path.clone(),
@@ -584,7 +625,7 @@ impl RemotePanel {
                     self.entries = entries;
                 }
                 Event::Downloaded { path, data } => {
-                    self.busy = None;
+                    self.finished();
                     if let Some(target) = self.relay.remove(&path) {
                         out.push(PanelEvent::Relay { path: target, data });
                         continue;
@@ -610,7 +651,7 @@ impl RemotePanel {
                     }
                 }
                 Event::Uploaded { path, doc } => {
-                    self.busy = None;
+                    self.finished();
                     let refresh = remote::parent(&path) == self.cwd;
                     match doc {
                         Some(doc) => out.push(PanelEvent::Uploaded { doc, path }),
@@ -623,15 +664,58 @@ impl RemotePanel {
                         self.list(self.cwd.clone());
                     }
                 }
+                Event::Progress { done, total } => self.progress = Some((done, total)),
+                Event::Walked { root, files } => {
+                    self.finished();
+                    let name = remote::file_name(&root).to_owned();
+                    let base = remote::parent(&root);
+                    let relative = |path: &str| {
+                        path.strip_prefix(base.as_str())
+                            .unwrap_or(path)
+                            .trim_start_matches('/')
+                            .to_owned()
+                    };
+                    match self.walks.remove(&root) {
+                        None => {}
+                        Some(Walk::Size) => {
+                            let bytes: u64 = files.iter().map(|(_, size)| size).sum();
+                            let text = format!(
+                                "Папка {name}: файлов {}, {}",
+                                files.len(),
+                                crate::app::size_label(bytes as usize)
+                            );
+                            self.push_log(text.clone(), false);
+                            out.push(PanelEvent::Toast(text));
+                        }
+                        Some(Walk::Download(folder)) => {
+                            for (path, _) in files {
+                                let mut local = folder.clone();
+                                local.extend(relative(&path).split('/'));
+                                if let Some(dir) = local.parent() {
+                                    let _ = std::fs::create_dir_all(dir);
+                                }
+                                self.save_to.insert(path.clone(), local);
+                                self.send(Cmd::Download(path), format!("Скачивание папки {name}…"));
+                            }
+                        }
+                        Some(Walk::Relay(target)) => {
+                            for (path, _) in files {
+                                self.relay
+                                    .insert(path.clone(), remote::join(&target, &relative(&path)));
+                                self.send(Cmd::Download(path), format!("Передача папки {name}…"));
+                            }
+                        }
+                    }
+                }
                 Event::Changed(dir) => {
-                    self.busy = None;
+                    self.finished();
                     if dir != self.cwd {
                         self.push_log(format!("Изменён каталог {dir}"), false);
                     }
                     self.list(self.cwd.clone());
                 }
                 Event::Error(e) => {
-                    self.busy = None;
+                    self.finished();
                     out.push(PanelEvent::Toast(format!("Ошибка сервера: {e}")));
                 }
                 Event::Closed(e) => {
@@ -765,8 +849,37 @@ impl RemotePanel {
         if let Some(busy) = &self.busy {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(RichText::new(busy).color(pal.subtext).size(12.5));
+                let queue = if self.pending > 1 {
+                    format!("  ·  в очереди {}", self.pending)
+                } else {
+                    String::new()
+                };
+                let percent = match self.progress {
+                    Some((done, total)) if total > 0 => {
+                        format!("  {}%", (done * 100 / total).min(100))
+                    }
+                    Some((done, _)) => format!("  {}", crate::app::size_label(done as usize)),
+                    None => String::new(),
+                };
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("{busy}{percent}{queue}"))
+                            .color(pal.subtext)
+                            .size(12.5),
+                    )
+                    .truncate(),
+                );
             });
+            if let Some((done, total)) = self.progress
+                && total > 0
+            {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), Sense::hover());
+                ui.painter().rect_filled(rect, 1.5, pal.surface);
+                let mut filled = rect;
+                filled.set_width(rect.width() * (done as f32 / total as f32).min(1.0));
+                ui.painter().rect_filled(filled, 1.5, pal.accent);
+            }
         }
     }
 
@@ -945,7 +1058,8 @@ impl RemotePanel {
         let mut go = None;
         let mut download: Vec<String> = Vec::new();
         let mut moves: Vec<(String, String)> = Vec::new();
-        let reserve = if self.busy.is_some() { 26.0 } else { 0.0 };
+        let mut walk: Vec<String> = Vec::new();
+        let reserve = if self.busy.is_some() { 34.0 } else { 0.0 };
         let area = ScrollArea::vertical()
             .auto_shrink(false)
             .max_height((ui.available_height() - reserve).max(40.0))
@@ -1098,7 +1212,12 @@ impl RemotePanel {
                                 self.save_to.insert(files[0].clone(), local);
                                 download.push(files[0].clone());
                             }
-                            if files.len() > 1
+                            let dirs: Vec<String> = chosen
+                                .iter()
+                                .filter(|(_, dir)| *dir)
+                                .map(|(p, _)| p.clone())
+                                .collect();
+                            if (files.len() > 1 || !dirs.is_empty())
                                 && ui.button("Скачать в папку…").clicked()
                                 && let Some(folder) = rfd::FileDialog::new().pick_folder()
                             {
@@ -1107,13 +1226,22 @@ impl RemotePanel {
                                         .insert(file.clone(), folder.join(remote::file_name(file)));
                                     download.push(file.clone());
                                 }
+                                for dir in &dirs {
+                                    self.walks
+                                        .insert(dir.clone(), Walk::Download(folder.clone()));
+                                    walk.push(dir.clone());
+                                }
+                            }
+                            if !dirs.is_empty() && ui.button("Размер папки").clicked() {
+                                for dir in &dirs {
+                                    self.walks.insert(dir.clone(), Walk::Size);
+                                    walk.push(dir.clone());
+                                }
                             }
                             if let Some(peer) = &self.peer
-                                && !files.is_empty()
                                 && ui.button(format!("Передать на «{peer}»")).clicked()
                             {
-                                self.outgoing =
-                                    Some(files.iter().map(|f| (f.clone(), false)).collect());
+                                self.outgoing = Some(chosen.clone());
                             }
                             if chosen.len() == 1 && ui.button("Переименовать…").clicked()
                             {
@@ -1182,6 +1310,10 @@ impl RemotePanel {
         }
         for (from, to) in moves {
             self.send(Cmd::Rename(from, to), "Перемещение…");
+        }
+        for path in walk {
+            let name = remote::file_name(&path).to_owned();
+            self.send(Cmd::Walk(path), format!("Чтение папки {name}…"));
         }
     }
 
@@ -1272,7 +1404,10 @@ impl RemotePanel {
         if let Some(trust) = answer {
             self.host_key = None;
             if trust {
-                self.send(Cmd::TrustHost(true), "Вход…");
+                if let Some(conn) = &self.conn {
+                    let _ = conn.tx.send(Cmd::TrustHost(true));
+                    self.busy = Some("Вход…".into());
+                }
             } else {
                 self.disconnect();
             }

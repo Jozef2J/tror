@@ -16,6 +16,7 @@ pub enum Pane {
     Settings,
     Diff,
     Db,
+    Preview,
 }
 
 #[derive(PartialEq)]
@@ -38,6 +39,7 @@ impl Pane {
             Pane::Settings => "Настройки",
             Pane::Diff => "Сравнение",
             Pane::Db => "База данных",
+            Pane::Preview => "Предпросмотр",
         }
     }
 
@@ -59,7 +61,7 @@ pub fn new() -> DockState<Pane> {
 pub fn translate(dock: &mut DockState<Pane>) {
     let t = &mut dock.translations;
     t.tab_context_menu.close_button = "Закрыть".into();
-    t.tab_context_menu.eject_button = "Открепить в отдельное окно".into();
+    t.tab_context_menu.eject_button = "Открепить (плавающая панель)".into();
     t.tab_context_menu.hide_tab_bar_button = "Скрыть заголовок".into();
     t.tab_context_menu.show_tab_bar_button = "Показать заголовок".into();
     t.leaf.close_button_disabled_tooltip = "Здесь есть вкладки, которые нельзя закрыть".into();
@@ -137,7 +139,14 @@ pub fn show(dock: &mut DockState<Pane>, pane: Pane, floats: &Floats) {
         Pane::Hosts2 => dock.find_tab(&Pane::Hosts),
         _ => None,
     };
-    if let Some(twin) = twin.filter(|path| path.surface == SurfaceIndex::main()) {
+    let beside = (pane == Pane::Preview)
+        .then(|| zone_leaf(dock, Zone::Center))
+        .flatten()
+        .filter(|path| path.surface == SurfaceIndex::main());
+    if let Some(center) = beside {
+        dock.main_surface_mut()
+            .split_right(center.node, 0.5, vec![pane]);
+    } else if let Some(twin) = twin.filter(|path| path.surface == SurfaceIndex::main()) {
         dock.main_surface_mut()
             .split_below(twin.node, 0.5, vec![pane]);
     } else if let Some(path) = zone_leaf(dock, pane.zone()) {
@@ -176,8 +185,13 @@ pub fn toggle(dock: &mut DockState<Pane>, pane: Pane, floats: &Floats) {
     }
 }
 
+#[cfg(test)]
 pub fn sync(dock: &mut DockState<Pane>, docs: &[u64]) {
-    if docs.is_empty() && !has(dock, Pane::Welcome) {
+    sync_with(dock, docs, docs.is_empty());
+}
+
+pub fn sync_with(dock: &mut DockState<Pane>, docs: &[u64], welcome: bool) {
+    if welcome && !has(dock, Pane::Welcome) {
         show(dock, Pane::Welcome, &Vec::new());
     }
     for id in docs {
@@ -190,7 +204,7 @@ pub fn sync(dock: &mut DockState<Pane>, docs: &[u64]) {
         .map(|(_, tab)| *tab)
         .filter(|tab| match tab {
             Pane::Doc(id) => !docs.contains(id),
-            Pane::Welcome => !docs.is_empty(),
+            Pane::Welcome => !welcome,
             _ => false,
         })
         .collect();
