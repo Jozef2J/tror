@@ -10,16 +10,16 @@ use egui_stack::{DockArea, DockState, TabViewer};
 use encoding_rs::Encoding;
 
 use crate::complete::Completion;
+use crate::console::ConsolePanel;
 use crate::db::DbPanel;
 use crate::diff::DiffPanel;
 use crate::dock::{self, Pane};
 use crate::document::{Document, Eol};
 use crate::editor;
+use crate::files::{ProjectEvent, ProjectPanel};
 use crate::highlight::Syntaxes;
 use crate::prefs::{self, Look, Settings};
 use crate::preview::{self, Preview};
-use crate::console::ConsolePanel;
-use crate::files::{ProjectEvent, ProjectPanel};
 use crate::remote_ui::{PanelEvent, RemotePanel};
 use crate::search::{Pending, SearchState};
 use crate::theme::{self, Palette};
@@ -218,10 +218,19 @@ struct Perf {
     total: std::time::Duration,
     worst: std::time::Duration,
     since: Option<std::time::Instant>,
+    first: bool,
 }
 
 impl Perf {
     fn record(&mut self, frame: std::time::Duration) {
+        if !std::mem::replace(&mut self.first, true)
+            && let Some(started) = crate::STARTED.get()
+        {
+            eprintln!(
+                "первый кадр: {:.0} мс от запуска",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         let since = *self.since.get_or_insert_with(std::time::Instant::now);
         self.frames += 1;
         self.total += frame;
@@ -233,7 +242,10 @@ impl Perf {
                 self.total.as_secs_f64() * 1000.0 / self.frames as f64,
                 self.worst.as_secs_f64() * 1000.0
             );
-            *self = Self::default();
+            *self = Self {
+                first: true,
+                ..Self::default()
+            };
         }
     }
 }
@@ -920,11 +932,13 @@ impl TrorApp {
                 }
             }
             Action::AddHosts => {
-                let free = (1..self.remotes.len()).find(|i| !self.host_shown(*i) && !self.remotes[*i].in_use());
+                let free = (1..self.remotes.len())
+                    .find(|i| !self.host_shown(*i) && !self.remotes[*i].in_use());
                 let index = match free {
                     Some(index) => Some(index),
                     None if self.remotes.len() < 16 => {
-                        self.remotes.push(RemotePanel::new(self.remotes.len() as u8));
+                        self.remotes
+                            .push(RemotePanel::new(self.remotes.len() as u8));
                         Some(self.remotes.len() - 1)
                     }
                     None => None,
@@ -965,7 +979,11 @@ impl TrorApp {
                             if let Err(e) = self.remotes[index].reopen(ctx, &profile, &file) {
                                 self.notify(format!("Не удалось открыть {file}: {e}"), now);
                             } else if !self.host_shown(index) {
-                                dock::show(&mut self.dock, Pane::hosts(index), &self.settings.floats);
+                                dock::show(
+                                    &mut self.dock,
+                                    Pane::hosts(index),
+                                    &self.settings.floats,
+                                );
                             }
                         }
                         None => {
@@ -1263,7 +1281,12 @@ impl TrorApp {
                 if item(ui, "Закрыть все", "", has_doc) {
                     actions.push(Action::CloseAll);
                 }
-                if item(ui, "Открыть закрытую вкладку", &key("reopen"), !self.closed.is_empty()) {
+                if item(
+                    ui,
+                    "Открыть закрытую вкладку",
+                    &key("reopen"),
+                    !self.closed.is_empty(),
+                ) {
                     actions.push(Action::Reopen);
                 }
                 ui.separator();
@@ -1341,7 +1364,8 @@ impl TrorApp {
                         actions.push(Action::Toggle(*pane));
                     }
                 }
-                if self.remotes.len() < 16 && item(ui, "Ещё одно подключение", "", true) {
+                if self.remotes.len() < 16 && item(ui, "Ещё одно подключение", "", true)
+                {
                     actions.push(Action::AddHosts);
                 }
                 ui.separator();
@@ -1450,13 +1474,8 @@ impl TrorApp {
                 if Self::tool_button(ui, pal, 2, self.settings.wrap, "Перенос строк") {
                     actions.push(Action::ToggleWrap);
                 }
-                if Self::tool_button(
-                    ui,
-                    pal,
-                    1,
-                    dock::has(&self.dock, Pane::Console),
-                    "Консоль",
-                ) {
+                if Self::tool_button(ui, pal, 1, dock::has(&self.dock, Pane::Console), "Консоль")
+                {
                     actions.push(Action::Toggle(Pane::Console));
                 }
                 if Self::tool_button(
@@ -1468,7 +1487,10 @@ impl TrorApp {
                 ) {
                     actions.push(Action::Toggle(Pane::Hosts));
                 }
-                if Self::tool_button(ui, pal, 4, false, "Новая вкладка") {
+                if crate::widgets::plus_button(ui, pal, egui::vec2(30.0, 26.0))
+                    .on_hover_text("Новая вкладка")
+                    .clicked()
+                {
                     actions.push(Action::New);
                 }
             });
@@ -1486,12 +1508,14 @@ impl TrorApp {
         for (index, (text, ok, _)) in self.popups.iter().enumerate().rev() {
             let width = (screen.width() * 0.5).clamp(260.0, 520.0);
             let font = FontId::proportional(13.0);
-            let galley = ctx.fonts_mut(|f| {
-                f.layout(text.clone(), font.clone(), pal.text, width - 46.0)
-            });
+            let galley =
+                ctx.fonts_mut(|f| f.layout(text.clone(), font.clone(), pal.text, width - 46.0));
             let height = galley.size().y + 22.0;
             y -= height;
-            let rect = Rect::from_min_size(egui::pos2(screen.right() - width - 16.0, y), egui::vec2(width, height));
+            let rect = Rect::from_min_size(
+                egui::pos2(screen.right() - width - 16.0, y),
+                egui::vec2(width, height),
+            );
             y -= 8.0;
             let color = if *ok {
                 Color32::from_rgb(0x3f, 0xc2, 0x6e)
@@ -1512,20 +1536,30 @@ impl TrorApp {
                         egui::StrokeKind::Inside,
                     );
                     painter.rect_filled(
-                        Rect::from_min_size(rect.min + egui::vec2(0.0, 8.0), egui::vec2(3.0, rect.height() - 16.0)),
+                        Rect::from_min_size(
+                            rect.min + egui::vec2(0.0, 8.0),
+                            egui::vec2(3.0, rect.height() - 16.0),
+                        ),
                         1.5,
                         color,
                     );
                     let c = rect.left_top() + egui::vec2(21.0, 19.0);
                     painter.circle_stroke(c, 6.5, Stroke::new(1.4, color));
                     let mark = if *ok {
-                        vec![c + egui::vec2(-3.0, 0.2), c + egui::vec2(-0.8, 2.6), c + egui::vec2(3.2, -2.4)]
+                        vec![
+                            c + egui::vec2(-3.0, 0.2),
+                            c + egui::vec2(-0.8, 2.6),
+                            c + egui::vec2(3.2, -2.4),
+                        ]
                     } else {
                         vec![c + egui::vec2(-2.6, -2.6), c + egui::vec2(2.6, 2.6)]
                     };
                     painter.add(egui::Shape::line(mark, Stroke::new(1.5, color)));
                     if !*ok {
-                        painter.line_segment([c + egui::vec2(2.6, -2.6), c + egui::vec2(-2.6, 2.6)], Stroke::new(1.5, color));
+                        painter.line_segment(
+                            [c + egui::vec2(2.6, -2.6), c + egui::vec2(-2.6, 2.6)],
+                            Stroke::new(1.5, color),
+                        );
                     }
                     painter.galley(rect.left_top() + egui::vec2(34.0, 11.0), galley, pal.text);
                     if response.clicked() {
@@ -1988,14 +2022,22 @@ impl TrorApp {
                     .iter_leaves()
                     .find(|(node, leaf)| {
                         *node != path.node_path()
-                            && leaf.tabs().iter().any(|t| matches!(t, Pane::Doc(_) | Pane::Welcome))
+                            && leaf
+                                .tabs()
+                                .iter()
+                                .any(|t| matches!(t, Pane::Doc(_) | Pane::Welcome))
                     })
                     .map(|(node, _)| node);
                 match target {
-                    Some(node) => self.dock.move_tab(path, (node, egui_stack::TabInsert::Append)),
+                    Some(node) => self
+                        .dock
+                        .move_tab(path, (node, egui_stack::TabInsert::Append)),
                     None if self.leaf_docs(id).len() > 1 => self.dock.move_tab(
                         path,
-                        (path.node_path(), egui_stack::TabInsert::Split(egui_stack::Split::Right)),
+                        (
+                            path.node_path(),
+                            egui_stack::TabInsert::Split(egui_stack::Split::Right),
+                        ),
                     ),
                     None => {}
                 }
@@ -2057,14 +2099,19 @@ impl TrorApp {
                 && name != self.docs[index].title()
             {
                 let old_key = self.docs[index].location();
-                let result = match (self.docs[index].remote.clone(), self.docs[index].path.clone()) {
+                let result = match (
+                    self.docs[index].remote.clone(),
+                    self.docs[index].path.clone(),
+                ) {
                     (Some((profile, from)), _) => {
                         let to = crate::remote::join(&crate::remote::parent(&from), &name);
                         let panel = self.remotes.iter().position(|r| r.serves(&profile));
                         match panel {
-                            Some(p) => self.remotes[p].rename_file(&profile, &from, &to).map(|()| {
-                                self.docs[index].remote = Some((profile, to));
-                            }),
+                            Some(p) => {
+                                self.remotes[p].rename_file(&profile, &from, &to).map(|()| {
+                                    self.docs[index].remote = Some((profile, to));
+                                })
+                            }
                             None => Err(format!("сначала подключитесь к «{profile}»")),
                         }
                     }
@@ -2073,12 +2120,15 @@ impl TrorApp {
                         if to.exists() {
                             Err("файл с таким именем уже есть".into())
                         } else {
-                            std::fs::rename(&path, &to).map_err(|e| e.to_string()).map(|()| {
-                                let first = self.docs[index].first_line();
-                                self.docs[index].syntax = self.syntaxes.detect(Some(&to), &first);
-                                self.docs[index].path = Some(to.clone());
-                                self.remember(&to);
-                            })
+                            std::fs::rename(&path, &to)
+                                .map_err(|e| e.to_string())
+                                .map(|()| {
+                                    let first = self.docs[index].first_line();
+                                    self.docs[index].syntax =
+                                        self.syntaxes.detect(Some(&to), &first);
+                                    self.docs[index].path = Some(to.clone());
+                                    self.remember(&to);
+                                })
                         }
                     }
                     _ => Err("файл ещё не сохранён — используйте «Сохранить как»".into()),
@@ -2410,7 +2460,11 @@ impl TrorApp {
                     let (stamp, body) = text.split_at(text.find("  ").unwrap_or(0));
                     let mut job = egui::text::LayoutJob::default();
                     job.append("  ", 0.0, egui::TextFormat::simple(font.clone(), pal.faint));
-                    job.append(stamp, 0.0, egui::TextFormat::simple(font.clone(), pal.faint));
+                    job.append(
+                        stamp,
+                        0.0,
+                        egui::TextFormat::simple(font.clone(), pal.faint),
+                    );
                     job.append(body, 0.0, egui::TextFormat::simple(font.clone(), color));
                     ui.add(egui::Label::new(job).extend());
                 }
@@ -2439,10 +2493,14 @@ impl Viewer<'_> {
         let path = doc.path.clone();
         let remote = doc.remote.clone();
         let saved = path.is_some() || remote.is_some();
-        let color = location.as_ref().and_then(|k| self.app.settings.tab_colors.get(k)).copied();
+        let color = location
+            .as_ref()
+            .and_then(|k| self.app.settings.tab_colors.get(k))
+            .copied();
         let mut cmd = None;
         let row = |ui: &mut Ui, text: &str, shortcut: String, enabled: bool| {
-            ui.add_enabled(enabled, Button::new(text).shortcut_text(shortcut)).clicked()
+            ui.add_enabled(enabled, Button::new(text).shortcut_text(shortcut))
+                .clicked()
         };
         if row(ui, "Закрыть", key("close_tab"), true) {
             cmd = Some(TabCmd::Close);
@@ -2453,7 +2511,12 @@ impl Viewer<'_> {
         if row(ui, "Закрыть вкладки слева", String::new(), at > 0) {
             cmd = Some(TabCmd::CloseLeft);
         }
-        if row(ui, "Закрыть вкладки справа", String::new(), at + 1 < order.len()) {
+        if row(
+            ui,
+            "Закрыть вкладки справа",
+            String::new(),
+            at + 1 < order.len(),
+        ) {
             cmd = Some(TabCmd::CloseRight);
         }
         ui.separator();
@@ -2491,7 +2554,8 @@ impl Viewer<'_> {
         {
             ui.ctx().copy_text(text.clone());
         }
-        if path.is_some() && remote.is_none() && row(ui, "Показать в папке", String::new(), true) {
+        if path.is_some() && remote.is_none() && row(ui, "Показать в папке", String::new(), true)
+        {
             cmd = Some(TabCmd::Reveal);
         }
         ui.separator();
@@ -2500,15 +2564,23 @@ impl Viewer<'_> {
                 ui.set_min_width(170.0);
                 for (i, (label, _)) in TAB_COLORS.iter().enumerate() {
                     let swatch = tab_color(i as u8);
-                    let response = ui.selectable_label(color == Some(i as u8), format!("     {label}"));
+                    let response =
+                        ui.selectable_label(color == Some(i as u8), format!("     {label}"));
                     let r = response.rect;
-                    ui.painter().circle_filled(egui::pos2(r.left() + 12.0, r.center().y), 5.5, swatch);
+                    ui.painter().circle_filled(
+                        egui::pos2(r.left() + 12.0, r.center().y),
+                        5.5,
+                        swatch,
+                    );
                     if response.clicked() {
                         cmd = Some(TabCmd::Color(Some(i as u8)));
                     }
                 }
                 ui.separator();
-                if ui.add_enabled(color.is_some(), Button::new("Без цвета")).clicked() {
+                if ui
+                    .add_enabled(color.is_some(), Button::new("Без цвета"))
+                    .clicked()
+                {
                     cmd = Some(TabCmd::Color(None));
                 }
             });
@@ -2516,10 +2588,16 @@ impl Viewer<'_> {
         ui.menu_button("Группа вкладок", |ui| {
             ui.set_min_width(230.0);
             let alone = order.len() < 2;
-            if ui.add_enabled(!alone, Button::new("Новая группа справа")).clicked() {
+            if ui
+                .add_enabled(!alone, Button::new("Новая группа справа"))
+                .clicked()
+            {
                 cmd = Some(TabCmd::NewGroup(egui_stack::Split::Right));
             }
-            if ui.add_enabled(!alone, Button::new("Новая группа снизу")).clicked() {
+            if ui
+                .add_enabled(!alone, Button::new("Новая группа снизу"))
+                .clicked()
+            {
                 cmd = Some(TabCmd::NewGroup(egui_stack::Split::Below));
             }
             if ui.button("Переместить в другую группу").clicked() {
@@ -2821,7 +2899,11 @@ impl eframe::App for TrorApp {
             || self.console.modal_open()
             || self.project.modal_open()
             || self.db.modal_open();
-        if self.remotes.iter_mut().any(|r| std::mem::take(&mut r.want_search)) {
+        if self
+            .remotes
+            .iter_mut()
+            .any(|r| std::mem::take(&mut r.want_search))
+        {
             dock::show(&mut self.dock, Pane::ServerSearch, &self.settings.floats);
         }
         self.log.extend(crate::trace::take());
@@ -3002,7 +3084,10 @@ impl eframe::App for TrorApp {
             }
             _ => self.embedded.hide(),
         }
-        crate::webview::pump(&ctx, self.page.is_some() && dock::has(&self.dock, Pane::Preview));
+        crate::webview::pump(
+            &ctx,
+            self.page.is_some() && dock::has(&self.dock, Pane::Preview),
+        );
 
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             let screen = ctx.content_rect();

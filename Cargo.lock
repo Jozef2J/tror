@@ -4732,7 +4732,7 @@ dependencies = [
 
 [[package]]
 name = "tror"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "aes",
  "base64 0.23.1",
@@ -4744,6 +4744,7 @@ dependencies = [
  "flate2",
  "gtk",
  "log",
+ "memchr",
  "mysql",
  "native-tls",
  "ocb3",

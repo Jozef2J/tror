@@ -31,6 +31,20 @@ pub struct WindowState {
 
     /// True if the window is minimized
     minimized: bool,
+
+    /// The window's rect when the pointer was pressed on its left or top edge, and which of
+    /// the two edges: a resize from there keeps the opposite edge where it was.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    edge_drag: Option<EdgeDrag>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EdgeDrag {
+    start: Rect,
+    left: bool,
+    top: bool,
+    least_width: Option<f32>,
+    least_height: Option<f32>,
 }
 
 impl Default for WindowState {
@@ -43,6 +57,7 @@ impl Default for WindowState {
             expanded_height: None,
             new: true,
             minimized: false,
+            edge_drag: None,
         }
     }
 }
@@ -84,6 +99,72 @@ impl WindowState {
     pub(crate) fn set_shown(&mut self, rect: Rect, dragged: bool) {
         self.screen_rect = Some(rect);
         self.dragged = dragged;
+    }
+
+    /// Keeps the right or bottom edge in place while the window is resized by its left or
+    /// top edge: egui moves the window on with the pointer once it is at its least size.
+    pub(crate) fn pin_far_edges(
+        &mut self,
+        rect: Rect,
+        moved: bool,
+        pressed: bool,
+        press_origin: Option<Pos2>,
+    ) {
+        if !pressed || moved {
+            self.edge_drag = None;
+            return;
+        }
+        if self.edge_drag.is_none() {
+            let grab = 8.0;
+            let Some(origin) = press_origin else {
+                return;
+            };
+            if !rect.expand(grab).contains(origin) {
+                return;
+            }
+            self.edge_drag = Some(EdgeDrag {
+                start: rect,
+                left: (origin.x - rect.left()).abs() <= grab,
+                top: (origin.y - rect.top()).abs() <= grab,
+                least_width: None,
+                least_height: None,
+            });
+        }
+        let Some(drag) = &mut self.edge_drag else {
+            return;
+        };
+        let pin = |active: bool, least: &mut Option<f32>, size: f32, far: f32, start_far: f32| {
+            if !active {
+                return None;
+            }
+            match *least {
+                Some(limit) if size > limit + 0.5 => *least = None,
+                Some(_) => {}
+                None if far > start_far + 0.5 => *least = Some(size),
+                None => {}
+            }
+            least.map(|_| start_far - size)
+        };
+        let x = pin(
+            drag.left,
+            &mut drag.least_width,
+            rect.width(),
+            rect.right(),
+            drag.start.right(),
+        );
+        let y = pin(
+            drag.top,
+            &mut drag.least_height,
+            rect.height(),
+            rect.bottom(),
+            drag.start.bottom(),
+        );
+        if x.is_some() || y.is_some() {
+            self.next_position = Some(Pos2::new(
+                x.unwrap_or(rect.left()),
+                y.unwrap_or(rect.top()),
+            ));
+        }
     }
 
     /// Set the height of this window when it is expanded.

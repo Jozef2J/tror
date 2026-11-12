@@ -27,7 +27,10 @@ mod widgets;
 
 use eframe::egui;
 
+pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 fn main() -> eframe::Result {
+    STARTED.get_or_init(std::time::Instant::now);
     #[cfg(all(target_os = "linux", feature = "webview"))]
     if std::env::var_os("DISPLAY").is_some() {
         unsafe {

@@ -143,6 +143,14 @@ impl<Tab> DockArea<'_, Tab> {
         if let Some(shown) = shown
             && let Some(window_state) = self.dock_state.get_window_state_mut(surf_index)
         {
+            let (pressed, origin) =
+                ui.input(|i| (i.pointer.primary_down(), i.pointer.press_origin()));
+            window_state.pin_far_edges(
+                shown.response.rect,
+                shown.response.dragged(),
+                pressed,
+                origin,
+            );
             window_state.set_shown(shown.response.rect, shown.response.dragged());
         }
 

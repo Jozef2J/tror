@@ -361,4 +361,32 @@ mod tests {
         assert_eq!(s.matches.len(), d.line_count() - 1);
         assert_eq!(s.matches[1], (line.len() + 14, line.len() + 20));
     }
+
+    #[test]
+    #[ignore]
+    fn perf_replace_all_and_save() {
+        let mut d = Document::open(1, std::path::Path::new("/tmp/demo/dump.sql")).unwrap();
+        let mut s = SearchState {
+            query: "VALUES".into(),
+            replacement: "values".into(),
+            case: true,
+            ..Default::default()
+        };
+        let at = std::time::Instant::now();
+        step(&mut s, &mut d, Pending::ReplaceAll);
+        eprintln!(
+            "заменить все: {:.0} мс, замен {:?}",
+            at.elapsed().as_secs_f64() * 1e3,
+            s.last_replaced
+        );
+        let at = std::time::Instant::now();
+        let bytes = d.encoded();
+        std::fs::write("/tmp/tror_perf_save.sql", &bytes).unwrap();
+        eprintln!(
+            "сохранение {} МБ: {:.0} мс",
+            bytes.len() / 1024 / 1024,
+            at.elapsed().as_secs_f64() * 1e3
+        );
+        let _ = std::fs::remove_file("/tmp/tror_perf_save.sql");
+    }
 }

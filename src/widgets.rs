@@ -16,7 +16,9 @@ pub fn wrapped_row<R>(ui: &mut Ui, margin: f32, add: impl FnOnce(&mut Ui) -> R) 
 }
 
 pub fn port_field(ui: &mut Ui, port: &mut u16, width: f32) -> egui::Response {
-    let id = ui.scope_id().with(("tror_port", port as *const u16 as usize));
+    let id = ui
+        .scope_id()
+        .with(("tror_port", port as *const u16 as usize));
     let mut text = ui
         .data(|d| d.get_temp::<String>(id))
         .unwrap_or_else(|| port.to_string());
@@ -58,6 +60,57 @@ pub fn dots_button(ui: &mut Ui, pal: &Palette) -> egui::Response {
         ui.painter()
             .circle_filled(rect.center() + egui::vec2(dx, 0.0), 1.6, color);
     }
+    response
+}
+
+pub fn plus_button(ui: &mut Ui, pal: &Palette, size: egui::Vec2) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+    if response.hovered() || open {
+        ui.painter().rect_filled(rect, 6.0, pal.surface);
+    }
+    let color = if response.hovered() || open {
+        pal.text
+    } else {
+        pal.subtext
+    };
+    let scale = ui.ctx().pixels_per_point();
+    let snap = |v: f32| (v * scale).round() / scale;
+    let thick = (1.5 * scale).round().max(1.0) / scale;
+    let arm = snap(5.0);
+    let x = snap(rect.center().x - thick / 2.0);
+    let y = snap(rect.center().y - thick / 2.0);
+    let painter = ui.painter();
+    painter.rect_filled(
+        Rect::from_min_size(egui::pos2(x - arm, y), egui::vec2(arm * 2.0 + thick, thick)),
+        0.0,
+        color,
+    );
+    painter.rect_filled(
+        Rect::from_min_size(egui::pos2(x, y - arm), egui::vec2(thick, arm * 2.0 + thick)),
+        0.0,
+        color,
+    );
+    response
+}
+
+pub fn scroll_arrow(ui: &mut Ui, pal: &Palette, forward: bool, enabled: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 22.0), Sense::click());
+    let color = if !enabled {
+        pal.faint.gamma_multiply(0.5)
+    } else if response.hovered() {
+        pal.text
+    } else {
+        pal.subtext
+    };
+    let direction = if forward { -1.0 } else { 1.0 };
+    let center = rect.center();
+    let tip = center + egui::vec2(-3.0 * direction, 0.0);
+    let stroke = Stroke::new(1.4, color);
+    ui.painter()
+        .line_segment([center + egui::vec2(2.0 * direction, -4.5), tip], stroke);
+    ui.painter()
+        .line_segment([center + egui::vec2(2.0 * direction, 4.5), tip], stroke);
     response
 }
 
@@ -193,7 +246,12 @@ pub fn date_label(secs: u64) -> String {
 
 pub fn parse_date(text: &str) -> Option<u64> {
     let text = text.trim();
-    for format in ["%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
+    for format in [
+        "%d.%m.%Y %H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ] {
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(text, format) {
             return naive
                 .and_local_timezone(chrono::Local)
@@ -223,7 +281,8 @@ pub fn perm_grid(ui: &mut Ui, pal: &Palette, mode: &mut u32, octal: &mut String)
                 ui.label(RichText::new(label).size(12.0).color(pal.subtext));
             }
             ui.end_row();
-            for (shift, who) in [(6, "Владелец"), (3, "Группа"), (0, "Остальные")] {
+            for (shift, who) in [(6, "Владелец"), (3, "Группа"), (0, "Остальные")]
+            {
                 ui.label(who);
                 for bit in [4u32, 2, 1] {
                     let mask = bit << shift;

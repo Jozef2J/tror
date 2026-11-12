@@ -6,7 +6,6 @@ use eframe::egui::{
 use crate::theme::Palette;
 
 const SCROLLBACK: usize = 5000;
-const HISTORY: usize = 1024 * 1024;
 
 const DARK: [u32; 16] = [
     0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, 0x585b70,
@@ -217,6 +216,135 @@ fn new_parser(cols: u16, rows: u16) -> vt100::Parser {
     vt100::Parser::new(nz(rows), nz(cols), SCROLLBACK)
 }
 
+type Style = (vt100::Color, vt100::Color, bool, bool, bool, bool, bool);
+
+fn style_of(cell: &vt100::Cell) -> Style {
+    (
+        cell.fgcolor(),
+        cell.bgcolor(),
+        cell.bold(),
+        cell.dim(),
+        cell.italic(),
+        cell.underline(),
+        cell.inverse(),
+    )
+}
+
+fn push_style(out: &mut Vec<u8>, (fg, bg, bold, dim, italic, underline, inverse): Style) {
+    let mut code = String::from("\x1b[0");
+    for (on, flag) in [
+        (bold, 1),
+        (dim, 2),
+        (italic, 3),
+        (underline, 4),
+        (inverse, 7),
+    ] {
+        if on {
+            code.push_str(&format!(";{flag}"));
+        }
+    }
+    for (color, base) in [(fg, 38), (bg, 48)] {
+        match color {
+            vt100::Color::Default => {}
+            vt100::Color::Idx(i) => code.push_str(&format!(";{base};5;{i}")),
+            vt100::Color::Rgb(r, g, b) => code.push_str(&format!(";{base};2;{r};{g};{b}")),
+        }
+    }
+    code.push('m');
+    out.extend_from_slice(code.as_bytes());
+}
+
+fn push_row(screen: &vt100::Screen, row: u16, cols: u16, keep: u16, out: &mut Vec<u8>) -> usize {
+    let wrapped = screen.row_wrapped(row);
+    let plain = Style::default();
+    let mut end = cols;
+    if !wrapped {
+        while end > keep
+            && screen
+                .cell(row, end - 1)
+                .is_none_or(|c| !c.has_contents() && style_of(c).1 == plain.1)
+        {
+            end -= 1;
+        }
+    }
+    let mut style = plain;
+    for col in 0..end {
+        let Some(cell) = screen.cell(row, col) else {
+            break;
+        };
+        if cell.is_wide_continuation() {
+            continue;
+        }
+        let next = style_of(cell);
+        if next != style {
+            push_style(out, next);
+            style = next;
+        }
+        if cell.has_contents() {
+            out.extend_from_slice(cell.contents().as_bytes());
+        } else {
+            out.push(b' ');
+        }
+    }
+    if style != plain {
+        out.extend_from_slice(b"\x1b[m");
+    }
+    end as usize
+}
+
+fn reflow(old: &mut vt100::Parser, cols: u16, rows: u16) -> vt100::Parser {
+    let screen = old.screen_mut();
+    screen.set_scrollback(0);
+    let (_, old_cols) = screen.size();
+    let old_cols = old_cols.get();
+    let (cursor_row, cursor_col) = screen.cursor_position();
+    let modes = screen.input_mode_formatted();
+    let hidden = screen.hide_cursor();
+    let mut out = Vec::new();
+    let mut line_cells = 0;
+    let mut joined = false;
+    for back in (1..=screen.scrollback_len()).rev() {
+        screen.set_scrollback(back);
+        if !joined {
+            out.extend_from_slice(b"\r\n");
+            line_cells = 0;
+        }
+        line_cells += push_row(screen, 0, old_cols, 0, &mut out);
+        joined = screen.row_wrapped(0);
+    }
+    screen.set_scrollback(0);
+    for row in 0..=cursor_row {
+        if !joined {
+            out.extend_from_slice(b"\r\n");
+            line_cells = 0;
+        }
+        let keep = if row == cursor_row { cursor_col } else { 0 };
+        let cells = push_row(screen, row, old_cols, keep.min(old_cols), &mut out);
+        if row < cursor_row {
+            line_cells += cells;
+        } else {
+            let at = line_cells + cursor_col as usize;
+            let end = line_cells + cells;
+            let width = cols.max(1) as usize;
+            if at < end {
+                let up = end.saturating_sub(1) / width - at / width;
+                if up > 0 {
+                    out.extend_from_slice(format!("\x1b[{up}A").as_bytes());
+                }
+                out.extend_from_slice(format!("\x1b[{}G", at % width + 1).as_bytes());
+            }
+        }
+        joined = screen.row_wrapped(row);
+    }
+    let mut parser = new_parser(cols, rows);
+    parser.process(out.get(2..).unwrap_or(&[]));
+    parser.process(modes.as_bytes());
+    if hidden {
+        parser.process(b"\x1b[?25l");
+    }
+    parser
+}
+
 fn indexed(index: u8, c: &Colors) -> Color32 {
     match index {
         0..=15 => c.ansi[index as usize],
@@ -295,7 +423,6 @@ pub struct Look<'a> {
 
 pub struct Screen {
     parser: vt100::Parser,
-    history: Vec<u8>,
     size: (u16, u16),
     wheel: f32,
     select: Option<((u16, u16), (u16, u16))>,
@@ -307,7 +434,6 @@ impl Screen {
     pub fn new() -> Self {
         Self {
             parser: new_parser(80, 24),
-            history: Vec::new(),
             size: (80, 24),
             wheel: 0.0,
             select: None,
@@ -322,20 +448,11 @@ impl Screen {
 
     pub fn reset(&mut self) {
         self.parser = new_parser(self.size.0, self.size.1);
-        self.history.clear();
         self.select = None;
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
-        self.history.extend_from_slice(bytes);
-        if self.history.len() > HISTORY {
-            let mut cut = self.history.len() - HISTORY / 2;
-            if let Some(nl) = self.history[cut..].iter().position(|b| *b == b'\n') {
-                cut += nl + 1;
-            }
-            self.history.drain(..cut);
-        }
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) -> bool {
@@ -343,10 +460,12 @@ impl Screen {
             return false;
         }
         self.size = (cols, rows);
-        let mut parser = new_parser(cols, rows);
-        parser.process(&self.history);
-        self.parser = parser;
         self.select = None;
+        if self.parser.screen().alternate_screen() {
+            self.parser.screen_mut().set_size(nz(rows), nz(cols));
+        } else {
+            self.parser = reflow(&mut self.parser, cols, rows);
+        }
         true
     }
 
@@ -417,12 +536,10 @@ impl Screen {
             let (row, col) = cell_at(pos);
             let screen = self.parser.screen();
             let word = |col: u16| {
-                screen
-                    .cell(row, col)
-                    .is_some_and(|cell| {
-                        let text = cell.contents();
-                        !text.is_empty() && !text.chars().all(char::is_whitespace)
-                    })
+                screen.cell(row, col).is_some_and(|cell| {
+                    let text = cell.contents();
+                    !text.is_empty() && !text.chars().all(char::is_whitespace)
+                })
             };
             let mut from = col.min(cols.saturating_sub(1));
             let mut to = from;
@@ -716,6 +833,174 @@ mod tests {
         let text = t.text();
         for i in 0..5 {
             assert!(text.contains(&format!("{i}:{line}")), "{text}");
+        }
+    }
+
+    fn all_text(t: &mut Screen) -> String {
+        let screen = t.parser.screen_mut();
+        let mut lines = Vec::new();
+        for back in (1..=screen.scrollback_len()).rev() {
+            screen.set_scrollback(back);
+            lines.push(screen.rows(0, 500).next().unwrap_or_default());
+        }
+        screen.set_scrollback(0);
+        lines.extend(screen.rows(0, 500));
+        lines.join("\n")
+    }
+
+    #[test]
+    fn prompt_redraw_after_resize_does_not_erase_output() {
+        let mut t = Screen::new();
+        let prompt = "user@host:~/sites/shop/local/templates$ ";
+        for round in 0..3 {
+            t.process(
+                format!("out-{round}-a\r\nout-{round}-b\r\nout-{round}-c\r\n{prompt}").as_bytes(),
+            );
+        }
+        for _ in 0..6 {
+            t.resize(12, 3);
+            let wrapped = prompt.len().div_ceil(12) - 1;
+            t.process(format!("\r\x1b[{wrapped}A\x1b[J{prompt}").as_bytes());
+            t.resize(100, 30);
+            t.process(format!("\r\x1b[J{prompt}").as_bytes());
+        }
+        let text = all_text(&mut t);
+        for round in 0..3 {
+            for part in ["a", "b", "c"] {
+                assert!(text.contains(&format!("out-{round}-{part}")), "{text}");
+            }
+        }
+        assert!(text.trim_end().ends_with(prompt.trim_end()), "{text}");
+        assert_eq!(text.matches("user@host").count(), 3, "{text}");
+    }
+
+    #[test]
+    fn reflow_keeps_colors_cursor_and_long_history() {
+        let mut t = Screen::new();
+        for i in 0..400 {
+            t.process(format!("row {i} \x1b[1;32mgreen\x1b[0m tail\r\n").as_bytes());
+        }
+        t.process(b"$ ab\x1b[D");
+        for (cols, rows) in [(15, 4), (200, 50), (10, 2), (80, 24)] {
+            t.resize(cols, rows);
+        }
+        let text = all_text(&mut t);
+        for i in [0, 1, 199, 399] {
+            assert!(text.contains(&format!("row {i} green tail")), "{i}");
+        }
+        let screen = t.parser.screen();
+        let (row, col) = screen.cursor_position();
+        assert_eq!(col, 3);
+        assert_eq!(screen.cell(row, 2).unwrap().contents(), "a");
+        let above = screen.cell(row - 1, 8).unwrap();
+        assert_eq!(
+            screen.rows(0, 80).nth(row as usize - 1).unwrap(),
+            "row 399 green tail"
+        );
+        assert_eq!(above.fgcolor(), vt100::Color::Idx(2));
+        assert!(above.bold());
+        t.process(b"X");
+        assert_eq!(t.parser.screen().cell(row, 3).unwrap().contents(), "X");
+    }
+
+    #[test]
+    fn full_screen_program_survives_resize() {
+        let mut t = Screen::new();
+        t.process(b"before\r\n\x1b[?1049h\x1b[2J\x1b[Hvim");
+        t.resize(40, 10);
+        assert!(t.parser.screen().alternate_screen());
+        t.process(b"\x1b[?1049l");
+        assert!(t.text().contains("before"));
+    }
+
+    #[test]
+    #[ignore]
+    fn live_shell_keeps_output_through_resizes() {
+        use crate::remote::{Profile, ShellCmd, ShellEvent, open_shell};
+        let mut profile = Profile::new("live".into());
+        profile.host = "127.0.0.1".into();
+        profile.port = 2222;
+        profile.user = "jozef".into();
+        profile.password = "secret".into();
+        let shell = open_shell(&profile, None, (100, 30), String::new(), || {});
+        let mut t = Screen::new();
+        t.resize(100, 30);
+        let pump = |t: &mut Screen, millis: u64| {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(millis);
+            while std::time::Instant::now() < until {
+                match shell.rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                    Ok(ShellEvent::HostKey { .. }) => {
+                        shell.tx.send(ShellCmd::TrustHost(true)).unwrap();
+                    }
+                    Ok(ShellEvent::Output(bytes)) => t.process(&bytes),
+                    Ok(ShellEvent::Closed(e)) => panic!("{e}"),
+                    _ => {}
+                }
+            }
+        };
+        pump(&mut t, 1500);
+        for command in [
+            "echo first-marker; seq 101 130",
+            "ls -la /tmp/srvroot/www",
+            "echo second-marker-with-a-rather-long-tail-of-words-to-force-wrapping-on-narrow-screens",
+            "echo third-marker",
+        ] {
+            shell
+                .tx
+                .send(ShellCmd::Input(format!("{command}\r").into_bytes()))
+                .unwrap();
+            pump(&mut t, 400);
+        }
+        let before = all_text(&mut t);
+        assert!(before.contains("third-marker"), "{before}");
+        for (cols, rows) in [
+            (10, 2),
+            (100, 30),
+            (12, 3),
+            (160, 50),
+            (10, 2),
+            (35, 6),
+            (100, 30),
+        ]
+        .into_iter()
+        .cycle()
+        .take(28)
+        {
+            if t.resize(cols, rows) {
+                shell.tx.send(ShellCmd::Resize(cols, rows)).unwrap();
+            }
+            pump(&mut t, 120);
+        }
+        let after = all_text(&mut t);
+        let joined: String = after.lines().map(str::trim_end).collect();
+        for needle in [
+            "first-marker",
+            "101",
+            "115",
+            "130",
+            "index.php",
+            "second-marker-with-a-rather-long-tail-of-words-to-force-wrapping-on-narrow-screens",
+            "third-marker",
+        ] {
+            assert!(joined.contains(needle), "нет «{needle}»:\n{after}");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_reflow() {
+        let mut t = Screen::new();
+        t.resize(160, 40);
+        for i in 0..6000 {
+            t.process(format!("\x1b[32mline {i}\x1b[0m some text to fill the row with a realistic amount of output 0123456789\r\n").as_bytes());
+        }
+        for (cols, rows) in [(80, 24), (160, 40), (30, 10), (160, 40)] {
+            let at = std::time::Instant::now();
+            t.resize(cols, rows);
+            eprintln!(
+                "reflow -> {cols}x{rows}: {:.1} мс",
+                at.elapsed().as_secs_f64() * 1e3
+            );
         }
     }
 }

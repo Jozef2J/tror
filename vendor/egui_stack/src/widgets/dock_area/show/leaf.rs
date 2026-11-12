@@ -522,6 +522,26 @@ impl<Tab> DockArea<'_, Tab> {
                     folded,
                 );
                 let title_id = response.id;
+                // A tab that has just become the active one is scrolled into view.
+                if let Ok(leaf) = self.dock_state.leaf_mut(path)
+                    && leaf.active == tab_index
+                {
+                    let seen_id =
+                        egui::Id::unique(("active_tab_seen", path.surface.0, path.node.0));
+                    let seen = tabs_ui.data(|d| d.get_temp::<egui::Id>(seen_id));
+                    if seen != Some(title_id) {
+                        tabs_ui.data_mut(|d| d.insert_temp(seen_id, title_id));
+                        let clip = tabs_ui.clip_rect();
+                        let right = clip.right() - 44.0;
+                        if response.rect.left() < clip.left() {
+                            leaf.scroll += clip.left() - response.rect.left();
+                            tabs_ui.ctx().request_repaint();
+                        } else if response.rect.right() > right {
+                            leaf.scroll -= response.rect.right() - right;
+                            tabs_ui.ctx().request_repaint();
+                        }
+                    }
+                }
                 let close_clicked = close_response.is_some_and(|res| res.clicked());
                 let is_lonely_tab = self.dock_state[path.surface].num_tabs() == 1;
 
@@ -1384,7 +1404,56 @@ impl<Tab> DockArea<'_, Tab> {
             }
         }
 
-        leaf.scroll = leaf.scroll.clamp(-overflow, 0.0);
+        // Arrows at the end of the bar step through tabs that do not fit.
+        let arrow_width = 20.0;
+        let arrows = if overflow > 1.0 { arrow_width * 2.0 } else { 0.0 };
+        let reach = overflow + arrows;
+        if overflow > 1.0 {
+            let bar = tabbar_response.rect;
+            let strip = Rect::from_min_max(pos2(bar.right() - arrows, bar.top()), bar.max);
+            ui.painter().rect_filled(strip, 0.0, style.tab_bar.bg_fill);
+            ui.painter().vline(
+                strip.left(),
+                strip.y_range(),
+                Stroke::new(1.0, style.tab_bar.hline_color),
+            );
+            for (index, direction) in [(0, 1.0_f32), (1, -1.0)] {
+                let rect = Rect::from_min_size(
+                    pos2(strip.left() + arrow_width * index as f32, strip.top()),
+                    vec2(arrow_width, strip.height()),
+                );
+                let response = ui.interact(
+                    rect,
+                    egui::Id::unique(("tab_scroll_arrow", path.surface.0, path.node.0, index)),
+                    Sense::click(),
+                );
+                let enabled = if direction > 0.0 {
+                    leaf.scroll < -0.5
+                } else {
+                    leaf.scroll > -reach + 0.5
+                };
+                let color = if !enabled {
+                    style.tab.inactive.text_color.gamma_multiply(0.35)
+                } else if response.hovered() {
+                    style.tab.active.text_color
+                } else {
+                    style.tab.inactive.text_color
+                };
+                let center = rect.center();
+                let tip = center + vec2(-3.0 * direction, 0.0);
+                let stroke = Stroke::new(1.4, color);
+                ui.painter().line_segment([center + vec2(2.0 * direction, -4.5), tip], stroke);
+                ui.painter().line_segment([center + vec2(2.0 * direction, 4.5), tip], stroke);
+                if response.clicked() {
+                    leaf.scroll += direction * 140.0;
+                } else if response.is_pointer_button_down_on() {
+                    leaf.scroll += direction * 700.0 * ui.input(|i| i.stable_dt).min(0.05);
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+
+        leaf.scroll = leaf.scroll.clamp(-reach, 0.0);
     }
 
     #[allow(clippy::too_many_arguments)]

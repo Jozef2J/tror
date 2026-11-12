@@ -46,43 +46,49 @@ pub struct Decoded {
 }
 
 pub fn decode(bytes: Vec<u8>, forced: Option<&'static Encoding>) -> Result<Decoded, String> {
-    let (encoding, bom_len) = match (forced, Encoding::for_bom(&bytes)) {
-        (Some(enc), Some((bom_enc, len))) if enc == bom_enc => (enc, len),
-        (Some(enc), _) => (enc, 0),
-        (None, Some((enc, len))) => (enc, len),
+    let (hint, bom_len) = match (forced, Encoding::for_bom(&bytes)) {
+        (Some(enc), Some((bom_enc, len))) if enc == bom_enc => (Some(enc), len),
+        (Some(enc), _) => (Some(enc), 0),
+        (None, Some((enc, len))) => (Some(enc), len),
         (None, None) => {
-            if bytes.contains(&0) {
+            if memchr::memchr(0, &bytes).is_some() {
                 return Err("похоже на бинарный файл".into());
             }
-            if std::str::from_utf8(&bytes).is_ok() {
-                (UTF_8, 0)
-            } else {
+            (None, 0)
+        }
+    };
+    let (mut text, encoding) = match hint {
+        Some(encoding) if encoding != UTF_8 => (
+            encoding
+                .decode_without_bom_handling(&bytes[bom_len..])
+                .0
+                .into_owned(),
+            encoding,
+        ),
+        _ => match String::from_utf8(bytes) {
+            Ok(mut text) => {
+                text.drain(..bom_len);
+                (text, UTF_8)
+            }
+            Err(e) if hint.is_some() => (
+                String::from_utf8_lossy(&e.as_bytes()[bom_len..]).into_owned(),
+                UTF_8,
+            ),
+            Err(e) => {
+                let bytes = e.into_bytes();
                 let mut detector =
                     chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
                 let sample = &bytes[..bytes.len().min(4 * 1024 * 1024)];
                 detector.feed(sample, sample.len() == bytes.len());
+                let encoding = detector.guess(Some(b"ru"), chardetng::Utf8Detection::Deny);
                 (
-                    detector.guess(Some(b"ru"), chardetng::Utf8Detection::Deny),
-                    0,
+                    encoding.decode_without_bom_handling(&bytes).0.into_owned(),
+                    encoding,
                 )
             }
-        }
+        },
     };
-    let mut text = if encoding == UTF_8 {
-        match String::from_utf8(bytes) {
-            Ok(mut text) => {
-                text.drain(..bom_len);
-                text
-            }
-            Err(e) => String::from_utf8_lossy(&e.as_bytes()[bom_len..]).into_owned(),
-        }
-    } else {
-        encoding
-            .decode_without_bom_handling(&bytes[bom_len..])
-            .0
-            .into_owned()
-    };
-    let eol = if text.as_bytes().contains(&b'\r') {
+    let eol = if memchr::memchr(b'\r', text.as_bytes()).is_some() {
         let eol = if text.contains("\r\n") {
             Eol::Crlf
         } else {
@@ -93,7 +99,7 @@ pub fn decode(bytes: Vec<u8>, forced: Option<&'static Encoding>) -> Result<Decod
             text = text.replace('\r', "\n");
         }
         eol
-    } else if text.as_bytes().contains(&b'\n') {
+    } else if memchr::memchr(b'\n', text.as_bytes()).is_some() {
         Eol::Lf
     } else {
         Eol::native()
@@ -139,17 +145,17 @@ pub fn encode(text: &str, encoding: &'static Encoding, bom: bool, eol: Eol) -> V
 }
 
 fn longest_line(text: &str) -> usize {
+    let bytes = text.as_bytes();
     let mut longest = 0;
-    let mut current = 0;
-    for b in text.bytes() {
-        if b == b'\n' {
-            longest = longest.max(current);
-            current = 0;
-        } else if b & 0xC0 != 0x80 {
-            current += 1;
+    let mut start = 0;
+    let ends = memchr::memchr_iter(b'\n', bytes).chain(std::iter::once(bytes.len()));
+    for end in ends {
+        if end - start > longest {
+            longest = longest.max(text[start..end].chars().count());
         }
+        start = end + 1;
     }
-    longest.max(current)
+    longest
 }
 
 fn comment_tokens(syntax: &str) -> (&'static str, &'static str) {
@@ -397,8 +403,17 @@ impl Document {
     }
 
     fn load_text(&mut self, text: &str) {
-        self.rope = Rope::from_str(text);
-        self.max_line_chars = longest_line(text);
+        let (rope, longest) = if text.len() > 4 * 1024 * 1024 {
+            std::thread::scope(|scope| {
+                let longest = scope.spawn(|| longest_line(text));
+                let rope = Rope::from_str(text);
+                (rope, longest.join().unwrap_or(0))
+            })
+        } else {
+            (Rope::from_str(text), longest_line(text))
+        };
+        self.rope = rope;
+        self.max_line_chars = longest;
         self.hl = Highlighter::default();
         self.sel = (0, 0);
         self.content_w = 0.0;
@@ -809,7 +824,11 @@ impl Document {
                 if lo < lhi || (lo == llo && hi == lhi) || (lo == lhi && lo == hi) {
                     let start = llo.min(lo);
                     let end = lhi.max(hi);
-                    *last = if last.1 >= last.0 { (start, end) } else { (end, start) };
+                    *last = if last.1 >= last.0 {
+                        (start, end)
+                    } else {
+                        (end, start)
+                    };
                     continue;
                 }
             }
@@ -837,7 +856,11 @@ impl Document {
         self.block = None;
     }
 
-    pub fn edit_each(&mut self, kind: EditKind, f: impl Fn(&Self, (usize, usize)) -> (Range<usize>, String)) {
+    pub fn edit_each(
+        &mut self,
+        kind: EditKind,
+        f: impl Fn(&Self, (usize, usize)) -> (Range<usize>, String),
+    ) {
         let cursors = self.cursors();
         let mut edits: Vec<(usize, Range<usize>, String)> = cursors
             .iter()
@@ -903,7 +926,11 @@ impl Document {
                 self.apply(start..end, &new);
             }
             shift += n as isize - (end - start) as isize;
-            sels.push(if forward { (start, start + n) } else { (start + n, start) });
+            sels.push(if forward {
+                (start, start + n)
+            } else {
+                (start + n, start)
+            });
         }
         self.block = None;
         self.set_cursors(sels, 0);
@@ -995,11 +1022,19 @@ impl Document {
         } else {
             EditKind::Insert
         };
-        let cursors_rank: Vec<((usize, usize), usize)> = cursors.iter().copied().zip(rank).collect();
+        let cursors_rank: Vec<((usize, usize), usize)> =
+            cursors.iter().copied().zip(rank).collect();
         self.edit_each(kind, |_, c| {
-            let r = cursors_rank.iter().find(|(cc, _)| *cc == c).map_or(0, |(_, r)| *r);
+            let r = cursors_rank
+                .iter()
+                .find(|(cc, _)| *cc == c)
+                .map_or(0, |(_, r)| *r);
             let range = c.0.min(c.1)..c.0.max(c.1);
-            let piece = if distribute { parts[r].to_owned() } else { text.to_owned() };
+            let piece = if distribute {
+                parts[r].to_owned()
+            } else {
+                text.to_owned()
+            };
             (range, piece)
         });
     }
@@ -1008,7 +1043,11 @@ impl Document {
         let head = self.sel.1;
         let line = self.rope.char_to_line(head);
         let col = head - self.rope.line_to_char(line);
-        let lines: Vec<&str> = text.strip_suffix('\n').unwrap_or(text).split('\n').collect();
+        let lines: Vec<&str> = text
+            .strip_suffix('\n')
+            .unwrap_or(text)
+            .split('\n')
+            .collect();
         self.checkpoint(EditKind::Other);
         let mut carets = Vec::new();
         for (i, piece) in lines.iter().enumerate() {
@@ -1468,5 +1507,40 @@ mod tests {
         twig.syntax = "HTML (Twig)".into();
         twig.toggle_comment();
         assert_eq!(text(&twig), "{# {{ a }} #}");
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_open_phases() {
+        let path = std::path::Path::new("/tmp/demo/dump.sql");
+        for round in 0..3 {
+            let t = std::time::Instant::now();
+            let bytes = std::fs::read(path).unwrap();
+            let read = t.elapsed();
+            let t = std::time::Instant::now();
+            let decoded = decode(bytes, None).unwrap();
+            let dec = t.elapsed();
+            let t = std::time::Instant::now();
+            let rope = Rope::from_str(&decoded.text);
+            let build = t.elapsed();
+            let t = std::time::Instant::now();
+            let longest = longest_line(&decoded.text);
+            let scan = t.elapsed();
+            let slow = decoded
+                .text
+                .split('\n')
+                .map(|l| l.chars().count())
+                .max()
+                .unwrap_or(0);
+            assert_eq!(longest, slow);
+            eprintln!(
+                "#{round} read {:.0} decode {:.0} rope {:.0} longest {:.0} мс ({} строк, {longest})",
+                read.as_secs_f64() * 1e3,
+                dec.as_secs_f64() * 1e3,
+                build.as_secs_f64() * 1e3,
+                scan.as_secs_f64() * 1e3,
+                rope.len_lines()
+            );
+        }
     }
 }
