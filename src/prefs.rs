@@ -169,6 +169,7 @@ pub struct Settings {
     pub restore: bool,
     pub autosave: bool,
     pub updates: bool,
+    pub passwords_in_file: bool,
     pub scrollback: u32,
     pub db_rows: u32,
     pub columns: [f32; 3],
@@ -206,6 +207,7 @@ impl Default for Settings {
             restore: true,
             autosave: true,
             updates: true,
+            passwords_in_file: false,
             scrollback: 5000,
             db_rows: 5000,
             columns: crate::widgets::COLUMN_DEFAULTS,
@@ -370,7 +372,7 @@ pub fn ui(
                 egui::Frame::new()
                     .inner_margin(egui::Margin::symmetric(22, 4))
                     .show(ui, |ui| {
-                        ui.set_max_width(680.0);
+                        ui.set_max_width(ui.available_width().min(680.0));
                         match settings.section {
                             0..=2 => body(
                                 ui,
@@ -667,7 +669,7 @@ fn files_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
         ui,
         pal,
         "Колонки",
-        "Ширину колонки меняют перетаскиванием границы в заголовке списка; двойной щелчок по границе возвращает исходную. Колонки удалённых хостов включаются в меню «⋯» панели.",
+        "Ширину колонки меняют перетаскиванием границы в заголовке списка; двойной щелчок по границе возвращает исходную. Колонки удалённых хостов включаются в меню панели (кнопка с тремя точками).",
     );
     toggle_row(
         ui,
@@ -690,6 +692,42 @@ fn files_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
     {
         settings.columns = crate::widgets::COLUMN_DEFAULTS;
         crate::widgets::set_columns(settings.columns);
+    }
+    heading(
+        ui,
+        pal,
+        "Пароли подключений",
+        "Пароли хостов, консоли и баз хранятся в системном хранилище: Диспетчер учётных данных Windows, Связка ключей macOS, Secret Service в Linux. В файле настроек остаются только адреса и имена.",
+    );
+    let mut in_file = settings.passwords_in_file;
+    toggle_row(
+        ui,
+        pal,
+        &mut in_file,
+        "Хранить пароли в файле настроек",
+        "Для переносной версии на флешке. Пароли в файле замаскированы, но не зашифрованы.",
+    );
+    if in_file != settings.passwords_in_file {
+        let path = eframe::storage_dir("Tror").map(|dir| dir.join("connections.json"));
+        match crate::remote::Store::switch_vault(path, in_file) {
+            Ok(()) => settings.passwords_in_file = in_file,
+            Err(e) => {
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("tror_vault_note"), e));
+            }
+        }
+    }
+    let problem = ui
+        .ctx()
+        .data(|d| d.get_temp::<String>(egui::Id::unique("tror_vault_note")))
+        .or_else(|| (!settings.passwords_in_file).then(crate::vault::last_error).flatten());
+    if let Some(problem) = problem {
+        ui.label(
+            RichText::new(format!(
+                "Системное хранилище недоступно, пароли остаются в файле: {problem}"
+            ))
+            .small()
+            .color(pal.warn),
+        );
     }
 }
 

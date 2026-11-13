@@ -126,7 +126,7 @@ impl Profile {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct Store {
     pub profiles: Vec<Profile>,
@@ -139,7 +139,27 @@ pub struct Store {
     pub show_perm: bool,
     #[serde(skip)]
     path: Option<PathBuf>,
+    #[serde(skip)]
+    locked: bool,
 }
+
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let temp = path.with_extension("tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&temp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    #[cfg(unix)]
+    std::fs::set_permissions(&temp, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    std::fs::rename(&temp, path)
+}
+
+static MIGRATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 static STORE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -151,7 +171,60 @@ impl Store {
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
         store.path = path;
+        if crate::vault::in_file() {
+            return store;
+        }
+        match crate::vault::read() {
+            Ok(map) => {
+                let mut plain = false;
+                for (key, field) in store.secrets() {
+                    if !field.is_empty() {
+                        plain = true;
+                    } else if let Some(value) = map.get(&key) {
+                        field.clone_from(value);
+                    }
+                }
+                if plain && store.path.is_some() && !MIGRATED.swap(true, Ordering::Relaxed) {
+                    let _ = store.save();
+                }
+            }
+            Err(e) => {
+                store.locked = true;
+                crate::trace::line(format!("[Пароли] системное хранилище недоступно: {e}"), true);
+            }
+        }
         store
+    }
+
+    fn secrets(&mut self) -> Vec<(String, &mut String)> {
+        let mut out = Vec::new();
+        for p in &mut self.profiles {
+            let id = format!("host|{}|{}@{}:{}", p.name, p.user, p.host, p.port);
+            out.push((format!("{id}|password"), &mut p.password));
+            out.push((format!("{id}|passphrase"), &mut p.passphrase));
+        }
+        for p in &mut self.terminals {
+            let id = format!("term|{}|{}@{}:{}", p.name, p.user, p.host, p.port);
+            out.push((format!("{id}|password"), &mut p.password));
+            out.push((format!("{id}|passphrase"), &mut p.passphrase));
+        }
+        for p in &mut self.databases {
+            let id = format!("db|{}|{}@{}:{}", p.name, p.user, p.host, p.port);
+            out.push((format!("{id}|password"), &mut p.password));
+        }
+        out
+    }
+
+    pub fn switch_vault(path: Option<PathBuf>, in_file: bool) -> Result<(), String> {
+        let store = Store::load(path);
+        if store.locked {
+            return Err("системное хранилище недоступно".into());
+        }
+        crate::vault::set_in_file(in_file);
+        if store.path.is_some() {
+            store.save()?;
+        }
+        Ok(())
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -159,8 +232,26 @@ impl Store {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
-        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, text).map_err(|e| e.to_string())?;
+        let mut copy = self.clone();
+        if crate::vault::in_file() {
+            if !self.locked {
+                crate::vault::clear();
+            }
+        } else if !self.locked {
+            let map: BTreeMap<String, String> = copy
+                .secrets()
+                .into_iter()
+                .filter(|(_, field)| !field.is_empty())
+                .map(|(key, field)| (key, field.clone()))
+                .collect();
+            if crate::vault::write(&map).is_ok() {
+                for (_, field) in copy.secrets() {
+                    field.clear();
+                }
+            }
+        }
+        let text = serde_json::to_string_pretty(&copy).map_err(|e| e.to_string())?;
+        write_private(path, text.as_bytes()).map_err(|e| e.to_string())?;
         STORE_GENERATION.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -396,6 +487,7 @@ pub fn perm_string(mode: u32, is_dir: bool) -> String {
     out
 }
 
+#[derive(Clone)]
 pub enum Cmd {
     TrustHost(bool),
     List(String),
@@ -463,6 +555,10 @@ pub enum Event {
     },
     Log(String, bool),
     Error(String),
+    Failed {
+        path: String,
+        error: String,
+    },
     Closed(String),
 }
 
@@ -1474,7 +1570,15 @@ fn serve(
             }
             Err(e) => {
                 log(format!("{tag} {e}"), true);
-                send(Event::Error(e));
+                match &cmd {
+                    Cmd::Download(path) | Cmd::Upload { path, .. } | Cmd::Touch { path, .. } => {
+                        send(Event::Failed {
+                            path: path.clone(),
+                            error: e,
+                        })
+                    }
+                    _ => send(Event::Error(e)),
+                }
             }
         }
     }
@@ -2105,6 +2209,9 @@ mod tests {
 
     #[test]
     fn store_roundtrip_masks_password() {
+        let _guard = crate::vault::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::vault::reset_for_test();
+        crate::vault::set_in_file(true);
         let dir = std::env::temp_dir().join(format!("tror-test-{}", std::process::id()));
         let path = dir.join("connections.json");
         let mut store = Store::load(Some(path.clone()));
@@ -2130,10 +2237,101 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("s3cret"));
         assert!(raw.contains("example.org"));
+        #[cfg(unix)]
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions()) & 0o777,
+            0o600
+        );
         let loaded = Store::load(Some(path));
         assert_eq!(loaded.profiles, store.profiles);
         assert_eq!(loaded.known_hosts, store.known_hosts);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn vault_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tror-vault-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("connections.json")
+    }
+
+    fn sample() -> Profile {
+        Profile {
+            name: "Клиент".into(),
+            host: "example.org".into(),
+            user: "admin".into(),
+            password: "s3cret".into(),
+            ..Profile::new("x".into())
+        }
+    }
+
+    #[test]
+    fn old_masked_passwords_move_to_the_vault() {
+        let _guard = crate::vault::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::vault::reset_for_test();
+        MIGRATED.store(false, Ordering::Relaxed);
+        let path = vault_dir("migrate");
+        let hidden = masked::hide("s3cret");
+        std::fs::write(
+            &path,
+            format!(r#"{{"profiles":[{{"name":"Клиент","host":"example.org","port":22,"user":"admin","password":"{hidden}"}}],"databases":[{{"name":"b","password":"{}"}}]}}"#, masked::hide("dbpw")),
+        )
+        .unwrap();
+        let store = Store::load(Some(path.clone()));
+        assert_eq!(store.profiles[0].password, "s3cret");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains(&hidden), "{raw}");
+        assert!(raw.contains("example.org"));
+        crate::vault::reset_cache_for_test();
+        let again = Store::load(Some(path.clone()));
+        assert_eq!(again.profiles[0].password, "s3cret");
+        assert_eq!(again.databases[0].password, "dbpw");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn switching_modes_moves_passwords_both_ways() {
+        let _guard = crate::vault::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::vault::reset_for_test();
+        let path = vault_dir("switch");
+        let mut store = Store::load(Some(path.clone()));
+        store.profiles.push(sample());
+        store.save().unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains(&masked::hide("s3cret")));
+        Store::switch_vault(Some(path.clone()), true).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains(&masked::hide("s3cret")));
+        assert!(crate::vault::backend::ENTRIES.lock().unwrap().is_empty());
+        Store::switch_vault(Some(path.clone()), false).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains(&masked::hide("s3cret")));
+        crate::vault::reset_cache_for_test();
+        assert_eq!(Store::load(Some(path.clone())).profiles[0].password, "s3cret");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn broken_vault_keeps_passwords_in_file_and_loses_nothing() {
+        let _guard = crate::vault::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::vault::reset_for_test();
+        let path = vault_dir("broken");
+        let mut store = Store::load(Some(path.clone()));
+        store.profiles.push(sample());
+        store.save().unwrap();
+        crate::vault::reset_cache_for_test();
+        crate::vault::backend::BROKEN.store(true, Ordering::Relaxed);
+        let mut locked = Store::load(Some(path.clone()));
+        assert!(locked.locked);
+        let mut other = sample();
+        other.name = "Новый".into();
+        other.password = "fresh".into();
+        locked.profiles.push(other);
+        locked.save().unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains(&masked::hide("fresh")));
+        assert!(Store::switch_vault(Some(path.clone()), false).is_err());
+        crate::vault::backend::BROKEN.store(false, Ordering::Relaxed);
+        crate::vault::reset_cache_for_test();
+        let fine = Store::load(Some(path.clone()));
+        assert_eq!(fine.profiles[0].password, "s3cret");
+        assert_eq!(fine.profiles[1].password, "fresh");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]

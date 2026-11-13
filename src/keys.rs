@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers};
 
-pub const COMMANDS: [(&str, &str, &str, bool); 33] = [
+pub const COMMANDS: [(&str, &str, &str, bool); 43] = [
     ("new", "Новый файл", "Ctrl+N", true),
     ("open", "Открыть файл", "Ctrl+O", true),
     ("open_folder", "Открыть папку", "Ctrl+Shift+O", true),
@@ -13,6 +13,16 @@ pub const COMMANDS: [(&str, &str, &str, bool); 33] = [
     ("reopen", "Открыть закрытую вкладку", "Ctrl+Shift+T", true),
     ("next_tab", "Следующая вкладка", "Ctrl+Tab", true),
     ("prev_tab", "Предыдущая вкладка", "Ctrl+Shift+Tab", true),
+    ("duplicate_line", "Дублировать строку", "Ctrl+Shift+D", true),
+    ("delete_line", "Удалить строку", "Ctrl+Shift+K", true),
+    ("line_up", "Переместить строку вверх", "Alt+Up", true),
+    ("line_down", "Переместить строку вниз", "Alt+Down", true),
+    ("upper", "Регистр: ПРОПИСНЫЕ", "Ctrl+Shift+U", true),
+    ("lower", "Регистр: строчные", "Ctrl+U", true),
+    ("trim", "Удалить пробелы в конце строк", "", true),
+    ("bookmark", "Закладка: поставить или снять", "Ctrl+F2", true),
+    ("bookmark_next", "Следующая закладка", "F2", true),
+    ("bookmark_prev", "Предыдущая закладка", "Shift+F2", true),
     ("find", "Найти", "Ctrl+F", true),
     ("replace", "Заменить", "Ctrl+H", true),
     ("find_next", "Найти далее", "F3", true),

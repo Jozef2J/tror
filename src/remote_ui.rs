@@ -83,6 +83,21 @@ struct Saver {
     queue: Vec<Cmd>,
 }
 
+struct Transfer {
+    cmd: Cmd,
+    label: String,
+    error: String,
+}
+
+impl Transfer {
+    fn path(&self) -> &str {
+        match &self.cmd {
+            Cmd::Download(path) | Cmd::Upload { path, .. } | Cmd::Touch { path, .. } => path,
+            _ => "",
+        }
+    }
+}
+
 struct Row {
     path: String,
     name: String,
@@ -109,6 +124,10 @@ pub struct RemotePanel {
     conn: Option<Connection>,
     connected: bool,
     queue: Vec<Cmd>,
+    transfers: std::collections::VecDeque<Transfer>,
+    running: Option<Transfer>,
+    failed: Vec<Transfer>,
+    paused: bool,
     saver: Option<Saver>,
     cwd: String,
     path_input: String,
@@ -171,6 +190,10 @@ impl RemotePanel {
             conn: None,
             connected: false,
             queue: Vec::new(),
+            transfers: Default::default(),
+            running: None,
+            failed: Vec::new(),
+            paused: false,
             saver: None,
             cwd: String::new(),
             path_input: String::new(),
@@ -239,6 +262,65 @@ impl RemotePanel {
     }
 
     fn send(&mut self, cmd: Cmd, busy: impl Into<String>) {
+        let bulk = match &cmd {
+            Cmd::Download(path) => self.save_to.contains_key(path) || self.relay.contains_key(path),
+            Cmd::Upload { doc, .. } => doc.is_none(),
+            Cmd::Touch { .. } => true,
+            _ => false,
+        };
+        if bulk {
+            self.transfers.push_back(Transfer {
+                cmd,
+                label: busy.into(),
+                error: String::new(),
+            });
+            self.pump();
+            return;
+        }
+        self.dispatch(cmd, busy);
+    }
+
+    fn pump(&mut self) {
+        if self.running.is_some() || self.paused || !self.connected {
+            return;
+        }
+        if let Some(transfer) = self.transfers.pop_front() {
+            self.dispatch(transfer.cmd.clone(), transfer.label.clone());
+            self.running = Some(transfer);
+        }
+    }
+
+    fn settle(&mut self, path: &str, error: Option<String>) {
+        let touch = matches!(self.running.as_ref().map(|t| &t.cmd), Some(Cmd::Touch { .. }));
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|t| t.path() == path || (touch && remote::parent(t.path()) == path))
+            && let Some(mut transfer) = self.running.take()
+            && let Some(error) = error
+        {
+            transfer.error = error;
+            self.failed.push(transfer);
+        }
+        self.pump();
+    }
+
+    fn retry_failed(&mut self) {
+        for mut transfer in std::mem::take(&mut self.failed) {
+            transfer.error.clear();
+            self.transfers.push_back(transfer);
+        }
+        self.pump();
+    }
+
+    fn forget(&mut self, transfers: Vec<Transfer>) {
+        for transfer in transfers {
+            self.save_to.remove(transfer.path());
+            self.relay.remove(transfer.path());
+        }
+    }
+
+    fn dispatch(&mut self, cmd: Cmd, busy: impl Into<String>) {
         if let Some(conn) = &self.conn
             && conn.tx.send(cmd).is_ok()
         {
@@ -278,6 +360,10 @@ impl RemotePanel {
         self.conn = None;
         self.connected = false;
         self.queue.clear();
+        self.transfers.clear();
+        self.running = None;
+        self.failed.clear();
+        self.paused = false;
         self.entries.clear();
         self.children.clear();
         self.loading.clear();
@@ -448,7 +534,7 @@ impl RemotePanel {
                         "Не сохранено: ключ сервера нужно подтвердить — подключитесь к нему в панели".into(),
                     ));
                 }
-                Event::Error(e) | Event::Closed(e) => {
+                Event::Error(e) | Event::Closed(e) | Event::Failed { error: e, .. } => {
                     out.push(PanelEvent::Toast(format!("Не сохранено: {e}")));
                 }
                 _ => {}
@@ -615,6 +701,7 @@ impl RemotePanel {
                         self.send(cmd, "Загрузка…");
                     }
                     self.list(home);
+                    self.pump();
                 }
                 Event::Listing { path, entries } => {
                     self.finished();
@@ -663,6 +750,7 @@ impl RemotePanel {
                 }
                 Event::Downloaded { path, data } => {
                     self.finished();
+                    self.settle(&path, None);
                     if let Some((target, to)) = self.relay.remove(&path) {
                         out.push(PanelEvent::Relay {
                             target,
@@ -698,6 +786,7 @@ impl RemotePanel {
                 }
                 Event::Uploaded { path, doc } => {
                     self.finished();
+                    self.settle(&path, None);
                     let dir = remote::parent(&path);
                     match doc {
                         Some(doc) => out.push(PanelEvent::Uploaded { doc, path }),
@@ -793,6 +882,7 @@ impl RemotePanel {
                 }
                 Event::Changed(dir) => {
                     self.finished();
+                    self.settle(&dir, None);
                     if dir != self.cwd {
                         self.push_log(format!("Изменён каталог {dir}"), false);
                     }
@@ -805,6 +895,15 @@ impl RemotePanel {
                     self.finished();
                     self.loading.clear();
                     out.push(PanelEvent::Toast(format!("Ошибка сервера: {e}")));
+                }
+                Event::Failed { path, error } => {
+                    self.finished();
+                    self.push_log(format!("Не удалось: {path}: {error}"), true);
+                    out.push(PanelEvent::Toast(format!(
+                        "Не удалось передать {}: {error}",
+                        remote::file_name(&path)
+                    )));
+                    self.settle(&path, Some(error));
                 }
                 Event::Closed(e) => {
                     self.disconnect();
@@ -1030,11 +1129,13 @@ impl RemotePanel {
             });
             self.listing(ui, pal);
         }
+        self.transfers_ui(ui, pal);
         if let Some(busy) = &self.busy {
             ui.horizontal(|ui| {
                 ui.spinner();
-                let queue = if self.pending > 1 {
-                    format!("  ·  в очереди {}", self.pending)
+                let waiting = self.transfers.len() + self.pending.saturating_sub(1);
+                let queue = if waiting > 0 {
+                    format!("  ·  в очереди {waiting}")
                 } else {
                     String::new()
                 };
@@ -1063,6 +1164,79 @@ impl RemotePanel {
                 let mut filled = rect;
                 filled.set_width(rect.width() * (done as f32 / total as f32).min(1.0));
                 ui.painter().rect_filled(filled, 1.5, pal.accent);
+            }
+        }
+    }
+
+    fn transfers_ui(&mut self, ui: &mut Ui, pal: &Palette) {
+        if self.transfers.is_empty() && self.failed.is_empty() {
+            return;
+        }
+        let waiting = self
+            .transfers
+            .iter()
+            .filter(|t| !matches!(t.cmd, Cmd::Touch { .. }))
+            .count();
+        ui.add_space(4.0);
+        if waiting > 0 {
+            ui.horizontal(|ui| {
+                let text = if self.paused {
+                    format!("Пауза · ждут {waiting}")
+                } else {
+                    format!("Ждут передачи: {waiting}")
+                };
+                ui.label(RichText::new(text).small().color(pal.subtext));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(crate::widgets::secondary("Отменить", pal).small()).clicked() {
+                        let dropped: Vec<Transfer> = self.transfers.drain(..).collect();
+                        self.forget(dropped);
+                        self.paused = false;
+                    }
+                    let label = if self.paused { "Продолжить" } else { "Пауза" };
+                    if ui.add(crate::widgets::secondary(label, pal).small()).clicked() {
+                        self.paused = !self.paused;
+                        self.pump();
+                    }
+                });
+            });
+        }
+        if !self.failed.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("Не передано: {}", self.failed.len()))
+                        .small()
+                        .color(pal.warn),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(crate::widgets::secondary("Убрать", pal).small()).clicked() {
+                        let dropped = std::mem::take(&mut self.failed);
+                        self.forget(dropped);
+                    }
+                    if ui.add(crate::widgets::primary("Повторить", pal).small()).clicked() {
+                        self.retry_failed();
+                    }
+                });
+            });
+            for transfer in self.failed.iter().take(4) {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "{} — {}",
+                            remote::file_name(transfer.path()),
+                            transfer.error
+                        ))
+                        .small()
+                        .color(pal.faint),
+                    )
+                    .truncate(),
+                );
+            }
+            if self.failed.len() > 4 {
+                ui.label(
+                    RichText::new(format!("и ещё {}", self.failed.len() - 4))
+                        .small()
+                        .color(pal.faint),
+                );
             }
         }
     }
@@ -1302,7 +1476,18 @@ impl RemotePanel {
         let mut walk: Vec<String> = Vec::new();
         let mut toggle: Option<String> = None;
         let mut attrs: Option<Vec<(String, bool)>> = None;
-        let reserve = if self.busy.is_some() { 34.0 } else { 0.0 };
+        let waiting = self
+            .transfers
+            .iter()
+            .any(|t| !matches!(t.cmd, Cmd::Touch { .. }));
+        let errors = if self.failed.is_empty() {
+            0.0
+        } else {
+            30.0 + 18.0 * (self.failed.len().min(4) + usize::from(self.failed.len() > 4)) as f32
+        };
+        let reserve = if self.busy.is_some() { 34.0 } else { 0.0 }
+            + if waiting { 34.0 } else { 0.0 }
+            + errors;
         let tree = self.tree;
         let widths = crate::widgets::column_header(ui, pal, [show_size, show_perm, show_date]);
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -2498,5 +2683,74 @@ impl RemotePanel {
         } else if cancel || modal.should_close() {
             self.editor = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wait(panel: &mut RemotePanel, done: impl Fn(&RemotePanel) -> bool) {
+        let start = std::time::Instant::now();
+        while !done(panel) {
+            assert!(start.elapsed().as_secs() < 20, "timeout");
+            panel.poll();
+            if panel.host_key.take().is_some()
+                && let Some(conn) = &panel.conn
+            {
+                let _ = conn.tx.send(Cmd::TrustHost(true));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn live_transfer_queue_pauses_and_retries() {
+        let ctx = egui::Context::default();
+        let mut panel = RemotePanel::new(9);
+        panel.store = Store::default();
+        panel.store.profiles.push(Profile {
+            name: "t".into(),
+            protocol: remote::Protocol::Sftp,
+            host: "127.0.0.1".into(),
+            port: 2222,
+            user: "sftpu".into(),
+            password: "pw".into(),
+            ..Profile::new("t".into())
+        });
+        panel.selected = 0;
+        panel.connect(&ctx);
+        wait(&mut panel, |p| p.connected && p.pending == 0);
+        let out = std::env::temp_dir().join(format!("tror-queue-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        panel.paused = true;
+        for name in ["a.txt", "b.txt", "locked.txt"] {
+            let path = format!("/home/sftpu/www/q/{name}");
+            panel.save_to.insert(path.clone(), out.join(name));
+            panel.send(Cmd::Download(path), name.to_owned());
+        }
+        assert_eq!(panel.transfers.len(), 3);
+        assert!(panel.running.is_none());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        panel.poll();
+        assert!(!out.join("a.txt").exists());
+        panel.paused = false;
+        panel.pump();
+        wait(&mut panel, |p| p.transfers.is_empty() && p.running.is_none());
+        assert_eq!(std::fs::read_to_string(out.join("a.txt")).unwrap(), "aaa\n");
+        assert_eq!(std::fs::read_to_string(out.join("b.txt")).unwrap(), "bbb\n");
+        assert_eq!(panel.failed.len(), 1);
+        assert!(panel.failed[0].path().ends_with("locked.txt"));
+        assert!(!out.join("locked.txt").exists());
+        std::process::Command::new("chmod")
+            .args(["644", "/home/sftpu/www/q/locked.txt"])
+            .status()
+            .unwrap();
+        panel.retry_failed();
+        wait(&mut panel, |p| p.transfers.is_empty() && p.running.is_none());
+        assert!(panel.failed.is_empty());
+        assert_eq!(std::fs::read_to_string(out.join("locked.txt")).unwrap(), "lll\n");
+        std::fs::remove_dir_all(out).ok();
     }
 }

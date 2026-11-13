@@ -13,6 +13,7 @@ mod findfiles;
 mod fold;
 mod highlight;
 mod keys;
+mod marks;
 mod mosh;
 mod plugins;
 mod prefs;
@@ -27,6 +28,7 @@ mod terminal;
 mod theme;
 mod trace;
 mod update;
+mod vault;
 mod widgets;
 
 use eframe::egui;

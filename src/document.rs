@@ -247,6 +247,7 @@ pub struct Document {
     pub content_w: f64,
     pub activity: f64,
     pub folds: Vec<(usize, usize)>,
+    pub marks: std::collections::BTreeSet<usize>,
     pub hidden: Vec<(usize, usize)>,
     pub(crate) skip: Vec<usize>,
     pub(crate) ends: std::cell::RefCell<(u64, std::collections::HashMap<usize, Option<usize>>)>,
@@ -304,6 +305,7 @@ impl Document {
             content_w: 0.0,
             activity: 0.0,
             folds: Vec::new(),
+            marks: Default::default(),
             hidden: Vec::new(),
             skip: vec![0],
             ends: Default::default(),
@@ -597,6 +599,7 @@ impl Document {
             new_end_line - start_line + 1,
         );
         self.shift_folds(start_line, old_end_line, new_end_line);
+        self.shift_marks(start_line, old_end_line, new_end_line);
         if new_end_line - start_line < 64 {
             for line in start_line..=new_end_line {
                 self.max_line_chars = self.max_line_chars.max(self.line_len(line));
@@ -643,6 +646,14 @@ impl Document {
         self.last_edit = None;
         self.goal_x = None;
         self.reveal = true;
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
 
     pub fn undo(&mut self) {

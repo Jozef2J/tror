@@ -97,6 +97,7 @@ enum Action {
     MacroRecord,
     MacroPlay,
     Fold(u8),
+    Edit(&'static str),
     Goto(u64, usize),
     Plugin(usize),
     Detach(Pane),
@@ -321,6 +322,7 @@ impl TrorApp {
             .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
             .unwrap_or_default();
         settings.migrate();
+        crate::vault::set_in_file(settings.passwords_in_file);
         let mut dock = cc
             .storage
             .and_then(|s| eframe::get_value::<DockState<Pane>>(s, DOCK_KEY))
@@ -1246,6 +1248,50 @@ impl TrorApp {
                     self.goto = Some(String::new());
                 }
             }
+            Action::Edit(command) => {
+                if let Some(doc) = self.docs.get_mut(self.active) {
+                    match command {
+                        "cut" => crate::editor::copy_selection(ctx, doc, true),
+                        "copy" => crate::editor::copy_selection(ctx, doc, false),
+                        "paste" => {
+                            ctx.memory_mut(|m| m.request_focus(crate::editor::editor_id(doc.id)));
+                            ctx.send_viewport_cmd(ViewportCommand::RequestPaste);
+                        }
+                        "delete" => {
+                            if doc.has_selection() {
+                                doc.insert_text("");
+                            } else {
+                                doc.delete(false);
+                            }
+                        }
+                        "undo" => doc.undo(),
+                        "redo" => doc.redo(),
+                        "select_all" => doc.select_all(),
+                        "comment" => doc.toggle_comment(),
+                        "indent" => doc.indent(),
+                        "outdent" => doc.outdent(),
+                        "duplicate_line" => doc.duplicate_lines(),
+                        "delete_line" => doc.delete_lines(),
+                        "line_up" => doc.move_lines(true),
+                        "line_down" => doc.move_lines(false),
+                        "upper" => doc.transform(|t| t.to_uppercase()),
+                        "lower" => doc.transform(|t| t.to_lowercase()),
+                        "trim" => {
+                            let count = doc.trim_trailing();
+                            self.notify(format!("Пробелы в конце строк убраны: {count}"), now);
+                        }
+                        "bookmark" => doc.toggle_mark(),
+                        "bookmark_next" | "bookmark_prev" => {
+                            if !doc.jump_mark(command == "bookmark_next") {
+                                self.notify("Закладок нет: Ctrl+F2 ставит закладку на строку", now);
+                            }
+                        }
+                        "bookmark_clear" => doc.marks.clear(),
+                        _ => {}
+                    }
+                }
+                self.focus_editor = true;
+            }
             Action::Fold(kind) => {
                 if let Some(doc) = self.docs.get_mut(self.active) {
                     match kind {
@@ -1441,6 +1487,16 @@ impl TrorApp {
                 "find_next" => Action::FindNext,
                 "find_prev" => Action::FindPrev,
                 "goto" => Action::GotoLine,
+                "duplicate_line" => Action::Edit("duplicate_line"),
+                "delete_line" => Action::Edit("delete_line"),
+                "line_up" => Action::Edit("line_up"),
+                "line_down" => Action::Edit("line_down"),
+                "upper" => Action::Edit("upper"),
+                "lower" => Action::Edit("lower"),
+                "trim" => Action::Edit("trim"),
+                "bookmark" => Action::Edit("bookmark"),
+                "bookmark_next" => Action::Edit("bookmark_next"),
+                "bookmark_prev" => Action::Edit("bookmark_prev"),
                 "fold" => Action::Fold(0),
                 "unfold" => Action::Fold(1),
                 "fold_all" => Action::Fold(2),
@@ -1555,6 +1611,54 @@ impl TrorApp {
                 if item(ui, "Выход", "", true) {
                     actions.push(Action::Quit);
                 }
+            });
+            ui.menu_button("Правка", |ui| {
+                ui.set_min_width(280.0);
+                let doc = self.docs.get(self.active);
+                let selected = doc.is_some_and(|d| d.has_selection());
+                let cmd = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
+                let fixed = |k: &str| format!("{cmd}{k}");
+                let mut edit = |ui: &mut Ui, label: &str, shortcut: &str, enabled: bool, id: &'static str| {
+                    if item(ui, label, shortcut, enabled && has_doc) {
+                        actions.push(Action::Edit(id));
+                    }
+                };
+                edit(ui, "Отменить", &fixed("Z"), doc.is_some_and(|d| d.can_undo()), "undo");
+                edit(ui, "Повторить", &fixed("Y"), doc.is_some_and(|d| d.can_redo()), "redo");
+                ui.separator();
+                edit(ui, "Вырезать", &fixed("X"), selected, "cut");
+                edit(ui, "Копировать", &fixed("C"), selected, "copy");
+                edit(ui, "Вставить", &fixed("V"), true, "paste");
+                edit(ui, "Удалить", "Delete", true, "delete");
+                edit(ui, "Выделить всё", &fixed("A"), true, "select_all");
+                ui.separator();
+                edit(ui, "Дублировать строку", &key("duplicate_line"), true, "duplicate_line");
+                edit(ui, "Удалить строку", &key("delete_line"), true, "delete_line");
+                edit(ui, "Переместить строку вверх", &key("line_up"), true, "line_up");
+                edit(ui, "Переместить строку вниз", &key("line_down"), true, "line_down");
+                ui.separator();
+                edit(ui, "Закомментировать / раскомментировать", &fixed("/"), true, "comment");
+                edit(ui, "Увеличить отступ", "Tab", true, "indent");
+                edit(ui, "Уменьшить отступ", "Shift+Tab", true, "outdent");
+                edit(ui, "Удалить пробелы в конце строк", &key("trim"), true, "trim");
+                ui.menu_button("Регистр", |ui| {
+                    ui.set_min_width(220.0);
+                    edit(ui, "ПРОПИСНЫЕ", &key("upper"), true, "upper");
+                    edit(ui, "строчные", &key("lower"), true, "lower");
+                });
+                ui.menu_button("Закладки", |ui| {
+                    ui.set_min_width(240.0);
+                    edit(ui, "Поставить или снять", &key("bookmark"), true, "bookmark");
+                    edit(ui, "Следующая", &key("bookmark_next"), true, "bookmark_next");
+                    edit(ui, "Предыдущая", &key("bookmark_prev"), true, "bookmark_prev");
+                    edit(
+                        ui,
+                        "Убрать все",
+                        "",
+                        doc.is_some_and(|d| !d.marks.is_empty()),
+                        "bookmark_clear",
+                    );
+                });
             });
             ui.menu_button("Поиск", |ui| {
                 ui.set_min_width(240.0);

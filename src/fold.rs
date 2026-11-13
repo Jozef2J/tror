@@ -393,6 +393,7 @@ impl Document {
     }
 
     pub(crate) fn drop_folds(&mut self) {
+        self.clamp_marks();
         self.folds.clear();
         self.hidden.clear();
         self.skip.clear();

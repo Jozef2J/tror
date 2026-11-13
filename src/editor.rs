@@ -685,7 +685,7 @@ fn handle_events(ui: &Ui, doc: &mut Document, m: &Metrics, macros: &mut Macro) -
     typed
 }
 
-fn copy_selection(ui: &Ui, doc: &mut Document, cut: bool) {
+pub(crate) fn copy_selection(ctx: &egui::Context, doc: &mut Document, cut: bool) {
     let text = if doc.multi() {
         let text = doc.texts().join("\n");
         remember_block(Some(text.clone()));
@@ -694,7 +694,7 @@ fn copy_selection(ui: &Ui, doc: &mut Document, cut: bool) {
         remember_block(None);
         doc.selected_text()
     };
-    ui.ctx().copy_text(text);
+    ctx.copy_text(text);
     if cut {
         doc.insert_text("");
     }
@@ -763,10 +763,10 @@ fn context_items(ui: &mut Ui, doc: &mut Document, id: Id) {
         clicked
     };
     if item(ui, "Вырезать", keys("X"), selected) {
-        copy_selection(ui, doc, true);
+        copy_selection(ui.ctx(), doc, true);
     }
     if item(ui, "Копировать", keys("C"), selected) {
-        copy_selection(ui, doc, false);
+        copy_selection(ui.ctx(), doc, false);
     }
     if item(ui, "Вставить", keys("V"), true) {
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
@@ -1562,13 +1562,37 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 ));
             }
         }
+        let marked = doc.marks.contains(&line);
+        if marked {
+            if edit.line_numbers {
+                gutter_painter.rect_filled(
+                    Rect::from_min_size(
+                        egui::pos2(gutter_rect.left() + 4.0, y + 3.0),
+                        egui::vec2(4.0, row_h - 6.0),
+                    ),
+                    2.0,
+                    pal.accent,
+                );
+            } else {
+                painter.rect_filled(
+                    Rect::from_min_max(
+                        egui::pos2(text_rect.left(), y),
+                        egui::pos2(text_rect.right(), row_top(rows)),
+                    ),
+                    0.0,
+                    pal.accent.gamma_multiply(0.08),
+                );
+            }
+        }
         if edit.line_numbers {
             gutter_painter.text(
                 egui::pos2(gutter_rect.right() - 18.0, y + row_h * 0.5),
                 Align2::RIGHT_CENTER,
                 line + 1,
                 font.clone(),
-                if line == head_line {
+                if marked {
+                    pal.accent
+                } else if line == head_line {
                     pal.subtext
                 } else {
                     pal.faint
@@ -1644,7 +1668,22 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         }
     }
     let pointer_at = ui.input(|i| i.pointer.interact_pos());
-    let toggled = if gutter_click.clicked() {
+    let mark_click = gutter_click.clicked()
+        && edit.line_numbers
+        && pointer_at.is_some_and(|p| p.x < gutter_rect.left() + 14.0);
+    if mark_click
+        && let Some(p) = pointer_at
+        && let Some(row) = shown_rows
+            .iter()
+            .rev()
+            .find(|r| p.y >= r.1)
+    {
+        let line = row.0;
+        if !doc.marks.remove(&line) {
+            doc.marks.insert(line);
+        }
+    }
+    let toggled = if gutter_click.clicked() && !mark_click {
         pointer_at.and_then(|p| {
             fold_rows
                 .iter()
