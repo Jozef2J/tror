@@ -99,6 +99,7 @@ fn agent() -> ureq::Agent {
         .tls_config(
             ureq::tls::TlsConfig::builder()
                 .provider(ureq::tls::TlsProvider::NativeTls)
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
                 .build(),
         )
         .timeout_global(Some(std::time::Duration::from_secs(600)))
@@ -156,6 +157,17 @@ fn expected_sum(sums: &str, name: &str) -> Option<String> {
 }
 
 fn fetch(release: &Release, kind: Kind) -> Result<PathBuf, String> {
+    let target = match kind {
+        Kind::Installer => std::env::temp_dir().join(format!("tror-setup-{}.exe", release.version)),
+        _ => {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            exe.with_extension("new")
+        }
+    };
+    fetch_to(release, &target)
+}
+
+fn fetch_to(release: &Release, target: &Path) -> Result<PathBuf, String> {
     let (name, url) = release
         .file
         .as_ref()
@@ -190,15 +202,8 @@ fn fetch(release: &Release, kind: Kind) -> Result<PathBuf, String> {
     if actual != expected {
         return Err("контрольная сумма скачанного файла не совпала".into());
     }
-    let target = match kind {
-        Kind::Installer => std::env::temp_dir().join(format!("tror-setup-{}.exe", release.version)),
-        _ => {
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            exe.with_extension("new")
-        }
-    };
-    std::fs::write(&target, &data).map_err(|e| e.to_string())?;
-    Ok(target)
+    std::fs::write(target, &data).map_err(|e| e.to_string())?;
+    Ok(target.to_path_buf())
 }
 
 pub fn download(release: Release) -> Receiver<Event> {
@@ -259,6 +264,25 @@ pub fn cleanup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn live_latest_release_downloads_and_matches_its_checksum() {
+        let json = agent()
+            .get(LATEST)
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_to_string()
+            .unwrap();
+        let release = release_of(&json, Kind::Portable).unwrap();
+        assert!(parse_version(&release.version).is_some());
+        let dir = std::env::temp_dir().join(format!("tror-live-update-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = fetch_to(&release, &dir.join("tror.new")).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > 1_000_000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn versions_compare_numerically() {
