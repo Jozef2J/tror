@@ -1215,11 +1215,7 @@ pub fn appearance_rows(
             *font_size = if custom { 14.0 } else { 0.0 };
         }
         if custom {
-            ui.add(
-                egui::Slider::new(font_size, 8.0..=28.0)
-                    .step_by(1.0)
-                    .suffix(" px"),
-            );
+            crate::widgets::stepper(ui, pal, "term_font", font_size, (8.0, 28.0), 1.0, "px");
         }
     });
     ui.end_row();

@@ -225,6 +225,7 @@ pub struct Document {
     pub missing: bool,
     pub missing_ack: bool,
     pub untitled: u32,
+    pub pinned: bool,
     pub rope: Rope,
     pub encoding: &'static Encoding,
     pub bom: bool,
@@ -250,6 +251,24 @@ pub struct Document {
     last_edit: Option<(EditKind, Instant)>,
 }
 
+static INDENT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn set_indent(unit: String) {
+    if let Ok(mut current) = INDENT.lock()
+        && *current != unit
+    {
+        *current = unit;
+    }
+}
+
+fn indent_unit() -> String {
+    INDENT
+        .lock()
+        .ok()
+        .filter(|unit| !unit.is_empty())
+        .map_or_else(|| "\t".to_owned(), |unit| unit.clone())
+}
+
 impl Document {
     pub fn empty(id: u64, untitled: u32) -> Self {
         Self {
@@ -258,6 +277,7 @@ impl Document {
             remote: None,
             missing: false,
             missing_ack: false,
+            pinned: false,
             untitled,
             rope: Rope::new(),
             encoding: UTF_8,
@@ -734,20 +754,21 @@ impl Document {
     }
 
     pub fn indent(&mut self) {
+        let unit = indent_unit();
         if self.multi() {
-            self.insert_each("\t");
+            self.insert_each(&unit);
             return;
         }
         let lines = self.selected_lines();
         if lines.len() < 2 {
-            self.insert_text("\t");
+            self.insert_text(&unit);
             return;
         }
         self.checkpoint(EditKind::Other);
         for line in lines.clone() {
             if self.line_len(line) > 0 {
                 let at = self.rope.line_to_char(line);
-                self.apply(at..at, "\t");
+                self.apply(at..at, &unit);
             }
         }
         self.select_lines(lines);

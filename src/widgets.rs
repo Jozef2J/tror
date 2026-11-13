@@ -340,3 +340,197 @@ mod tests {
         assert!(parse_date("вчера").is_none());
     }
 }
+
+fn step_button(ui: &mut Ui, pal: &Palette, plus: bool, enabled: bool) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
+    let lit = enabled && response.hovered();
+    ui.painter()
+        .rect_filled(rect, 6.0, if lit { pal.surface_hover } else { pal.surface });
+    let color = if !enabled {
+        pal.faint.gamma_multiply(0.5)
+    } else if lit {
+        pal.text
+    } else {
+        pal.subtext
+    };
+    let scale = ui.ctx().pixels_per_point();
+    let snap = |v: f32| (v * scale).round() / scale;
+    let thick = (1.5 * scale).round().max(1.0) / scale;
+    let arm = snap(4.0);
+    let x = snap(rect.center().x - thick / 2.0);
+    let y = snap(rect.center().y - thick / 2.0);
+    ui.painter().rect_filled(
+        Rect::from_min_size(egui::pos2(x - arm, y), egui::vec2(arm * 2.0 + thick, thick)),
+        0.0,
+        color,
+    );
+    if plus {
+        ui.painter().rect_filled(
+            Rect::from_min_size(egui::pos2(x, y - arm), egui::vec2(thick, arm * 2.0 + thick)),
+            0.0,
+            color,
+        );
+    }
+    enabled && response.clicked()
+}
+
+pub fn stepper(
+    ui: &mut Ui,
+    pal: &Palette,
+    key: &str,
+    value: &mut f32,
+    (min, max): (f32, f32),
+    step: f32,
+    suffix: &str,
+) -> bool {
+    let decimals = if step.fract() == 0.0 {
+        0
+    } else if (step * 10.0).fract().abs() < 1e-4 {
+        1
+    } else {
+        2
+    };
+    let snap = |v: f32| ((v / step).round() * step).clamp(min, max);
+    let before = *value;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        if step_button(ui, pal, false, *value > min + step * 0.01) {
+            *value = snap(*value - step);
+        }
+        let id = ui.scope_id().with(("tror_stepper", key));
+        let shown = format!("{:.*}", decimals, *value);
+        let mut text = ui
+            .data(|d| d.get_temp::<String>(id))
+            .unwrap_or_else(|| shown.clone());
+        let field = ui.add(
+            TextEdit::singleline(&mut text)
+                .desired_width(46.0)
+                .align(egui::Align2::CENTER_CENTER),
+        );
+        if field.has_focus() {
+            ui.data_mut(|d| d.insert_temp(id, text));
+        } else if field.lost_focus() {
+            if let Ok(parsed) = text.trim().replace(',', ".").parse::<f32>()
+                && parsed.is_finite()
+            {
+                *value = snap(parsed);
+            }
+            ui.data_mut(|d| d.remove::<String>(id));
+        }
+        if step_button(ui, pal, true, *value < max - step * 0.01) {
+            *value = snap(*value + step);
+        }
+        if !suffix.is_empty() {
+            ui.label(egui::RichText::new(suffix).color(pal.faint));
+        }
+    });
+    (*value - before).abs() > f32::EPSILON
+}
+
+pub const COLUMN_DEFAULTS: [f32; 3] = [52.0, 34.0, 94.0];
+pub const COLUMN_GAP: f32 = 8.0;
+static COLUMNS: std::sync::Mutex<[f32; 3]> = std::sync::Mutex::new(COLUMN_DEFAULTS);
+
+pub fn columns() -> [f32; 3] {
+    COLUMNS.lock().map(|c| *c).unwrap_or(COLUMN_DEFAULTS)
+}
+
+pub fn set_columns(widths: [f32; 3]) {
+    if let Ok(mut columns) = COLUMNS.lock() {
+        *columns = widths.map(|w| {
+            if w.is_finite() {
+                w.clamp(30.0, 260.0)
+            } else {
+                52.0
+            }
+        });
+    }
+}
+
+pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3]) {
+    if !shown.contains(&true) {
+        return;
+    }
+    let mut widths = columns();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    let font = egui::FontId::proportional(11.0);
+    let mut right = rect.right() - 6.0;
+    let mut room = rect.width() - 104.0;
+    let mut visible = [false; 3];
+    for index in [0, 2, 1] {
+        if shown[index] && room > widths[index] + COLUMN_GAP {
+            room -= widths[index] + COLUMN_GAP;
+            visible[index] = true;
+        }
+    }
+    for (index, label) in [(2, "Изменён"), (1, "Права"), (0, "Размер")] {
+        if !visible[index] {
+            continue;
+        }
+        let left = right - widths[index];
+        painter.text(
+            egui::pos2(right, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            label,
+            font.clone(),
+            pal.faint,
+        );
+        let grip = Rect::from_min_max(
+            egui::pos2(left - COLUMN_GAP, rect.top()),
+            egui::pos2(left, rect.bottom()),
+        );
+        let response = ui
+            .interact(
+                grip,
+                ui.scope_id().with(("tror_column", index)),
+                Sense::drag(),
+            )
+            .on_hover_and_drag_cursor(egui::CursorIcon::ResizeHorizontal);
+        let lit = response.hovered() || response.dragged();
+        painter.line_segment(
+            [
+                egui::pos2(left - 4.0, rect.top() + 4.0),
+                egui::pos2(left - 4.0, rect.bottom() - 4.0),
+            ],
+            Stroke::new(1.0, if lit { pal.accent } else { pal.border }),
+        );
+        if response.dragged()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            widths[index] = (right - pointer.x - 4.0).clamp(30.0, 260.0);
+        }
+        if response.double_clicked() {
+            widths[index] = COLUMN_DEFAULTS[index];
+        }
+        right = left - COLUMN_GAP;
+    }
+    painter.text(
+        egui::pos2(rect.left() + 6.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Имя",
+        font,
+        pal.faint,
+    );
+    set_columns(widths);
+}
+
+pub fn paint_pin(painter: &egui::Painter, center: Pos2, color: Color32) {
+    let stroke = Stroke::new(1.3, color);
+    painter.rect_filled(
+        Rect::from_center_size(center + egui::vec2(0.0, -2.5), egui::vec2(5.0, 5.0)),
+        1.0,
+        color,
+    );
+    painter.line_segment(
+        [
+            center + egui::vec2(-4.0, 0.5),
+            center + egui::vec2(4.0, 0.5),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [center + egui::vec2(0.0, 0.5), center + egui::vec2(0.0, 5.5)],
+        stroke,
+    );
+}

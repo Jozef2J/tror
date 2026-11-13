@@ -29,6 +29,7 @@ pub struct View<'a> {
     pub wrap: bool,
     pub font_size: f32,
     pub line_spacing: f32,
+    pub edit: crate::prefs::Edit,
     pub complete: &'a mut Completion,
 }
 
@@ -851,6 +852,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         wrap,
         font_size,
         line_spacing,
+        edit,
         complete,
     } = view;
     let font = FontId::monospace(font_size);
@@ -858,7 +860,11 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     let row_h = (font_size * line_spacing).round().max(font_h.ceil());
     let lines = doc.line_count();
     let digits = lines.to_string().len().max(3);
-    let gutter_w = digits as f32 * char_w + 28.0;
+    let gutter_w = if edit.line_numbers {
+        digits as f32 * char_w + 28.0
+    } else {
+        14.0
+    };
     let full = ui.available_rect_before_wrap();
     ui.allocate_rect(full, Sense::hover());
     ui.painter().rect_filled(full, 0.0, pal.base);
@@ -951,7 +957,11 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         } else if manual {
             complete.refresh(doc, true);
         } else if typed == Typed::Text || (typed == Typed::Backspace && stepped) {
-            complete.refresh(doc, false);
+            if edit.suggest {
+                complete.refresh(doc, false);
+            } else {
+                complete.close();
+            }
         } else if before != (doc.version, doc.sel) {
             complete.close();
         }
@@ -1324,7 +1334,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             }
         };
 
-        if line == head_line && sel.is_empty() {
+        if edit.current_line && line == head_line && sel.is_empty() {
             painter.rect_filled(
                 Rect::from_min_max(
                     egui::pos2(text_rect.left(), y),
@@ -1419,22 +1429,24 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 ));
             }
         }
-        gutter_painter.text(
-            egui::pos2(gutter_rect.right() - 14.0, y + row_h * 0.5),
-            Align2::RIGHT_CENTER,
-            line + 1,
-            font.clone(),
-            if line == head_line {
-                pal.subtext
-            } else {
-                pal.faint
-            },
-        );
+        if edit.line_numbers {
+            gutter_painter.text(
+                egui::pos2(gutter_rect.right() - 14.0, y + row_h * 0.5),
+                Align2::RIGHT_CENTER,
+                line + 1,
+                font.clone(),
+                if line == head_line {
+                    pal.subtext
+                } else {
+                    pal.faint
+                },
+            );
+        }
     }
 
     if focused && let Some(rect) = cursor_rect {
         let phase = now - doc.activity;
-        if (phase * 2.0) as i64 % 2 == 0 {
+        if !edit.blink || (phase * 2.0) as i64 % 2 == 0 {
             painter.line_segment(
                 [rect.left_top(), rect.left_bottom()],
                 Stroke::new(2.0, pal.accent),
@@ -1446,8 +1458,10 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 );
             }
         }
-        let wait = 0.5 - phase % 0.5;
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait.max(0.02)));
+        if edit.blink {
+            let wait = 0.5 - phase % 0.5;
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait.max(0.02)));
+        }
         ui.output_mut(|o| {
             o.ime = Some(egui::output::IMEOutput {
                 purpose: Default::default(),
@@ -1456,6 +1470,9 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 should_interrupt_composition: false,
             })
         });
+    }
+    if !edit.hints {
+        complete.hint = None;
     }
     if complete.open
         && let Some(rect) = cursor_rect

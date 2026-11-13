@@ -173,7 +173,7 @@ impl<Tab> DockArea<'_, Tab> {
         self.node_min_size(surface, NodeIndex::root()) + padding
     }
 
-    fn node_min_size(&self, surface: SurfaceIndex, node: NodeIndex) -> Vec2 {
+    pub(super) fn node_min_size(&self, surface: SurfaceIndex, node: NodeIndex) -> Vec2 {
         let style = self.style.as_ref().unwrap();
         let gap = style.separator.width;
         let along = |sizes: &mut dyn Iterator<Item = f32>| {

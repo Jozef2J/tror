@@ -440,6 +440,8 @@ impl<Tab> DockArea<'_, Tab> {
         };
 
         let mut roved = false;
+        let mut dragged_slot: Option<(usize, Rect)> = None;
+        let mut slots: Vec<(usize, Rect)> = Vec::new();
         for tab_index in 0..tabs_len {
             let id = self
                 .id
@@ -494,6 +496,7 @@ impl<Tab> DockArea<'_, Tab> {
                     })
                     .response;
                 let title_id = response.id;
+                dragged_slot = Some((tab_index.0, response.rect));
 
                 let response =
                     tabs_ui.interact(response.rect, id.with("dragged"), Sense::click_and_drag());
@@ -522,6 +525,7 @@ impl<Tab> DockArea<'_, Tab> {
                     folded,
                 );
                 let title_id = response.id;
+                slots.push((tab_index.0, response.rect));
                 // A tab that has just become the active one is scrolled into view.
                 if let Ok(leaf) = self.dock_state.leaf_mut(path)
                     && leaf.active == tab_index
@@ -698,6 +702,60 @@ impl<Tab> DockArea<'_, Tab> {
                     (path, tab_index).into(),
                     ForcedRemoval(false),
                 ));
+            }
+        }
+
+        if let Some((from, own)) = dragged_slot
+            && state.dragged.is_some()
+            && let Some(pointer) = tabs_ui.ctx().pointer_interact_pos()
+            && tabbar_outer_rect.contains(pointer)
+        {
+            let target = slots.iter().copied().find(|(index, rect)| {
+                if *index > from {
+                    pointer.x > rect.center().x
+                        && slots
+                            .iter()
+                            .all(|(i, r)| *i <= *index || pointer.x <= r.center().x)
+                } else {
+                    pointer.x < rect.center().x
+                        && slots
+                            .iter()
+                            .all(|(i, r)| *i >= *index || pointer.x >= r.center().x)
+                }
+            });
+            if let Some((to, rect)) = target
+                && let Ok(leaf) = self.dock_state.leaf_mut(path)
+                && tab_viewer.tab_group(&leaf.tabs[from]) == tab_viewer.tab_group(&leaf.tabs[to])
+                && (from.min(to)..=from.max(to))
+                    .all(|i| tab_viewer.tab_group(&leaf.tabs[i]) == tab_viewer.tab_group(&leaf.tabs[from]))
+            {
+                let active = leaf.active.0;
+                let tab = leaf.tabs.remove(from);
+                leaf.tabs.insert(to, tab);
+                leaf.active = TabIndex(if active == from {
+                    to
+                } else if from < active && active <= to {
+                    active - 1
+                } else if to <= active && active < from {
+                    active + 1
+                } else {
+                    active
+                });
+                let shift = if to > from {
+                    rect.right() - own.right()
+                } else {
+                    rect.left() - own.left()
+                };
+                if let Some(start) = &mut state.drag_start {
+                    start.x += shift;
+                }
+                let id = self
+                    .id
+                    .with((path.surface, "surface"))
+                    .with((path.node, "node"))
+                    .with((to, "tab"));
+                tabs_ui.ctx().set_dragged_id(id);
+                tabs_ui.ctx().request_repaint();
             }
         }
 
@@ -1591,6 +1649,14 @@ impl<Tab> DockArea<'_, Tab> {
                 && !self.covered_by_window(ui, pointer)
             {
                 let on_title_bar = tabbar_rect.contains(pointer);
+                let own_bar = on_title_bar
+                    && state
+                        .dragged
+                        .as_ref()
+                        .is_some_and(|dragged| dragged.path.node_path() == path);
+                if own_bar {
+                    return;
+                }
                 let (dst, tab) = {
                     match self.tab_hover_rect {
                         Some((rect, tab_index)) => {

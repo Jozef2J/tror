@@ -45,6 +45,11 @@ pub trait TabViewer {
         true
     }
 
+    /// Tabs of a bar change places while one is dragged along it only within one group.
+    fn tab_group(&self, _tab: &Self::Tab) -> u8 {
+        0
+    }
+
     /// Returns `false` when [`TabViewer::context_menu`] already offers closing `_tab`.
     fn close_in_tab_menu(&self, _tab: &Self::Tab) -> bool {
         true

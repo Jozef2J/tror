@@ -14,7 +14,11 @@ use crate::remote::{self, Profile, Store};
 use crate::theme::Palette;
 use crate::trace;
 
-const MAX_ROWS: usize = 5000;
+pub static MAX_ROWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(5000);
+
+fn max_rows() -> usize {
+    MAX_ROWS.load(std::sync::atomic::Ordering::Relaxed)
+}
 const MAX_CELL: usize = 4000;
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
@@ -242,7 +246,7 @@ impl Engine {
                     let mut truncated = false;
                     for row in set {
                         let row = row.map_err(explain)?;
-                        if rows.len() >= MAX_ROWS {
+                        if rows.len() >= max_rows() {
                             truncated = true;
                             continue;
                         }
@@ -275,7 +279,7 @@ impl Engine {
                             if columns.is_empty() {
                                 columns = row.columns().iter().map(|c| c.name().to_owned()).collect();
                             }
-                            if rows.len() >= MAX_ROWS {
+                            if rows.len() >= max_rows() {
                                 truncated = true;
                                 continue;
                             }
@@ -313,7 +317,7 @@ impl Engine {
                     let mut truncated = false;
                     let mut query = stmt.raw_query();
                     while let Some(row) = query.next().map_err(|e| e.to_string())? {
-                        if rows.len() >= MAX_ROWS {
+                        if rows.len() >= max_rows() {
                             truncated = true;
                             continue;
                         }
@@ -855,7 +859,7 @@ impl DbPanel {
                             "Строк: {}{}, {:.1} мс",
                             table.rows.len(),
                             if table.truncated {
-                                format!(" (показаны первые {MAX_ROWS})")
+                                format!(" (показаны первые {})", max_rows())
                             } else {
                                 String::new()
                             },

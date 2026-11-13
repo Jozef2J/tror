@@ -102,7 +102,7 @@ pub fn new() -> DockState<Pane> {
 pub fn translate(dock: &mut DockState<Pane>) {
     let t = &mut dock.translations;
     t.tab_context_menu.close_button = "Закрыть".into();
-    t.tab_context_menu.eject_button = "Открепить (плавающая панель)".into();
+    t.tab_context_menu.eject_button = "Сделать плавающей панелью".into();
     t.tab_context_menu.hide_tab_bar_button = "Скрыть заголовок".into();
     t.tab_context_menu.show_tab_bar_button = "Показать заголовок".into();
     t.leaf.close_button_disabled_tooltip = "Здесь есть вкладки, которые нельзя закрыть".into();
@@ -257,6 +257,48 @@ pub fn sync_with(dock: &mut DockState<Pane>, docs: &[u64], welcome: bool) {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct Mark {
+    pub dirty: bool,
+    pub pinned: bool,
+    pub accent: Color32,
+}
+
+thread_local! {
+    static MARK: std::cell::Cell<Mark> = const {
+        std::cell::Cell::new(Mark {
+            dirty: false,
+            pinned: false,
+            accent: Color32::TRANSPARENT,
+        })
+    };
+}
+
+pub fn set_mark(mark: Mark) {
+    MARK.with(|m| m.set(mark));
+}
+
+pub fn pins_first(dock: &mut DockState<Pane>, pinned: &[u64]) {
+    if pinned.is_empty() {
+        return;
+    }
+    let is_pinned = |tab: &Pane| matches!(tab, Pane::Doc(id) if pinned.contains(id));
+    let paths: Vec<NodePath> = dock.iter_leaves().map(|(path, _)| path).collect();
+    for path in paths {
+        let Ok(leaf) = dock.leaf_mut(path) else {
+            continue;
+        };
+        if leaf.tabs.iter().skip_while(|t| is_pinned(t)).all(|t| !is_pinned(t)) {
+            continue;
+        }
+        let active = leaf.tabs.get(leaf.active.0).copied();
+        leaf.tabs.sort_by_key(|tab| !is_pinned(tab));
+        if let Some(index) = active.and_then(|a| leaf.tabs.iter().position(|t| *t == a)) {
+            leaf.active = egui_stack::TabIndex(index);
+        }
+    }
+}
+
 pub struct TabPainter;
 
 impl egui_stack::DockPainter for TabPainter {
@@ -265,22 +307,38 @@ impl egui_stack::DockPainter for TabPainter {
         let Some(close) = tab.close else {
             return;
         };
+        let mark = MARK.with(|m| m.get());
+        let center = close.rect.center();
         let lit = close.state.contains(egui_stack::PartState::HOVERED)
             || close.state.contains(egui_stack::PartState::FOCUSED);
-        if !lit {
-            return;
+        let shown = tab.state.contains(egui_stack::PartState::HOVERED)
+            || tab.state.contains(egui_stack::PartState::SELECTED);
+        let text = tab.tab_style.active.text_color;
+        if lit {
+            let inner = egui::Rect::from_center_size(
+                center,
+                egui::vec2(18.0, 18.0).min(tab.rect.size() - egui::vec2(4.0, 6.0)),
+            )
+            .intersect(tab.rect.shrink2(egui::vec2(2.0, 3.0)));
+            painter.rect_filled(inner, 5.0, tab.style.buttons.add_tab_bg_fill);
         }
-        let inner = egui::Rect::from_center_size(
-            close.rect.center(),
-            egui::vec2(18.0, 18.0).min(tab.rect.size() - egui::vec2(4.0, 6.0)),
-        )
-        .intersect(tab.rect.shrink2(egui::vec2(2.0, 3.0)));
-        painter.rect_filled(inner, 4.0, tab.style.buttons.add_tab_bg_fill);
-        let d = 4.0;
-        let c = inner.center();
-        let stroke = Stroke::new(1.2, tab.style.buttons.close_tab_active_color);
-        painter.line_segment([c + egui::vec2(-d, -d), c + egui::vec2(d, d)], stroke);
-        painter.line_segment([c + egui::vec2(d, -d), c + egui::vec2(-d, d)], stroke);
+        if mark.pinned {
+            let color = if lit { text } else { mark.accent };
+            crate::widgets::paint_pin(painter, center, color);
+        } else if mark.dirty && !lit {
+            painter.circle_filled(center, 6.5, mark.accent.gamma_multiply(0.18));
+            painter.circle_filled(center, 3.5, mark.accent);
+        } else if lit || shown {
+            let d = 3.5;
+            let color = if lit {
+                text
+            } else {
+                tab.tab_style.inactive.text_color.gamma_multiply(0.75)
+            };
+            let stroke = Stroke::new(1.3, color);
+            painter.line_segment([center + egui::vec2(-d, -d), center + egui::vec2(d, d)], stroke);
+            painter.line_segment([center + egui::vec2(d, -d), center + egui::vec2(-d, d)], stroke);
+        }
     }
 }
 
@@ -412,8 +470,8 @@ pub fn style(pal: &Palette, egui_style: &egui::Style, radius: u8) -> Style {
     style.tab.tab_body.corner_radius = CornerRadius::ZERO;
     style.tab.tab_body.bg_fill = pal.mantle;
 
-    style.buttons.close_tab_color = pal.faint;
-    style.buttons.close_tab_active_color = pal.text;
+    style.buttons.close_tab_color = Color32::TRANSPARENT;
+    style.buttons.close_tab_active_color = Color32::TRANSPARENT;
     style.buttons.close_tab_bg_fill = Color32::TRANSPARENT;
     style.buttons.add_tab_bg_fill = pal.surface_hover;
 
@@ -497,5 +555,24 @@ mod tests {
         let text = ron::ser::to_string(&dock).unwrap();
         let back: DockState<Pane> = ron::from_str(&text).unwrap();
         assert_eq!(zones(&back), zones(&dock));
+    }
+
+    #[test]
+    fn pinned_tabs_move_to_the_front_and_keep_their_order() {
+        let mut dock = DockState::new(vec![
+            Pane::Doc(1),
+            Pane::Doc(2),
+            Pane::Doc(3),
+            Pane::Doc(4),
+        ]);
+        let path = dock.iter_leaves().next().unwrap().0;
+        dock.leaf_mut(path).unwrap().active = egui_stack::TabIndex(1);
+        pins_first(&mut dock, &[4, 3]);
+        let leaf = dock.leaf_mut(path).unwrap();
+        assert_eq!(
+            leaf.tabs,
+            vec![Pane::Doc(3), Pane::Doc(4), Pane::Doc(1), Pane::Doc(2)]
+        );
+        assert_eq!(leaf.tabs[leaf.active.0], Pane::Doc(2));
     }
 }

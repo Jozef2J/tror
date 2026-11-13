@@ -5,7 +5,7 @@ use eframe::egui::{
 
 use crate::theme::Palette;
 
-const SCROLLBACK: usize = 5000;
+pub static SCROLLBACK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(5000);
 
 const DARK: [u32; 16] = [
     0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, 0x585b70,
@@ -213,7 +213,11 @@ fn nz(value: u16) -> std::num::NonZeroU16 {
 }
 
 fn new_parser(cols: u16, rows: u16) -> vt100::Parser {
-    vt100::Parser::new(nz(rows), nz(cols), SCROLLBACK)
+    vt100::Parser::new(
+        nz(rows),
+        nz(cols),
+        SCROLLBACK.load(std::sync::atomic::Ordering::Relaxed),
+    )
 }
 
 type Style = (vt100::Color, vt100::Color, bool, bool, bool, bool, bool);

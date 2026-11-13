@@ -112,6 +112,7 @@ enum TabCmd {
     SaveAs,
     Rename,
     Color(Option<u8>),
+    Pin,
     NewGroup(egui_stack::Split),
     OtherGroup,
     Reveal,
@@ -257,7 +258,6 @@ pub struct TrorApp {
     docs: Vec<Document>,
     active: usize,
     next_id: u64,
-    next_untitled: u32,
     settings: Settings,
     search: SearchState,
     complete: Completion,
@@ -327,7 +327,6 @@ impl TrorApp {
             docs: Vec::new(),
             active: 0,
             next_id: 1,
-            next_untitled: 1,
             settings,
             search: SearchState::default(),
             complete: Completion::default(),
@@ -377,11 +376,17 @@ impl TrorApp {
         let open = std::mem::take(&mut app.settings.open);
         let active = app.settings.active;
         let mut top = 1;
-        for (id, path) in open.iter().filter(|(_, p)| p.is_file()) {
+        let restore = app.settings.restore;
+        for (id, path) in open.iter().filter(|(_, p)| restore && p.is_file()) {
             app.next_id = *id;
             app.open_path(path, 0.0);
             top = top.max(id + 1);
         }
+        let pinned = std::mem::take(&mut app.settings.pinned);
+        for doc in &mut app.docs {
+            doc.pinned = doc.path.as_ref().is_some_and(|p| pinned.contains(p));
+        }
+        crate::widgets::set_columns(app.settings.columns);
         app.next_id = top;
         if active < app.docs.len() {
             app.active = active;
@@ -550,9 +555,15 @@ impl TrorApp {
     }
 
     fn new_doc(&mut self) {
-        let doc = Document::empty(self.next_id, self.next_untitled);
+        let taken: Vec<u32> = self
+            .docs
+            .iter()
+            .filter(|d| d.path.is_none() && d.remote.is_none())
+            .map(|d| d.untitled)
+            .collect();
+        let number = (1..).find(|n| !taken.contains(n)).unwrap_or(1);
+        let doc = Document::empty(self.next_id, number);
         self.next_id += 1;
-        self.next_untitled += 1;
         self.docs.push(doc);
         self.active = self.docs.len() - 1;
         self.focus_editor = true;
@@ -1981,6 +1992,8 @@ impl TrorApp {
                     TabCmd::CloseRight => order[at + 1..].to_vec(),
                     _ => order.into_iter().filter(|d| *d != id).collect(),
                 };
+                let pinned = |id: &u64| self.docs.iter().any(|d| d.id == *id && d.pinned);
+                let ids: Vec<u64> = ids.into_iter().filter(|id| !pinned(id)).collect();
                 self.close_queue.extend(ids);
             }
             TabCmd::Save => {
@@ -2002,6 +2015,7 @@ impl TrorApp {
                     }
                 }
             }
+            TabCmd::Pin => self.docs[index].pinned = !self.docs[index].pinned,
             TabCmd::NewGroup(split) => {
                 if let Some(path) = self.dock.find_tab(&Pane::Doc(id)) {
                     let count = self.leaf_docs(id).len();
@@ -2323,6 +2337,7 @@ impl TrorApp {
                     wrap,
                     font_size,
                     line_spacing,
+                    edit: self.settings.edit,
                     complete: &mut self.complete,
                 },
             );
@@ -2360,6 +2375,7 @@ impl TrorApp {
                 wrap,
                 font_size,
                 line_spacing,
+                edit: self.settings.edit,
                 complete: &mut complete,
             },
         );
@@ -2497,6 +2513,7 @@ impl Viewer<'_> {
             .as_ref()
             .and_then(|k| self.app.settings.tab_colors.get(k))
             .copied();
+        let pinned = doc.pinned;
         let mut cmd = None;
         let row = |ui: &mut Ui, text: &str, shortcut: String, enabled: bool| {
             ui.add_enabled(enabled, Button::new(text).shortcut_text(shortcut))
@@ -2518,6 +2535,15 @@ impl Viewer<'_> {
             at + 1 < order.len(),
         ) {
             cmd = Some(TabCmd::CloseRight);
+        }
+        ui.separator();
+        let pin = if pinned {
+            "Открепить вкладку"
+        } else {
+            "Закрепить вкладку"
+        };
+        if row(ui, pin, String::new(), true) {
+            cmd = Some(TabCmd::Pin);
         }
         ui.separator();
         if row(ui, "Сохранить", key("save"), true) {
@@ -2585,22 +2611,22 @@ impl Viewer<'_> {
                 }
             });
         });
-        ui.menu_button("Группа вкладок", |ui| {
+        ui.menu_button("Область вкладок", |ui| {
             ui.set_min_width(230.0);
             let alone = order.len() < 2;
             if ui
-                .add_enabled(!alone, Button::new("Новая группа справа"))
+                .add_enabled(!alone, Button::new("Новая область справа"))
                 .clicked()
             {
                 cmd = Some(TabCmd::NewGroup(egui_stack::Split::Right));
             }
             if ui
-                .add_enabled(!alone, Button::new("Новая группа снизу"))
+                .add_enabled(!alone, Button::new("Новая область снизу"))
                 .clicked()
             {
                 cmd = Some(TabCmd::NewGroup(egui_stack::Split::Below));
             }
-            if ui.button("Переместить в другую группу").clicked() {
+            if ui.button("Переместить в другую область").clicked() {
                 cmd = Some(TabCmd::OtherGroup);
             }
         });
@@ -2619,6 +2645,7 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
+        dock::set_mark(dock::Mark::default());
         let Pane::Doc(id) = *tab else {
             return tab.title().into();
         };
@@ -2628,7 +2655,11 @@ impl TabViewer for Viewer<'_> {
         let doc = &self.app.docs[index];
         let pal = &self.pal;
         let active = index == self.app.active;
-        let title = doc.title();
+        dock::set_mark(dock::Mark {
+            dirty: doc.dirty(),
+            pinned: doc.pinned,
+            accent: pal.accent,
+        });
         let color = if doc.missing {
             pal.warn
         } else if active {
@@ -2643,20 +2674,8 @@ impl TabViewer for Viewer<'_> {
         };
         let size = self.app.settings.look.ui_size - 0.5;
         let mut job = egui::text::LayoutJob::default();
-        let tint = self.app.doc_color(doc);
-        let dot = tint.unwrap_or_else(|| crate::widgets::kind_color(&title, pal));
         job.append(
-            "● ",
-            0.0,
-            egui::TextFormat {
-                font_id: FontId::proportional(size - 4.0),
-                color: if active { dot } else { dot.gamma_multiply(0.7) },
-                valign: Align::Center,
-                ..Default::default()
-            },
-        );
-        job.append(
-            &title,
+            &doc.title(),
             0.0,
             egui::TextFormat {
                 font_id: FontId::new(size, family),
@@ -2670,18 +2689,6 @@ impl TabViewer for Viewer<'_> {
                 ..Default::default()
             },
         );
-        if doc.dirty() {
-            job.append(
-                " ●",
-                0.0,
-                egui::TextFormat {
-                    font_id: FontId::proportional(size - 4.0),
-                    color: pal.accent,
-                    valign: Align::Center,
-                    ..Default::default()
-                },
-            );
-        }
         job.into()
     }
 
@@ -2778,7 +2785,7 @@ impl TabViewer for Viewer<'_> {
         let Some(index) = self.app.docs.iter().position(|d| d.id == id) else {
             return;
         };
-        if response.middle_clicked() {
+        if response.middle_clicked() && !self.app.docs[index].pinned {
             self.actions.push(Action::CloseTab(index));
         }
         if let Some(location) = self.app.docs[index].location() {
@@ -2789,7 +2796,11 @@ impl TabViewer for Viewer<'_> {
     fn on_close(&mut self, tab: &mut Pane) -> egui_stack::tab_viewer::OnCloseResponse {
         if let Pane::Doc(id) = *tab {
             if let Some(index) = self.app.docs.iter().position(|d| d.id == id) {
-                self.actions.push(Action::CloseTab(index));
+                if self.app.docs[index].pinned {
+                    self.actions.push(Action::TabCmd(id, TabCmd::Pin));
+                } else {
+                    self.actions.push(Action::CloseTab(index));
+                }
             }
             return egui_stack::tab_viewer::OnCloseResponse::Ignore;
         }
@@ -2821,6 +2832,13 @@ impl TabViewer for Viewer<'_> {
             state.outline_color = mix(state.outline_color, 0.5);
         }
         Some(style)
+    }
+
+    fn tab_group(&self, tab: &Pane) -> u8 {
+        match tab {
+            Pane::Doc(id) => self.app.docs.iter().any(|d| d.id == *id && d.pinned) as u8,
+            _ => 0,
+        }
     }
 
     fn close_in_tab_menu(&self, tab: &Pane) -> bool {
@@ -2959,8 +2977,18 @@ impl eframe::App for TrorApp {
         if self.project.root.is_none() {
             self.settings.project = None;
         }
-        self.settings.project_size = self.project.show_size;
-        self.settings.project_date = self.project.show_date;
+        self.project.show_size = self.settings.project_size;
+        self.project.show_date = self.settings.project_date;
+        self.settings.columns = crate::widgets::columns();
+        crate::document::set_indent(self.settings.edit.unit());
+        crate::terminal::SCROLLBACK.store(
+            self.settings.scrollback as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        crate::db::MAX_ROWS.store(
+            self.settings.db_rows as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if !modal_open {
             self.shortcuts(&ctx, &mut actions);
         }
@@ -3025,6 +3053,8 @@ impl eframe::App for TrorApp {
             self.active = index;
             self.complete.close();
         }
+        let pinned: Vec<u64> = self.docs.iter().filter(|d| d.pinned).map(|d| d.id).collect();
+        dock::pins_first(&mut dock, &pinned);
         dock::enforce_min(&mut dock);
         dock::remember(&dock, &mut self.settings.floats);
         self.dock = dock;
@@ -3151,6 +3181,12 @@ impl eframe::App for TrorApp {
             .docs
             .iter()
             .filter_map(|d| Some((d.id, d.path.clone()?)))
+            .collect();
+        self.settings.pinned = self
+            .docs
+            .iter()
+            .filter(|d| d.pinned)
+            .filter_map(|d| d.path.clone())
             .collect();
         self.settings.active = self.active;
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);

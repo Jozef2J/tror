@@ -1137,6 +1137,7 @@ impl RemotePanel {
         }
         let mut open = None;
         let row_h = 20.0;
+        ui.spacing_mut().item_spacing.y = 0.0;
         ScrollArea::vertical().auto_shrink(false).show_rows(
             ui,
             row_h,
@@ -1272,6 +1273,10 @@ impl RemotePanel {
         let mut attrs: Option<Vec<(String, bool)>> = None;
         let reserve = if self.busy.is_some() { 34.0 } else { 0.0 };
         let tree = self.tree;
+        crate::widgets::column_header(ui, pal, [show_size, show_perm, show_date]);
+        let widths = crate::widgets::columns();
+        let gap = crate::widgets::COLUMN_GAP;
+        ui.spacing_mut().item_spacing.y = 0.0;
         let outer = ui.available_rect_before_wrap();
         let height = (ui.available_height() - reserve).max(40.0);
         let blank = ui.interact(
@@ -1337,8 +1342,18 @@ impl RemotePanel {
                     );
                     let mut right = rect.right() - 6.0;
                     let small = egui::FontId::proportional(11.5);
-                    let narrow = rect.width() - indent < 230.0;
-                    if show_date && !narrow {
+                    let mut room = rect.width() - indent - 90.0;
+                    let mut fits = |on: bool, width: f32| {
+                        let yes = on && room > width + gap;
+                        if yes {
+                            room -= width + gap;
+                        }
+                        yes
+                    };
+                    let show_size = fits(show_size, widths[0]);
+                    let show_date = fits(show_date, widths[2]);
+                    let show_perm = fits(show_perm, widths[1]);
+                    if show_date {
                         if let Some(secs) = entry.as_ref().and_then(|e| e.mtime) {
                             painter.text(
                                 egui::pos2(right, rect.center().y),
@@ -1348,9 +1363,9 @@ impl RemotePanel {
                                 pal.faint,
                             );
                         }
-                        right -= 100.0;
+                        right -= widths[2] + gap;
                     }
-                    if show_perm && !narrow {
+                    if show_perm {
                         if let Some(mode) = entry.as_ref().and_then(|e| e.perm) {
                             painter.text(
                                 egui::pos2(right, rect.center().y),
@@ -1360,9 +1375,9 @@ impl RemotePanel {
                                 pal.faint,
                             );
                         }
-                        right -= 34.0;
+                        right -= widths[1] + gap;
                     }
-                    if show_size && rect.width() - indent > 150.0 {
+                    if show_size {
                         if let Some(e) = entry.as_ref().filter(|e| !e.is_dir) {
                             painter.text(
                                 egui::pos2(right, rect.center().y),
@@ -1372,7 +1387,7 @@ impl RemotePanel {
                                 pal.faint,
                             );
                         }
-                        right -= 58.0;
+                        right -= widths[0] + gap;
                     }
                     let name_clip = Rect::from_min_max(
                         egui::pos2(rect.left() + indent + 28.0, rect.top()),

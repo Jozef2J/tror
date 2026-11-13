@@ -102,6 +102,42 @@ impl Look {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[serde(default)]
+pub struct Edit {
+    pub spaces: bool,
+    pub indent: u8,
+    pub line_numbers: bool,
+    pub current_line: bool,
+    pub blink: bool,
+    pub suggest: bool,
+    pub hints: bool,
+}
+
+impl Default for Edit {
+    fn default() -> Self {
+        Self {
+            spaces: false,
+            indent: 4,
+            line_numbers: true,
+            current_line: true,
+            blink: true,
+            suggest: true,
+            hints: true,
+        }
+    }
+}
+
+impl Edit {
+    pub fn unit(&self) -> String {
+        if self.spaces {
+            " ".repeat(self.indent.clamp(1, 8) as usize)
+        } else {
+            "\t".to_owned()
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -122,6 +158,13 @@ pub struct Settings {
     pub dictionaries: BTreeMap<String, String>,
     pub hosts: usize,
     pub tab_colors: BTreeMap<String, u8>,
+    pub edit: Edit,
+    pub restore: bool,
+    pub scrollback: u32,
+    pub db_rows: u32,
+    pub columns: [f32; 3],
+    pub pinned: Vec<PathBuf>,
+    pub section: usize,
     migrated: bool,
     session: Vec<PathBuf>,
     dark: bool,
@@ -150,6 +193,13 @@ impl Default for Settings {
             dictionaries: BTreeMap::new(),
             hosts: 1,
             tab_colors: BTreeMap::new(),
+            edit: Edit::default(),
+            restore: true,
+            scrollback: 5000,
+            db_rows: 5000,
+            columns: crate::widgets::COLUMN_DEFAULTS,
+            pinned: Vec::new(),
+            section: 0,
             migrated: false,
             session: Vec::new(),
             dark: look.dark,
@@ -174,6 +224,9 @@ impl Settings {
             }
         }
         self.look.clamp();
+        self.scrollback = self.scrollback.clamp(500, 100_000);
+        self.db_rows = self.db_rows.clamp(100, 100_000);
+        self.edit.indent = self.edit.indent.clamp(1, 8);
     }
 }
 
@@ -276,6 +329,18 @@ pub struct KeysEdit<'a> {
     pub capturing: &'a mut Option<usize>,
 }
 
+const SECTIONS: [&str; 9] = [
+    "Тема и цвета",
+    "Шрифты и размеры",
+    "Подсветка кода",
+    "Редактор",
+    "Вкладки и панели",
+    "Файлы и хосты",
+    "Консоль и журнал",
+    "База данных",
+    "Горячие клавиши",
+];
+
 pub fn ui(
     ui: &mut Ui,
     pal: &Palette,
@@ -284,31 +349,236 @@ pub fn ui(
 ) -> Option<String> {
     let mut note = None;
     let ctx = ui.ctx().clone();
-    ScrollArea::vertical()
-        .id_salt("tror_prefs")
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            egui::Frame::new()
-                .inner_margin(egui::Margin::symmetric(22, 4))
-                .show(ui, |ui| {
-                    ui.set_max_width(680.0);
-                    body(ui, pal, &mut settings.look, &mut settings.wrap, &ctx, &mut note);
-                    files_section(ui, pal, settings);
-                    log_section(ui, pal, &mut settings.look);
-                    dictionaries_section(ui, pal, &mut settings.dictionaries);
-                    keys_section(
-                        ui,
-                        pal,
-                        KeysEdit {
-                            custom: &mut settings.keys,
-                            capturing,
-                        },
-                        &mut note,
-                    );
-                    ui.add_space(24.0);
+    settings.section = settings.section.min(SECTIONS.len() - 1);
+    let wide = ui.available_width() >= 560.0;
+    let mut page = |ui: &mut Ui, settings: &mut Settings| {
+        ScrollArea::vertical()
+            .id_salt(("tror_prefs", settings.section))
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(22, 4))
+                    .show(ui, |ui| {
+                        ui.set_max_width(680.0);
+                        match settings.section {
+                            0..=2 => body(
+                                ui,
+                                pal,
+                                settings.section,
+                                &mut settings.look,
+                                &ctx,
+                                &mut note,
+                            ),
+                            3 => editor_section(ui, pal, settings),
+                            4 => tabs_section(ui, pal, settings),
+                            5 => files_section(ui, pal, settings),
+                            6 => {
+                                console_section(ui, pal, settings);
+                                log_section(ui, pal, &mut settings.look);
+                            }
+                            7 => db_section(ui, pal, settings),
+                            _ => keys_section(
+                                ui,
+                                pal,
+                                KeysEdit {
+                                    custom: &mut settings.keys,
+                                    capturing,
+                                },
+                                &mut note,
+                            ),
+                        }
+                        ui.add_space(24.0);
+                    });
+            });
+    };
+    if wide {
+        ui.horizontal_top(|ui| {
+            ui.add_space(8.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(190.0, ui.available_height()),
+                egui::Layout::top_down_justified(egui::Align::Min),
+                |ui| {
+                    ui.add_space(14.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.spacing_mut().button_padding = egui::vec2(12.0, 6.0);
+                    for (index, name) in SECTIONS.iter().enumerate() {
+                        let on = settings.section == index;
+                        let text =
+                            RichText::new(*name).color(if on { pal.text } else { pal.subtext });
+                        let button = Button::new(text).frame(true).fill(if on {
+                            pal.surface
+                        } else {
+                            Color32::TRANSPARENT
+                        });
+                        if ui.add(button).clicked() {
+                            settings.section = index;
+                        }
+                    }
+                },
+            );
+            ui.vertical(|ui| page(ui, settings));
+        });
+    } else {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.add_space(22.0);
+            ComboBox::from_id_salt("tror_prefs_section")
+                .width(220.0)
+                .selected_text(SECTIONS[settings.section])
+                .show_ui(ui, |ui| {
+                    for (index, name) in SECTIONS.iter().enumerate() {
+                        ui.selectable_value(&mut settings.section, index, *name);
+                    }
                 });
         });
+        page(ui, settings);
+    }
     note
+}
+
+fn toggle_row(ui: &mut Ui, pal: &Palette, value: &mut bool, label: &str, hint: &str) {
+    ui.checkbox(value, label);
+    if !hint.is_empty() {
+        ui.horizontal(|ui| {
+            ui.add_space(26.0);
+            ui.label(RichText::new(hint).size(12.0).color(pal.faint));
+        });
+    }
+    ui.add_space(4.0);
+}
+
+fn editor_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
+    heading(ui, pal, "Редактор", "");
+    toggle_row(
+        ui,
+        pal,
+        &mut settings.wrap,
+        "Переносить длинные строки (Alt+Z)",
+        "",
+    );
+    let edit = &mut settings.edit;
+    toggle_row(ui, pal, &mut edit.line_numbers, "Номера строк", "");
+    toggle_row(
+        ui,
+        pal,
+        &mut edit.current_line,
+        "Подсвечивать строку с курсором",
+        "",
+    );
+    toggle_row(
+        ui,
+        pal,
+        &mut edit.blink,
+        "Мигающий курсор",
+        "Без мигания окно в покое не перерисовывается совсем.",
+    );
+    heading(ui, pal, "Отступы", "");
+    toggle_row(
+        ui,
+        pal,
+        &mut edit.spaces,
+        "Клавиша Tab вставляет пробелы",
+        "Иначе вставляется символ табуляции.",
+    );
+    if edit.spaces {
+        ui.horizontal(|ui| {
+            ui.label("Пробелов в отступе");
+            let mut value = edit.indent as f32;
+            if crate::widgets::stepper(ui, pal, "indent", &mut value, (1.0, 8.0), 1.0, "") {
+                edit.indent = value as u8;
+            }
+        });
+    }
+    heading(ui, pal, "Подсказки", "");
+    toggle_row(ui, pal, &mut edit.suggest, "Автодополнение при наборе", "");
+    toggle_row(
+        ui,
+        pal,
+        &mut edit.hints,
+        "Подсказка параметров функции",
+        "Появляется после открывающей скобки.",
+    );
+    dictionaries_section(ui, pal, &mut settings.dictionaries);
+}
+
+fn tabs_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
+    heading(ui, pal, "Вкладки", "");
+    toggle_row(
+        ui,
+        pal,
+        &mut settings.restore,
+        "Открывать при запуске файлы прошлого сеанса",
+        "Закреплённые вкладки и их порядок тоже восстанавливаются.",
+    );
+    ui.label(
+        RichText::new(
+            "Вкладку можно перетащить по панели вкладок — соседние сразу расступаются. \
+             Закреплённые вкладки стоят в начале и меняются местами только между собой. \
+             Закрепить, покрасить или вынести вкладку в новую область можно из её меню по правому щелчку.",
+        )
+        .size(12.0)
+        .color(pal.faint),
+    );
+    heading(
+        ui,
+        pal,
+        "Панели",
+        "Любую панель можно перетащить за заголовок: к краю окна или другой панели — она прилипнет и разделит место, \
+         на заголовок — станет соседней вкладкой, в сторону — превратится в отдельное окно. Расположение запоминается.",
+    );
+}
+
+fn console_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
+    heading(
+        ui,
+        pal,
+        "Консоль",
+        "Цветовая схема и шрифт задаются в профиле подключения и в меню сеанса «⋯ → Оформление сеанса».",
+    );
+    ui.horizontal(|ui| {
+        ui.label("Строк истории в сеансе");
+        let mut value = settings.scrollback as f32;
+        if crate::widgets::stepper(
+            ui,
+            pal,
+            "scrollback",
+            &mut value,
+            (500.0, 100_000.0),
+            500.0,
+            "",
+        ) {
+            settings.scrollback = value as u32;
+        }
+    });
+    ui.label(
+        RichText::new("Действует для сеансов, открытых после изменения.")
+            .size(12.0)
+            .color(pal.faint),
+    );
+}
+
+fn db_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
+    heading(
+        ui,
+        pal,
+        "База данных",
+        "Сколько строк результата запроса загружать в таблицу. Чем больше, тем больше памяти.",
+    );
+    ui.horizontal(|ui| {
+        ui.label("Строк результата");
+        let mut value = settings.db_rows as f32;
+        if crate::widgets::stepper(
+            ui,
+            pal,
+            "db_rows",
+            &mut value,
+            (100.0, 100_000.0),
+            100.0,
+            "",
+        ) {
+            settings.db_rows = value as u32;
+        }
+    });
 }
 
 fn files_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
@@ -341,10 +611,42 @@ fn files_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
                 ui.end_row();
             }
         });
+    heading(
+        ui,
+        pal,
+        "Колонки",
+        "Ширину колонки меняют перетаскиванием границы в заголовке списка; двойной щелчок по границе возвращает исходную. Колонки удалённых хостов включаются в меню «⋯» панели.",
+    );
+    toggle_row(
+        ui,
+        pal,
+        &mut settings.project_size,
+        "Проект: показывать размер",
+        "",
+    );
+    toggle_row(
+        ui,
+        pal,
+        &mut settings.project_date,
+        "Проект: показывать дату изменения",
+        "",
+    );
+    if settings.columns != crate::widgets::COLUMN_DEFAULTS
+        && ui
+            .add(Button::new("Сбросить ширину колонок").fill(pal.surface))
+            .clicked()
+    {
+        settings.columns = crate::widgets::COLUMN_DEFAULTS;
+        crate::widgets::set_columns(settings.columns);
+    }
 }
 
 fn log_section(ui: &mut Ui, pal: &Palette, look: &mut Look) {
-    let mode = if look.dark { "тёмной" } else { "светлой" };
+    let mode = if look.dark {
+        "тёмной"
+    } else {
+        "светлой"
+    };
     heading(
         ui,
         pal,
@@ -543,8 +845,8 @@ fn keys_section(ui: &mut Ui, pal: &Palette, keys: KeysEdit, note: &mut Option<St
 fn body(
     ui: &mut Ui,
     pal: &Palette,
+    section: usize,
     look: &mut Look,
-    wrap: &mut bool,
     ctx: &egui::Context,
     note: &mut Option<String>,
 ) {
@@ -555,238 +857,257 @@ fn body(
         "светлой"
     };
 
-    heading(ui, pal, "Тема", "");
-    egui::Grid::new("tror_prefs_theme")
-        .num_columns(2)
-        .spacing([22.0, 10.0])
-        .show(ui, |ui| {
-            ui.label("Режим");
-            ui.horizontal(|ui| {
-                for (value, label) in [(true, "Тёмная"), (false, "Светлая")] {
-                    let mut button = Button::new(label);
-                    if look.dark == value {
-                        button = button.fill(pal.surface);
-                    }
-                    if ui.add(button).clicked() {
-                        look.dark = value;
-                    }
-                }
-            });
-            ui.end_row();
-            ui.label("Готовые акценты");
-            ui.horizontal(|ui| {
-                for (i, (name, on_dark, on_light)) in theme::ACCENTS.iter().enumerate() {
-                    let hex = if dark { *on_dark } else { *on_light };
-                    let color = Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
-                    let (rect, response) =
-                        ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::click());
-                    ui.painter().circle_filled(rect.center(), 9.0, color);
-                    let colors = if dark {
-                        &mut look.colors_dark
-                    } else {
-                        &mut look.colors_light
-                    };
-                    if look.accent == i && !colors.contains_key("accent") {
-                        ui.painter()
-                            .circle_stroke(rect.center(), 12.0, Stroke::new(1.5, pal.text));
-                    }
-                    if response.on_hover_text(*name).clicked() {
-                        look.accent = i;
-                        colors.remove("accent");
-                    }
-                }
-            });
-            ui.end_row();
-        });
-
-    heading(
-        ui,
-        pal,
-        "Цвета интерфейса",
-        &format!(
-            "Настраиваются отдельно для {mode} темы. Цвет можно выбрать в палитре или ввести: #rrggbb, #rgb, rgb(r, g, b)."
-        ),
-    );
-    let mut current = *pal;
-    let colors = if dark {
-        &mut look.colors_dark
-    } else {
-        &mut look.colors_light
-    };
-    egui::Grid::new("tror_prefs_colors")
-        .num_columns(2)
-        .spacing([22.0, 7.0])
-        .show(ui, |ui| {
-            for (index, (key, label)) in PARTS.iter().enumerate() {
-                ui.label(*label);
+    if section == 0 {
+        heading(ui, pal, "Тема", "");
+        egui::Grid::new("tror_prefs_theme")
+            .num_columns(2)
+            .spacing([22.0, 10.0])
+            .show(ui, |ui| {
+                ui.label("Режим");
                 ui.horizontal(|ui| {
-                    let c = *current.part(index);
-                    let mut value = [c.r(), c.g(), c.b()];
-                    if color_field(ui, key, &mut value) {
-                        colors.insert((*key).to_owned(), value);
-                    }
-                    if colors.contains_key(*key)
-                        && ui.button("↺").on_hover_text("Вернуть цвет темы").clicked()
-                    {
-                        colors.remove(*key);
-                    }
-                });
-                ui.end_row();
-            }
-        });
-    if !colors.is_empty() && ui.button("Сбросить все цвета интерфейса").clicked()
-    {
-        colors.clear();
-    }
-
-    heading(
-        ui,
-        pal,
-        "Подсветка кода",
-        &format!("Схема и собственные цвета для {mode} темы."),
-    );
-    let (scheme, code) = if dark {
-        (&mut look.syntax_dark, &mut look.code_dark)
-    } else {
-        (&mut look.syntax_light, &mut look.code_light)
-    };
-    egui::Grid::new("tror_prefs_code")
-        .num_columns(2)
-        .spacing([22.0, 7.0])
-        .show(ui, |ui| {
-            ui.label("Цветовая схема");
-            ComboBox::from_id_salt("tror_prefs_scheme")
-                .width(240.0)
-                .selected_text(scheme.as_str())
-                .show_ui(ui, |ui| {
-                    for name in highlight::theme_names() {
-                        ui.selectable_value(scheme, name.to_owned(), name);
-                    }
-                });
-            ui.end_row();
-            for (key, label) in SYNTAX_PARTS {
-                ui.label(label);
-                ui.horizontal(|ui| match code.get(key).copied() {
-                    Some(mut value) => {
-                        if color_field(ui, &format!("code:{key}"), &mut value) {
-                            code.insert(key.to_owned(), value);
+                    for (value, label) in [(true, "Тёмная"), (false, "Светлая")] {
+                        let mut button = Button::new(label);
+                        if look.dark == value {
+                            button = button.fill(pal.surface);
                         }
-                        if ui.button("↺").on_hover_text("Как в схеме").clicked() {
-                            code.remove(key);
-                        }
-                    }
-                    None => {
-                        ui.label(RichText::new("как в схеме").color(pal.faint));
-                        if ui.button("Задать цвет").clicked() {
-                            code.insert(key.to_owned(), [pal.text.r(), pal.text.g(), pal.text.b()]);
+                        if ui.add(button).clicked() {
+                            look.dark = value;
                         }
                     }
                 });
                 ui.end_row();
-            }
-        });
-
-    heading(
-        ui,
-        pal,
-        "Шрифты и размеры",
-        "Подойдёт любой файл TTF или OTF. Для кода лучше моноширинный шрифт.",
-    );
-    egui::Grid::new("tror_prefs_fonts")
-        .num_columns(2)
-        .spacing([22.0, 10.0])
-        .show(ui, |ui| {
-            font_row(ui, pal, "Шрифт интерфейса", "Inter", &mut look.ui_font);
-            font_row(ui, pal, "Шрифт кода", "JetBrains Mono", &mut look.code_font);
-            ui.label("Размер текста интерфейса");
-            ui.add(
-                egui::Slider::new(&mut look.ui_size, 11.0..=18.0)
-                    .step_by(0.5)
-                    .suffix(" px"),
-            );
-            ui.end_row();
-            ui.label("Размер шрифта кода");
-            ui.add(
-                egui::Slider::new(&mut look.font_size, 9.0..=28.0)
-                    .step_by(1.0)
-                    .suffix(" px"),
-            );
-            ui.end_row();
-            ui.label("Межстрочный интервал");
-            ui.add(egui::Slider::new(&mut look.line_spacing, 1.1..=2.2).step_by(0.05));
-            ui.end_row();
-            ui.label("Масштаб всего окна");
-            let mut zoom = ctx.zoom_factor();
-            if ui
-                .add(egui::Slider::new(&mut zoom, 0.7..=2.0).step_by(0.05))
-                .changed()
-            {
-                ctx.set_zoom_factor(zoom);
-            }
-            ui.end_row();
-            ui.label("Скругление углов");
-            ui.add(egui::Slider::new(&mut look.radius, 0..=14).suffix(" px"));
-            ui.end_row();
-        });
-
-    heading(ui, pal, "Редактор", "");
-    ui.checkbox(wrap, "Переносить длинные строки (Alt+Z)");
-
-    heading(
-        ui,
-        pal,
-        "Панели",
-        "Любую панель можно перетащить за заголовок: к краю окна или другой панели — она прилипнет и разделит место, \
-         на заголовок — станет соседней вкладкой, в сторону — превратится в отдельное окно. Расположение запоминается.",
-    );
-
-    heading(ui, pal, "Оформление целиком", "");
-    ui.horizontal(|ui| {
-        if ui
-            .add(Button::new("Экспорт в файл…").fill(pal.surface))
-            .clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .set_file_name("tror-theme.json")
-                .save_file()
-        {
-            let result = serde_json::to_string_pretty(look)
-                .map_err(|e| e.to_string())
-                .and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string()));
-            *note = Some(match result {
-                Ok(()) => format!("Оформление сохранено: {}", path.display()),
-                Err(e) => format!("Не удалось сохранить оформление: {e}"),
+                ui.label("Готовые акценты");
+                ui.horizontal(|ui| {
+                    for (i, (name, on_dark, on_light)) in theme::ACCENTS.iter().enumerate() {
+                        let hex = if dark { *on_dark } else { *on_light };
+                        let color =
+                            Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::click());
+                        ui.painter().circle_filled(rect.center(), 9.0, color);
+                        let colors = if dark {
+                            &mut look.colors_dark
+                        } else {
+                            &mut look.colors_light
+                        };
+                        if look.accent == i && !colors.contains_key("accent") {
+                            ui.painter().circle_stroke(
+                                rect.center(),
+                                12.0,
+                                Stroke::new(1.5, pal.text),
+                            );
+                        }
+                        if response.on_hover_text(*name).clicked() {
+                            look.accent = i;
+                            colors.remove("accent");
+                        }
+                    }
+                });
+                ui.end_row();
             });
-        }
-        if ui
-            .add(Button::new("Импорт из файла…").fill(pal.surface))
-            .clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("Оформление Tror", &["json"])
-                .pick_file()
-        {
-            let loaded = std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|text| serde_json::from_str::<Look>(&text).map_err(|e| e.to_string()));
-            *note = Some(match loaded {
-                Ok(mut loaded) => {
-                    loaded.clamp();
-                    *look = loaded;
-                    "Оформление загружено".to_owned()
+
+        heading(
+            ui,
+            pal,
+            "Цвета интерфейса",
+            &format!(
+                "Настраиваются отдельно для {mode} темы. Цвет можно выбрать в палитре или ввести: #rrggbb, #rgb, rgb(r, g, b)."
+            ),
+        );
+        let mut current = *pal;
+        let colors = if dark {
+            &mut look.colors_dark
+        } else {
+            &mut look.colors_light
+        };
+        egui::Grid::new("tror_prefs_colors")
+            .num_columns(2)
+            .spacing([22.0, 7.0])
+            .show(ui, |ui| {
+                for (index, (key, label)) in PARTS.iter().enumerate() {
+                    ui.label(*label);
+                    ui.horizontal(|ui| {
+                        let c = *current.part(index);
+                        let mut value = [c.r(), c.g(), c.b()];
+                        if color_field(ui, key, &mut value) {
+                            colors.insert((*key).to_owned(), value);
+                        }
+                        if colors.contains_key(*key)
+                            && ui.button("↺").on_hover_text("Вернуть цвет темы").clicked()
+                        {
+                            colors.remove(*key);
+                        }
+                    });
+                    ui.end_row();
                 }
-                Err(e) => format!("Не удалось прочитать оформление: {e}"),
             });
-        }
-        if ui
-            .add(Button::new("Сбросить всё оформление").fill(pal.surface))
-            .clicked()
+        if !colors.is_empty() && ui.button("Сбросить все цвета интерфейса").clicked()
         {
-            *look = Look {
-                dark: look.dark,
-                ..Look::default()
-            };
-            ctx.set_zoom_factor(1.0);
+            colors.clear();
         }
-    });
+    }
+    if section == 2 {
+        heading(
+            ui,
+            pal,
+            "Подсветка кода",
+            &format!("Схема и собственные цвета для {mode} темы."),
+        );
+        let (scheme, code) = if dark {
+            (&mut look.syntax_dark, &mut look.code_dark)
+        } else {
+            (&mut look.syntax_light, &mut look.code_light)
+        };
+        egui::Grid::new("tror_prefs_code")
+            .num_columns(2)
+            .spacing([22.0, 7.0])
+            .show(ui, |ui| {
+                ui.label("Цветовая схема");
+                ComboBox::from_id_salt("tror_prefs_scheme")
+                    .width(240.0)
+                    .selected_text(scheme.as_str())
+                    .show_ui(ui, |ui| {
+                        for name in highlight::theme_names() {
+                            ui.selectable_value(scheme, name.to_owned(), name);
+                        }
+                    });
+                ui.end_row();
+                for (key, label) in SYNTAX_PARTS {
+                    ui.label(label);
+                    ui.horizontal(|ui| match code.get(key).copied() {
+                        Some(mut value) => {
+                            if color_field(ui, &format!("code:{key}"), &mut value) {
+                                code.insert(key.to_owned(), value);
+                            }
+                            if ui.button("↺").on_hover_text("Как в схеме").clicked() {
+                                code.remove(key);
+                            }
+                        }
+                        None => {
+                            ui.label(RichText::new("как в схеме").color(pal.faint));
+                            if ui.button("Задать цвет").clicked() {
+                                code.insert(
+                                    key.to_owned(),
+                                    [pal.text.r(), pal.text.g(), pal.text.b()],
+                                );
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+    }
+    if section == 1 {
+        heading(
+            ui,
+            pal,
+            "Шрифты и размеры",
+            "Подойдёт любой файл TTF или OTF. Для кода лучше моноширинный шрифт.",
+        );
+        egui::Grid::new("tror_prefs_fonts")
+            .num_columns(2)
+            .spacing([22.0, 10.0])
+            .show(ui, |ui| {
+                font_row(ui, pal, "Шрифт интерфейса", "Inter", &mut look.ui_font);
+                font_row(ui, pal, "Шрифт кода", "JetBrains Mono", &mut look.code_font);
+                ui.label("Размер текста интерфейса");
+                crate::widgets::stepper(
+                    ui,
+                    pal,
+                    "ui_size",
+                    &mut look.ui_size,
+                    (11.0, 18.0),
+                    0.5,
+                    "px",
+                );
+                ui.end_row();
+                ui.label("Размер шрифта кода");
+                crate::widgets::stepper(
+                    ui,
+                    pal,
+                    "font_size",
+                    &mut look.font_size,
+                    (9.0, 28.0),
+                    1.0,
+                    "px",
+                );
+                ui.end_row();
+                ui.label("Межстрочный интервал");
+                crate::widgets::stepper(
+                    ui,
+                    pal,
+                    "line_spacing",
+                    &mut look.line_spacing,
+                    (1.1, 2.2),
+                    0.05,
+                    "",
+                );
+                ui.end_row();
+                ui.label("Масштаб всего окна");
+                let mut zoom = ctx.zoom_factor();
+                if crate::widgets::stepper(ui, pal, "zoom", &mut zoom, (0.7, 2.0), 0.05, "") {
+                    ctx.set_zoom_factor(zoom);
+                }
+                ui.end_row();
+                ui.label("Скругление углов");
+                let mut radius = look.radius as f32;
+                if crate::widgets::stepper(ui, pal, "radius", &mut radius, (0.0, 14.0), 1.0, "px") {
+                    look.radius = radius as u8;
+                }
+                ui.end_row();
+            });
+    }
+    if section == 0 {
+        heading(ui, pal, "Оформление целиком", "");
+        ui.horizontal(|ui| {
+            if ui
+                .add(Button::new("Экспорт в файл…").fill(pal.surface))
+                .clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .set_file_name("tror-theme.json")
+                    .save_file()
+            {
+                let result = serde_json::to_string_pretty(look)
+                    .map_err(|e| e.to_string())
+                    .and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string()));
+                *note = Some(match result {
+                    Ok(()) => format!("Оформление сохранено: {}", path.display()),
+                    Err(e) => format!("Не удалось сохранить оформление: {e}"),
+                });
+            }
+            if ui
+                .add(Button::new("Импорт из файла…").fill(pal.surface))
+                .clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Оформление Tror", &["json"])
+                    .pick_file()
+            {
+                let loaded = std::fs::read_to_string(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|text| {
+                        serde_json::from_str::<Look>(&text).map_err(|e| e.to_string())
+                    });
+                *note = Some(match loaded {
+                    Ok(mut loaded) => {
+                        loaded.clamp();
+                        *look = loaded;
+                        "Оформление загружено".to_owned()
+                    }
+                    Err(e) => format!("Не удалось прочитать оформление: {e}"),
+                });
+            }
+            if ui
+                .add(Button::new("Сбросить всё оформление").fill(pal.surface))
+                .clicked()
+            {
+                *look = Look {
+                    dark: look.dark,
+                    ..Look::default()
+                };
+                ctx.set_zoom_factor(1.0);
+            }
+        });
+    }
 }
 
 #[cfg(test)]

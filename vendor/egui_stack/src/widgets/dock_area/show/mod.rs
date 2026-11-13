@@ -747,6 +747,13 @@ impl<Tab> DockArea<'_, Tab> {
             }
         }
 
+        let least = match (&tree[path.node], separator_of) {
+            (Node::Linear(linear), SeparatorOf::Linear(index)) => {
+                let pair = [linear.children()[index], linear.children()[index + 1]];
+                Some(pair.map(|child| self.node_min_size(path.surface, child)))
+            }
+            _ => None,
+        };
         let style = fade_style.unwrap_or_else(|| self.style.as_ref().unwrap());
         let pixels_per_point = ui.ctx().pixels_per_point();
         let painter = self.painter.0;
@@ -914,9 +921,29 @@ impl<Tab> DockArea<'_, Tab> {
         if range > 0.0 {
             let delta = arrow_key_offset.unwrap_or(dim(response.drag_delta()));
             let boundary = shares::boundary(shares, index);
-            let target = accesskit_value.unwrap_or(boundary)
+            let mut target = accesskit_value.unwrap_or(boundary)
                 + delta / range
                 + accesskit_steps * accesskit_step;
+            if arrow_key_offset.is_none()
+                && response.dragged()
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                target = (dim(pointer.to_vec2()) - start) / range;
+            }
+            let mut min_part = min_part;
+            if let Some([first, second]) = least {
+                let from = if index == 0 {
+                    0.0
+                } else {
+                    shares::boundary(shares, index - 1)
+                };
+                let low = from + dim(first) / range;
+                let high = shares::boundary(shares, index + 1) - dim(second) / range;
+                if low <= high {
+                    target = target.clamp(low, high);
+                    min_part = 0.0;
+                }
+            }
             if target != boundary {
                 shares::move_boundary(shares, index, target - boundary, min_part);
             }

@@ -418,6 +418,10 @@ impl ProjectPanel {
         let mut toggle = None;
         let mut go = None;
         let mut open = Vec::new();
+        crate::widgets::column_header(ui, pal, [self.show_size, false, self.show_date]);
+        let widths = crate::widgets::columns();
+        let gap = crate::widgets::COLUMN_GAP;
+        ui.spacing_mut().item_spacing.y = 0.0;
         let outer = ui.available_rect_before_wrap();
         let blank = ui.interact(outer, ui.scope_id().with("tror_project_blank"), Sense::click());
         let area = ScrollArea::vertical()
@@ -457,7 +461,11 @@ impl ProjectPanel {
                     );
                     let mut right = rect.right() - 6.0;
                     let small = egui::FontId::proportional(11.5);
-                    if self.show_date && rect.width() - indent > 230.0 {
+                    let room = rect.width() - indent - 90.0;
+                    let show_date = self.show_date && room > widths[2] + gap;
+                    let show_size = self.show_size
+                        && room > widths[0] + gap + if show_date { widths[2] + gap } else { 0.0 };
+                    if show_date {
                         if let Some(secs) = row.entry.as_ref().and_then(|e| e.mtime) {
                             painter.text(
                                 egui::pos2(right, rect.center().y),
@@ -467,9 +475,9 @@ impl ProjectPanel {
                                 pal.faint,
                             );
                         }
-                        right -= 100.0;
+                        right -= widths[2] + gap;
                     }
-                    if self.show_size && rect.width() - indent > 150.0 {
+                    if show_size {
                         if let Some(e) = row.entry.as_ref().filter(|e| !e.is_dir) {
                             painter.text(
                                 egui::pos2(right, rect.center().y),
@@ -479,7 +487,7 @@ impl ProjectPanel {
                                 pal.faint,
                             );
                         }
-                        right -= 58.0;
+                        right -= widths[0] + gap;
                     }
                     let clip = Rect::from_min_max(
                         egui::pos2(rect.left() + indent + 28.0, rect.top()),
