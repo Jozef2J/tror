@@ -145,12 +145,15 @@ impl<Tab> DockArea<'_, Tab> {
         {
             let (pressed, origin) =
                 ui.input(|i| (i.pointer.primary_down(), i.pointer.press_origin()));
-            window_state.pin_far_edges(
+            let shift = window_state.pin_far_edges(
                 shown.response.rect,
                 shown.response.dragged(),
                 pressed,
                 origin,
             );
+            if shift.is_some() {
+                ui.ctx().request_repaint();
+            }
             window_state.set_shown(shown.response.rect, shown.response.dragged());
         }
 

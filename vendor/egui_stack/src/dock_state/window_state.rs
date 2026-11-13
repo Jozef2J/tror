@@ -109,18 +109,16 @@ impl WindowState {
         moved: bool,
         pressed: bool,
         press_origin: Option<Pos2>,
-    ) {
+    ) -> Option<egui::Vec2> {
         if !pressed || moved {
             self.edge_drag = None;
-            return;
+            return None;
         }
         if self.edge_drag.is_none() {
             let grab = 8.0;
-            let Some(origin) = press_origin else {
-                return;
-            };
+            let origin = press_origin?;
             if !rect.expand(grab).contains(origin) {
-                return;
+                return None;
             }
             self.edge_drag = Some(EdgeDrag {
                 start: rect,
@@ -130,9 +128,7 @@ impl WindowState {
                 least_height: None,
             });
         }
-        let Some(drag) = &mut self.edge_drag else {
-            return;
-        };
+        let drag = self.edge_drag.as_mut()?;
         let pin = |active: bool, least: &mut Option<f32>, size: f32, far: f32, start_far: f32| {
             if !active {
                 return None;
@@ -159,12 +155,12 @@ impl WindowState {
             rect.bottom(),
             drag.start.bottom(),
         );
-        if x.is_some() || y.is_some() {
-            self.next_position = Some(Pos2::new(
-                x.unwrap_or(rect.left()),
-                y.unwrap_or(rect.top()),
-            ));
+        if x.is_none() && y.is_none() {
+            return None;
         }
+        let position = Pos2::new(x.unwrap_or(rect.left()), y.unwrap_or(rect.top()));
+        self.next_position = Some(position);
+        Some(position - rect.min)
     }
 
     /// Set the height of this window when it is expanded.

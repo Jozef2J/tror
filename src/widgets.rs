@@ -339,6 +339,35 @@ mod tests {
         assert_eq!(date_label(secs), "02.01.2026 03:04");
         assert!(parse_date("вчера").is_none());
     }
+
+    #[test]
+    fn columns_shrink_to_fit_and_never_overlap() {
+        set_columns([260.0, 34.0, 260.0]);
+        for width in [200.0, 260.0, 320.0, 480.0, 900.0] {
+            let fit = fit_columns(width, [true, true, true]);
+            let used: f32 = fit
+                .iter()
+                .filter(|w| **w > 0.0)
+                .map(|w| w + COLUMN_GAP)
+                .sum();
+            assert!(
+                used <= (width - 6.0 - NAME_MIN).max(0.0) + 0.01,
+                "{width}: {fit:?}"
+            );
+            for i in 0..3 {
+                assert!(fit[i] == 0.0 || fit[i] >= COLUMN_MIN[i], "{width}: {fit:?}");
+            }
+        }
+        assert!(
+            fit_columns(320.0, [true, false, true])
+                .iter()
+                .filter(|w| **w > 0.0)
+                .count()
+                == 2
+        );
+        assert_eq!(fit_columns(900.0, [true, true, true]), [260.0, 34.0, 260.0]);
+        set_columns(COLUMN_DEFAULTS);
+    }
 }
 
 fn step_button(ui: &mut Ui, pal: &Palette, plus: bool, enabled: bool) -> bool {
@@ -447,35 +476,104 @@ pub fn set_columns(widths: [f32; 3]) {
     }
 }
 
-pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3]) {
-    if !shown.contains(&true) {
+const COLUMN_MIN: [f32; 3] = [40.0, 30.0, 56.0];
+const NAME_MIN: f32 = 110.0;
+
+pub fn fit_columns(width: f32, shown: [bool; 3]) -> [f32; 3] {
+    let stored = columns();
+    let room = width - 6.0 - NAME_MIN;
+    let mut on = shown;
+    let least = |on: &[bool; 3]| -> f32 {
+        (0..3)
+            .filter(|i| on[*i])
+            .map(|i| COLUMN_MIN[i] + COLUMN_GAP)
+            .sum()
+    };
+    for drop in [1, 2, 0] {
+        if least(&on) > room {
+            on[drop] = false;
+        }
+    }
+    let mut fit = [0.0; 3];
+    for i in 0..3 {
+        if on[i] {
+            fit[i] = stored[i].max(COLUMN_MIN[i]);
+        }
+    }
+    let total: f32 = (0..3).filter(|i| on[*i]).map(|i| fit[i] + COLUMN_GAP).sum();
+    let slack: f32 = (0..3)
+        .filter(|i| on[*i])
+        .map(|i| fit[i] - COLUMN_MIN[i])
+        .sum();
+    if total > room && slack > 0.0 {
+        let cut = ((total - room) / slack).min(1.0);
+        for i in 0..3 {
+            if on[i] {
+                fit[i] -= (fit[i] - COLUMN_MIN[i]) * cut;
+            }
+        }
+    }
+    fit
+}
+
+pub fn column_cell(
+    painter: &egui::Painter,
+    row: Rect,
+    right: &mut f32,
+    width: f32,
+    text: Option<String>,
+    color: Color32,
+) {
+    if width <= 0.0 {
         return;
     }
-    let mut widths = columns();
+    if let Some(text) = text {
+        let clip = Rect::from_min_max(
+            egui::pos2(*right - width, row.top()),
+            egui::pos2(*right, row.bottom()),
+        );
+        painter
+            .with_clip_rect(clip.intersect(painter.clip_rect()))
+            .text(
+                egui::pos2(*right, row.center().y),
+                egui::Align2::RIGHT_CENTER,
+                text,
+                egui::FontId::proportional(11.5),
+                color,
+            );
+    }
+    *right -= width + COLUMN_GAP;
+}
+
+pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3]) -> [f32; 3] {
+    if !shown.contains(&true) {
+        return [0.0; 3];
+    }
+    let mut stored = columns();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::hover());
+    let fit = fit_columns(rect.width(), shown);
     let painter = ui.painter_at(rect);
     let font = egui::FontId::proportional(11.0);
+    let room = rect.width() - 6.0 - NAME_MIN;
     let mut right = rect.right() - 6.0;
-    let mut room = rect.width() - 104.0;
-    let mut visible = [false; 3];
-    for index in [0, 2, 1] {
-        if shown[index] && room > widths[index] + COLUMN_GAP {
-            room -= widths[index] + COLUMN_GAP;
-            visible[index] = true;
-        }
-    }
     for (index, label) in [(2, "Изменён"), (1, "Права"), (0, "Размер")] {
-        if !visible[index] {
+        let width = fit[index];
+        if width <= 0.0 {
             continue;
         }
-        let left = right - widths[index];
-        painter.text(
-            egui::pos2(right, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            label,
-            font.clone(),
-            pal.faint,
-        );
+        let left = right - width;
+        painter
+            .with_clip_rect(Rect::from_min_max(
+                egui::pos2(left, rect.top()),
+                egui::pos2(right, rect.bottom()),
+            ))
+            .text(
+                egui::pos2(right, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                label,
+                font.clone(),
+                pal.faint,
+            );
         let grip = Rect::from_min_max(
             egui::pos2(left - COLUMN_GAP, rect.top()),
             egui::pos2(left, rect.bottom()),
@@ -498,10 +596,20 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3]) {
         if response.dragged()
             && let Some(pointer) = response.interact_pointer_pos()
         {
-            widths[index] = (right - pointer.x - 4.0).clamp(30.0, 260.0);
+            let others: f32 = (0..3)
+                .filter(|i| *i != index && fit[*i] > 0.0)
+                .map(|i| fit[i] + COLUMN_GAP)
+                .sum();
+            let most = (room - others - COLUMN_GAP).clamp(COLUMN_MIN[index], 260.0);
+            stored[index] = (right - pointer.x - 4.0).clamp(COLUMN_MIN[index], most);
+            for i in 0..3 {
+                if i != index && fit[i] > 0.0 {
+                    stored[i] = fit[i];
+                }
+            }
         }
         if response.double_clicked() {
-            widths[index] = COLUMN_DEFAULTS[index];
+            stored[index] = COLUMN_DEFAULTS[index];
         }
         right = left - COLUMN_GAP;
     }
@@ -512,7 +620,8 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3]) {
         font,
         pal.faint,
     );
-    set_columns(widths);
+    set_columns(stored);
+    fit
 }
 
 pub fn paint_pin(painter: &egui::Painter, center: Pos2, color: Color32) {

@@ -418,9 +418,8 @@ impl ProjectPanel {
         let mut toggle = None;
         let mut go = None;
         let mut open = Vec::new();
-        crate::widgets::column_header(ui, pal, [self.show_size, false, self.show_date]);
-        let widths = crate::widgets::columns();
-        let gap = crate::widgets::COLUMN_GAP;
+        let widths =
+            crate::widgets::column_header(ui, pal, [self.show_size, false, self.show_date]);
         ui.spacing_mut().item_spacing.y = 0.0;
         let outer = ui.available_rect_before_wrap();
         let blank = ui.interact(outer, ui.scope_id().with("tror_project_blank"), Sense::click());
@@ -460,38 +459,28 @@ impl ProjectPanel {
                         pal,
                     );
                     let mut right = rect.right() - 6.0;
-                    let small = egui::FontId::proportional(11.5);
-                    let room = rect.width() - indent - 90.0;
-                    let show_date = self.show_date && room > widths[2] + gap;
-                    let show_size = self.show_size
-                        && room > widths[0] + gap + if show_date { widths[2] + gap } else { 0.0 };
-                    if show_date {
-                        if let Some(secs) = row.entry.as_ref().and_then(|e| e.mtime) {
-                            painter.text(
-                                egui::pos2(right, rect.center().y),
-                                egui::Align2::RIGHT_CENTER,
-                                date_label(secs),
-                                small.clone(),
-                                pal.faint,
-                            );
-                        }
-                        right -= widths[2] + gap;
-                    }
-                    if show_size {
-                        if let Some(e) = row.entry.as_ref().filter(|e| !e.is_dir) {
-                            painter.text(
-                                egui::pos2(right, rect.center().y),
-                                egui::Align2::RIGHT_CENTER,
-                                size_label(e.size as usize),
-                                small,
-                                pal.faint,
-                            );
-                        }
-                        right -= widths[0] + gap;
-                    }
+                    let entry = row.entry.as_ref();
+                    crate::widgets::column_cell(
+                        &painter,
+                        rect,
+                        &mut right,
+                        widths[2],
+                        entry.and_then(|e| e.mtime).map(date_label),
+                        pal.faint,
+                    );
+                    crate::widgets::column_cell(
+                        &painter,
+                        rect,
+                        &mut right,
+                        widths[0],
+                        entry
+                            .filter(|e| !e.is_dir)
+                            .map(|e| size_label(e.size as usize)),
+                        pal.faint,
+                    );
                     let clip = Rect::from_min_max(
                         egui::pos2(rect.left() + indent + 28.0, rect.top()),
-                        egui::pos2(right.max(rect.left() + indent + 60.0), rect.bottom()),
+                        egui::pos2(right.max(rect.left() + indent + 28.0), rect.bottom()),
                     );
                     ui.painter_at(clip).text(
                         egui::pos2(clip.left(), rect.center().y),

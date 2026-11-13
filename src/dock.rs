@@ -373,7 +373,7 @@ pub fn enforce_min(dock: &mut DockState<Pane>) {
                 (true, rect.width(), min.x),
                 (false, rect.height(), min.y),
             ] {
-                if have + 0.5 >= need {
+                if have + 3.0 >= need {
                     continue;
                 }
                 let mut child = node;

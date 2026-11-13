@@ -305,41 +305,49 @@ fn reflow(old: &mut vt100::Parser, cols: u16, rows: u16) -> vt100::Parser {
     let modes = screen.input_mode_formatted();
     let hidden = screen.hide_cursor();
     let mut out = Vec::new();
-    let mut line_cells = 0;
+    let fit = old_cols.min(cols.max(1));
+    let mut held = cursor_row;
+    while held > 0 && screen.row_wrapped(held - 1) {
+        held -= 1;
+    }
+    let mut held_back = 0;
+    if held == 0 {
+        while held_back < screen.scrollback_len() {
+            screen.set_scrollback(held_back + 1);
+            if !screen.row_wrapped(0) {
+                break;
+            }
+            held_back += 1;
+        }
+    }
     let mut joined = false;
     for back in (1..=screen.scrollback_len()).rev() {
         screen.set_scrollback(back);
+        if back <= held_back {
+            out.extend_from_slice(b"\r\n");
+            push_row(screen, 0, fit, 0, &mut out);
+            continue;
+        }
         if !joined {
             out.extend_from_slice(b"\r\n");
-            line_cells = 0;
         }
-        line_cells += push_row(screen, 0, old_cols, 0, &mut out);
+        push_row(screen, 0, old_cols, 0, &mut out);
         joined = screen.row_wrapped(0);
     }
     screen.set_scrollback(0);
-    for row in 0..=cursor_row {
+    for row in 0..held {
         if !joined {
             out.extend_from_slice(b"\r\n");
-            line_cells = 0;
         }
-        let keep = if row == cursor_row { cursor_col } else { 0 };
-        let cells = push_row(screen, row, old_cols, keep.min(old_cols), &mut out);
-        if row < cursor_row {
-            line_cells += cells;
-        } else {
-            let at = line_cells + cursor_col as usize;
-            let end = line_cells + cells;
-            let width = cols.max(1) as usize;
-            if at < end {
-                let up = end.saturating_sub(1) / width - at / width;
-                if up > 0 {
-                    out.extend_from_slice(format!("\x1b[{up}A").as_bytes());
-                }
-                out.extend_from_slice(format!("\x1b[{}G", at % width + 1).as_bytes());
-            }
-        }
+        push_row(screen, row, old_cols, 0, &mut out);
         joined = screen.row_wrapped(row);
     }
+    for row in held..=cursor_row {
+        out.extend_from_slice(b"\r\n");
+        let keep = if row == cursor_row { cursor_col } else { 0 };
+        push_row(screen, row, fit, keep.min(fit), &mut out);
+    }
+    out.extend_from_slice(format!("\x1b[{}G", cursor_col.min(fit - 1) + 1).as_bytes());
     let mut parser = new_parser(cols, rows);
     parser.process(out.get(2..).unwrap_or(&[]));
     parser.process(modes.as_bytes());
@@ -430,6 +438,7 @@ pub struct Screen {
     size: (u16, u16),
     wheel: f32,
     select: Option<((u16, u16), (u16, u16))>,
+    wanted: Option<((u16, u16), f64)>,
     pub grab_focus: bool,
     pub focused: bool,
 }
@@ -441,6 +450,7 @@ impl Screen {
             size: (80, 24),
             wheel: 0.0,
             select: None,
+            wanted: None,
             grab_focus: false,
             focused: false,
         }
@@ -457,6 +467,30 @@ impl Screen {
 
     pub fn process(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
+    }
+
+    pub fn settle(&mut self, cols: u16, rows: u16, now: f64) -> bool {
+        if (cols, rows) == self.size {
+            self.wanted = None;
+            return false;
+        }
+        match self.wanted {
+            Some((size, since)) if size == (cols, rows) => {
+                if now - since < 0.2 {
+                    return false;
+                }
+                self.wanted = None;
+                self.resize(cols, rows)
+            }
+            _ => {
+                self.wanted = Some(((cols, rows), now));
+                false
+            }
+        }
+    }
+
+    pub fn unsettled(&self) -> bool {
+        self.wanted.is_some()
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) -> bool {
@@ -861,13 +895,20 @@ mod tests {
                 format!("out-{round}-a\r\nout-{round}-b\r\nout-{round}-c\r\n{prompt}").as_bytes(),
             );
         }
-        for _ in 0..6 {
-            t.resize(12, 3);
-            let wrapped = prompt.len().div_ceil(12) - 1;
-            t.process(format!("\r\x1b[{wrapped}A\x1b[J{prompt}").as_bytes());
-            t.resize(100, 30);
-            t.process(format!("\r\x1b[J{prompt}").as_bytes());
+        let mut above = 0;
+        for (cols, rows) in [(12, 3), (100, 30), (10, 2), (160, 50), (11, 2), (35, 6)]
+            .into_iter()
+            .cycle()
+            .take(24)
+        {
+            t.resize(cols, rows);
+            let climb = "\r\x1b[A\x1b[K".repeat(above);
+            t.process(format!("\r\x1b[K{climb}\r{prompt}").as_bytes());
+            above = (prompt.len() - 1) / cols as usize;
         }
+        t.resize(100, 30);
+        let climb = "\r\x1b[A\x1b[K".repeat(above);
+        t.process(format!("\r\x1b[K{climb}\r{prompt}").as_bytes());
         let text = all_text(&mut t);
         for round in 0..3 {
             for part in ["a", "b", "c"] {
@@ -944,6 +985,7 @@ mod tests {
         };
         pump(&mut t, 1500);
         for command in [
+            "PS1='jozef@production-server:/var/www/html/project$ '",
             "echo first-marker; seq 101 130",
             "ls -la /tmp/srvroot/www",
             "echo second-marker-with-a-rather-long-tail-of-words-to-force-wrapping-on-narrow-screens",
@@ -976,18 +1018,14 @@ mod tests {
             pump(&mut t, 120);
         }
         let after = all_text(&mut t);
-        let joined: String = after.lines().map(str::trim_end).collect();
-        for needle in [
-            "first-marker",
-            "101",
-            "115",
-            "130",
-            "index.php",
-            "second-marker-with-a-rather-long-tail-of-words-to-force-wrapping-on-narrow-screens",
-            "third-marker",
-        ] {
-            assert!(joined.contains(needle), "нет «{needle}»:\n{after}");
-        }
+        let kept: Vec<&str> = after.lines().map(str::trim_end).collect();
+        let lost: Vec<&str> = before
+            .lines()
+            .map(str::trim_end)
+            .filter(|line| !line.is_empty() && !line.contains('$'))
+            .filter(|line| !kept.contains(line))
+            .collect();
+        assert!(lost.is_empty(), "пропало {lost:#?}\nбыло:\n{before}\nстало:\n{after}");
     }
 
     #[test]

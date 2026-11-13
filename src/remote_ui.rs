@@ -1273,9 +1273,7 @@ impl RemotePanel {
         let mut attrs: Option<Vec<(String, bool)>> = None;
         let reserve = if self.busy.is_some() { 34.0 } else { 0.0 };
         let tree = self.tree;
-        crate::widgets::column_header(ui, pal, [show_size, show_perm, show_date]);
-        let widths = crate::widgets::columns();
-        let gap = crate::widgets::COLUMN_GAP;
+        let widths = crate::widgets::column_header(ui, pal, [show_size, show_perm, show_date]);
         ui.spacing_mut().item_spacing.y = 0.0;
         let outer = ui.available_rect_before_wrap();
         let height = (ui.available_height() - reserve).max(40.0);
@@ -1341,57 +1339,35 @@ impl RemotePanel {
                         pal,
                     );
                     let mut right = rect.right() - 6.0;
-                    let small = egui::FontId::proportional(11.5);
-                    let mut room = rect.width() - indent - 90.0;
-                    let mut fits = |on: bool, width: f32| {
-                        let yes = on && room > width + gap;
-                        if yes {
-                            room -= width + gap;
-                        }
-                        yes
-                    };
-                    let show_size = fits(show_size, widths[0]);
-                    let show_date = fits(show_date, widths[2]);
-                    let show_perm = fits(show_perm, widths[1]);
-                    if show_date {
-                        if let Some(secs) = entry.as_ref().and_then(|e| e.mtime) {
-                            painter.text(
-                                egui::pos2(right, rect.center().y),
-                                egui::Align2::RIGHT_CENTER,
-                                date_label(secs),
-                                small.clone(),
-                                pal.faint,
-                            );
-                        }
-                        right -= widths[2] + gap;
-                    }
-                    if show_perm {
-                        if let Some(mode) = entry.as_ref().and_then(|e| e.perm) {
-                            painter.text(
-                                egui::pos2(right, rect.center().y),
-                                egui::Align2::RIGHT_CENTER,
-                                format!("{mode:03o}"),
-                                egui::FontId::monospace(11.0),
-                                pal.faint,
-                            );
-                        }
-                        right -= widths[1] + gap;
-                    }
-                    if show_size {
-                        if let Some(e) = entry.as_ref().filter(|e| !e.is_dir) {
-                            painter.text(
-                                egui::pos2(right, rect.center().y),
-                                egui::Align2::RIGHT_CENTER,
-                                size_label(e.size as usize),
-                                small,
-                                pal.faint,
-                            );
-                        }
-                        right -= widths[0] + gap;
-                    }
+                    let info = entry.as_ref();
+                    crate::widgets::column_cell(
+                        &painter,
+                        rect,
+                        &mut right,
+                        widths[2],
+                        info.and_then(|e| e.mtime).map(date_label),
+                        pal.faint,
+                    );
+                    crate::widgets::column_cell(
+                        &painter,
+                        rect,
+                        &mut right,
+                        widths[1],
+                        info.and_then(|e| e.perm).map(|mode| format!("{mode:03o}")),
+                        pal.faint,
+                    );
+                    crate::widgets::column_cell(
+                        &painter,
+                        rect,
+                        &mut right,
+                        widths[0],
+                        info.filter(|e| !e.is_dir)
+                            .map(|e| size_label(e.size as usize)),
+                        pal.faint,
+                    );
                     let name_clip = Rect::from_min_max(
                         egui::pos2(rect.left() + indent + 28.0, rect.top()),
-                        egui::pos2(right.max(rect.left() + indent + 60.0), rect.bottom()),
+                        egui::pos2(right.max(rect.left() + indent + 28.0), rect.bottom()),
                     );
                     ui.painter_at(name_clip).text(
                         egui::pos2(name_clip.left(), rect.center().y),

@@ -937,8 +937,9 @@ impl<Tab> DockArea<'_, Tab> {
                 } else {
                     shares::boundary(shares, index - 1)
                 };
-                let low = from + dim(first) / range;
-                let high = shares::boundary(shares, index + 1) - dim(second) / range;
+                let gap = style.separator.width + 1.0;
+                let low = from + (dim(first) + gap) / range;
+                let high = shares::boundary(shares, index + 1) - (dim(second) + gap) / range;
                 if low <= high {
                     target = target.clamp(low, high);
                     min_part = 0.0;

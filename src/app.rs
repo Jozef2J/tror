@@ -3055,7 +3055,9 @@ impl eframe::App for TrorApp {
         }
         let pinned: Vec<u64> = self.docs.iter().filter(|d| d.pinned).map(|d| d.id).collect();
         dock::pins_first(&mut dock, &pinned);
-        dock::enforce_min(&mut dock);
+        if !ctx.input(|i| i.pointer.any_down()) {
+            dock::enforce_min(&mut dock);
+        }
         dock::remember(&dock, &mut self.settings.floats);
         self.dock = dock;
         for pane in self.settings.detached.clone() {

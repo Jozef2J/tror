@@ -700,11 +700,16 @@ impl ConsolePanel {
             }
             let (cols, rows) = session.screen.grid(&font, ui, body);
             let dragging = ui.input(|i| i.pointer.primary_down());
+            let now = ui.input(|i| i.time);
             if !dragging
-                && session.screen.resize(cols, rows)
+                && session.screen.settle(cols, rows, now)
                 && let Some(shell) = &session.shell
             {
                 let _ = shell.tx.send(ShellCmd::Resize(cols, rows));
+            }
+            if session.screen.unsettled() {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(60));
             }
             let id = egui::Id::unique(("tror_term", session.id));
             let look = terminal::Look {
