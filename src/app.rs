@@ -3122,7 +3122,7 @@ fn drag_out(frame: &eframe::Frame, paths: Vec<PathBuf>) {
         |_, _| {},
         drag::Options::default(),
     ) {
-        trace::popup(format!("Не удалось начать перетаскивание: {e}"), false);
+        crate::trace::popup(format!("Не удалось начать перетаскивание: {e}"), false);
     }
 }
 
