@@ -3,10 +3,20 @@ name: build
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md']
   pull_request:
+    paths-ignore: ['**.md']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -19,16 +29,17 @@ jobs:
     env:
       HAS_CERT: ${{ secrets.WINDOWS_PFX_BASE64 != '' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --locked
       - run: cargo build --release --locked
       - if: runner.os == 'Linux'
         run: tar -czf tror-linux-x86_64.tar.gz -C target/release tror
       - if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
+          retention-days: 14
           name: ${{ matrix.artifact }}
           path: tror-linux-x86_64.tar.gz
       - if: runner.os == 'Windows' && env.HAS_CERT == 'true'
@@ -59,14 +70,16 @@ jobs:
           & $env:SIGNTOOL sign /f "$env:RUNNER_TEMP\sign.pfx" /p "$env:WINDOWS_PFX_PASSWORD" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 tror-setup.exe
           Remove-Item "$env:RUNNER_TEMP\sign.pfx"
       - if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
+          retention-days: 14
           name: ${{ matrix.artifact }}
           path: |
             tror.exe
             tror-setup.exe
 
   release:
+    timeout-minutes: 10
     needs: [build]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
@@ -75,8 +88,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
       - run: |
@@ -100,19 +113,21 @@ jobs:
           gh release create "v$VERSION" out/* --title "Tror $VERSION" --notes-file notes.txt --target "$GITHUB_SHA"
 
   macos:
+    timeout-minutes: 60
     runs-on: macos-15
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --locked
       - run: packaging/macos.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
+          retention-days: 14
           name: tror-macos-universal
           path: Tror-macos.zip
       - if: github.event_name == 'push' && github.ref == 'refs/heads/main'

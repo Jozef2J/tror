@@ -145,6 +145,8 @@ impl Edit {
     }
 }
 
+pub type View = (PathBuf, Vec<usize>, Vec<(usize, usize)>);
+
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -170,6 +172,8 @@ pub struct Settings {
     pub autosave: bool,
     pub updates: bool,
     pub passwords_in_file: bool,
+    pub macros: Vec<(String, Vec<egui::Event>)>,
+    pub views: Vec<View>,
     pub scrollback: u32,
     pub db_rows: u32,
     pub columns: [f32; 3],
@@ -208,6 +212,8 @@ impl Default for Settings {
             autosave: true,
             updates: true,
             passwords_in_file: false,
+            macros: Vec::new(),
+            views: Vec::new(),
             scrollback: 5000,
             db_rows: 5000,
             columns: crate::widgets::COLUMN_DEFAULTS,

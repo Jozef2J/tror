@@ -392,6 +392,17 @@ impl Document {
         self.refold();
     }
 
+    pub fn restore_view(&mut self, marks: &[usize], folds: &[(usize, usize)]) {
+        let count = self.line_count();
+        self.marks = marks.iter().copied().filter(|l| *l < count).collect();
+        self.folds = folds
+            .iter()
+            .copied()
+            .filter(|(head, end)| *end < count && self.fold_end(*head) == Some(*end))
+            .collect();
+        self.refold();
+    }
+
     pub(crate) fn drop_folds(&mut self) {
         self.clamp_marks();
         self.folds.clear();
@@ -491,6 +502,15 @@ mod tests {
             }
         }
         assert_eq!(d.shown_count(), 101);
+    }
+
+    #[test]
+    fn restore_view_keeps_only_valid_folds() {
+        let mut d = doc("a {\n  b\n}\nc {\n  d\n}\n");
+        d.restore_view(&[1, 40], &[(0, 2), (3, 4), (9, 12)]);
+        assert_eq!(d.folds, vec![(0, 2)]);
+        assert_eq!(d.hidden, vec![(1, 2)]);
+        assert_eq!(d.marks.iter().copied().collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]

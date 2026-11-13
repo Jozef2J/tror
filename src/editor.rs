@@ -39,10 +39,11 @@ pub struct Macro {
     pub recording: bool,
     pub events: Vec<Event>,
     pub play: u32,
+    pub until_end: bool,
 }
 
 impl Macro {
-    fn feed(&mut self, events: &mut Vec<Event>) {
+    fn feed(&mut self, events: &[Event]) {
         if self.recording {
             self.events.extend(
                 events
@@ -59,10 +60,30 @@ impl Macro {
                     })
                     .cloned(),
             );
-        } else {
-            for _ in 0..std::mem::take(&mut self.play) {
-                events.extend(self.events.iter().cloned());
+        }
+    }
+
+    fn replay(&mut self, ui: &Ui, doc: &mut Document, m: &Metrics) {
+        if self.recording || self.play == 0 || self.events.is_empty() {
+            self.play = 0;
+            return;
+        }
+        let start = std::time::Instant::now();
+        while self.play > 0 && start.elapsed() < std::time::Duration::from_millis(40) {
+            let before = doc.rope.char_to_line(doc.sel.1);
+            process_events(ui, doc, m, self.events.clone());
+            self.play -= 1;
+            if self.until_end {
+                let line = doc.rope.char_to_line(doc.sel.1);
+                if line <= before || line + 1 >= doc.line_count() {
+                    self.play = 0;
+                }
             }
+        }
+        if self.play == 0 {
+            self.until_end = false;
+        } else {
+            ui.ctx().request_repaint();
         }
     }
 }
@@ -494,9 +515,15 @@ enum Typed {
 }
 
 fn handle_events(ui: &Ui, doc: &mut Document, m: &Metrics, macros: &mut Macro) -> Typed {
+    let events = ui.input(|i| i.events.clone());
+    macros.feed(&events);
+    let typed = process_events(ui, doc, m, events);
+    macros.replay(ui, doc, m);
+    typed
+}
+
+fn process_events(ui: &Ui, doc: &mut Document, m: &Metrics, events: Vec<Event>) -> Typed {
     let mut typed = Typed::None;
-    let mut events = ui.input(|i| i.events.clone());
-    macros.feed(&mut events);
     for event in events {
         if let Event::Key {
             key,

@@ -1,6 +1,6 @@
 [package]
 name = "tror"
-version = "0.18.0"
+version = "0.19.0"
 description = "Быстрый компактный редактор кода"
 edition = "2024"
 

@@ -96,6 +96,9 @@ enum Action {
     FindFiles,
     MacroRecord,
     MacroPlay,
+    MacroDialog(bool),
+    MacroLoad(usize, bool),
+    MacroDelete(usize),
     Fold(u8),
     Edit(&'static str),
     Goto(u64, usize),
@@ -180,6 +183,11 @@ pub(crate) fn window_header(ui: &mut Ui, pal: &Palette, title: &str, closable: b
     });
     ui.add_space(4.0);
     close
+}
+
+enum MacroDialog {
+    Save(String),
+    Run(u32, bool),
 }
 
 pub(crate) fn dialog(id: impl std::hash::Hash + std::fmt::Debug, pal: &Palette) -> Modal {
@@ -305,6 +313,7 @@ pub struct TrorApp {
     find_files: crate::findfiles::FindFiles,
     update: Updater,
     macros: editor::Macro,
+    macro_dialog: Option<MacroDialog>,
     recovery: crate::recover::Recovery,
     confirm: Option<Confirm>,
     allow_close: bool,
@@ -390,6 +399,7 @@ impl TrorApp {
             find_files: Default::default(),
             update: Default::default(),
             macros: Default::default(),
+            macro_dialog: None,
             recovery: Default::default(),
             confirm: None,
             allow_close: false,
@@ -805,6 +815,11 @@ impl TrorApp {
                 if replace_blank {
                     self.docs.clear();
                 }
+                if let Some((_, marks, folds)) =
+                    self.settings.views.iter().find(|v| v.0 == path)
+                {
+                    doc.restore_view(marks, folds);
+                }
                 self.docs.push(doc);
                 self.active = self.docs.len() - 1;
                 self.focus_editor = true;
@@ -1084,11 +1099,28 @@ impl TrorApp {
         true
     }
 
+    fn remember_view(settings: &mut Settings, doc: &Document) {
+        let Some(path) = &doc.path else {
+            return;
+        };
+        settings.views.retain(|v| &v.0 != path);
+        if !doc.marks.is_empty() || !doc.folds.is_empty() {
+            settings.views.push((
+                path.clone(),
+                doc.marks.iter().copied().collect(),
+                doc.folds.clone(),
+            ));
+        }
+        let extra = settings.views.len().saturating_sub(300);
+        settings.views.drain(..extra);
+    }
+
     fn remove_doc(&mut self, index: usize) {
         if index >= self.docs.len() {
             return;
         }
         let doc = self.docs.remove(index);
+        Self::remember_view(&mut self.settings, &doc);
         if doc.path.is_some() || doc.remote.is_some() {
             let entry = (doc.path.clone(), doc.remote.clone());
             self.closed.retain(|c| *c != entry);
@@ -1384,6 +1416,33 @@ impl TrorApp {
                 } else {
                     self.macros.play += 1;
                     self.focus_editor = true;
+                }
+            }
+            Action::MacroDialog(save) => {
+                if self.macros.recording || self.macros.events.is_empty() {
+                    self.notify("Макрос ещё не записан", now);
+                } else {
+                    self.macro_dialog = Some(if save {
+                        MacroDialog::Save(String::new())
+                    } else {
+                        MacroDialog::Run(10, false)
+                    });
+                }
+            }
+            Action::MacroLoad(index, run) => {
+                if let Some((name, events)) = self.settings.macros.get(index) {
+                    self.macros.events = events.clone();
+                    if run {
+                        self.macros.play += 1;
+                    } else {
+                        self.notify(format!("Текущий макрос: {name}"), now);
+                    }
+                    self.focus_editor = true;
+                }
+            }
+            Action::MacroDelete(index) => {
+                if index < self.settings.macros.len() {
+                    self.settings.macros.remove(index);
                 }
             }
             Action::Compare => {
@@ -1825,6 +1884,31 @@ impl TrorApp {
                 let ready = has_doc && !self.macros.recording && !self.macros.events.is_empty();
                 if item(ui, "Выполнить макрос", &key("macro_play"), ready) {
                     actions.push(Action::MacroPlay);
+                }
+                if item(ui, "Выполнить несколько раз…", "", ready) {
+                    actions.push(Action::MacroDialog(false));
+                }
+                if item(ui, "Сохранить макрос…", "", ready) {
+                    actions.push(Action::MacroDialog(true));
+                }
+                if !self.settings.macros.is_empty() {
+                    ui.menu_button("Сохранённые макросы", |ui| {
+                        ui.set_min_width(220.0);
+                        for (index, (name, _)) in self.settings.macros.iter().enumerate() {
+                            ui.menu_button(name, |ui| {
+                                ui.set_min_width(180.0);
+                                if item(ui, "Выполнить", "", has_doc) {
+                                    actions.push(Action::MacroLoad(index, true));
+                                }
+                                if item(ui, "Сделать текущим", "", true) {
+                                    actions.push(Action::MacroLoad(index, false));
+                                }
+                                if item(ui, "Удалить", "", true) {
+                                    actions.push(Action::MacroDelete(index));
+                                }
+                            });
+                        }
+                    });
                 }
                 ui.separator();
                 if item(ui, "База данных", "", true) {
@@ -2545,6 +2629,89 @@ impl TrorApp {
         }
         if done || modal.should_close() {
             self.rename = None;
+            self.focus_editor = true;
+        }
+    }
+
+    fn macro_modal(&mut self, ctx: &egui::Context, pal: &Palette) {
+        let Some(state) = &mut self.macro_dialog else {
+            return;
+        };
+        let mut done = false;
+        let mut confirm = false;
+        let modal = dialog("tror_macro", pal).show(ctx, |ui| {
+            ui.set_width(300.0);
+            match state {
+                MacroDialog::Save(name) => {
+                    window_header(ui, pal, "Сохранить макрос", false);
+                    let field = ui.add(
+                        TextEdit::singleline(name)
+                            .hint_text("название")
+                            .desired_width(f32::INFINITY),
+                    );
+                    field.request_focus();
+                }
+                MacroDialog::Run(times, until_end) => {
+                    window_header(ui, pal, "Выполнить макрос", false);
+                    ui.add_enabled_ui(!*until_end, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Сколько раз");
+                            let mut value = *times as f32;
+                            if crate::widgets::stepper(
+                                ui,
+                                pal,
+                                "macro_times",
+                                &mut value,
+                                (1.0, 100_000.0),
+                                1.0,
+                                "",
+                            ) {
+                                *times = value as u32;
+                            }
+                        });
+                    });
+                    ui.checkbox(until_end, "До конца файла");
+                }
+            }
+            if ui.input(|i| i.key_pressed(Key::Enter)) {
+                confirm = true;
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let label = match state {
+                    MacroDialog::Save(_) => "Сохранить",
+                    MacroDialog::Run(..) => "Выполнить",
+                };
+                if dialog_button(ui, pal, label, true) {
+                    confirm = true;
+                }
+                if dialog_button(ui, pal, "Отмена", false) {
+                    done = true;
+                }
+            });
+        });
+        if confirm {
+            match state {
+                MacroDialog::Save(name) => {
+                    let name = name.trim().to_owned();
+                    if !name.is_empty() {
+                        let events = self.macros.events.clone();
+                        match self.settings.macros.iter_mut().find(|m| m.0 == name) {
+                            Some(slot) => slot.1 = events,
+                            None => self.settings.macros.push((name, events)),
+                        }
+                        done = true;
+                    }
+                }
+                MacroDialog::Run(times, until_end) => {
+                    self.macros.until_end = *until_end;
+                    self.macros.play = if *until_end { 1_000_000 } else { *times };
+                    done = true;
+                }
+            }
+        }
+        if done || modal.should_close() {
+            self.macro_dialog = None;
             self.focus_editor = true;
         }
     }
@@ -3281,6 +3448,7 @@ impl eframe::App for TrorApp {
         }
         self.check_missing(&ctx);
         let modal_open = self.goto.is_some()
+            || self.macro_dialog.is_some()
             || self.rename.is_some()
             || self.confirm.is_some()
             || self.remotes.iter().any(|r| r.modal_open())
@@ -3541,6 +3709,7 @@ impl eframe::App for TrorApp {
         }
 
         self.goto_modal(&ctx, &pal);
+        self.macro_modal(&ctx, &pal);
         self.rename_modal(&ctx, &pal);
         self.confirm_modal(&ctx);
         let mut panes = self.hosts_panes();
@@ -3588,6 +3757,9 @@ impl eframe::App for TrorApp {
             .filter_map(|d| d.path.clone())
             .collect();
         self.settings.active = self.active;
+        for doc in &self.docs {
+            Self::remember_view(&mut self.settings, doc);
+        }
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);
         eframe::set_value(storage, DOCK_KEY, &self.dock);
     }

@@ -665,14 +665,20 @@ impl Screen {
             }
             let mut job = LayoutJob::default();
             job.wrap.max_width = f32::INFINITY;
+            let mut heavy = LayoutJob::default();
+            heavy.wrap.max_width = f32::INFINITY;
+            let mut any_bold = false;
             let mut run = String::new();
-            type Style = (Color32, Color32, bool, bool);
+            type Style = (Color32, Color32, bool, bool, bool);
             let mut run_style: Option<Style> = None;
-            let flush = |job: &mut LayoutJob, run: &mut String, style: Option<Style>| {
-                if let Some((fg, bg, underline, italic)) = style
+            let mut flush = |job: &mut LayoutJob, run: &mut String, style: Option<Style>| {
+                if let Some((fg, bg, underline, italic, bold)) = style
                     && !run.is_empty()
                 {
                     job.append(run, 0.0, format(fg, bg, underline, italic));
+                    let ink = if bold { fg } else { Color32::TRANSPARENT };
+                    heavy.append(run, 0.0, format(ink, Color32::TRANSPARENT, false, italic));
+                    any_bold |= bold;
                     run.clear();
                 }
             };
@@ -703,6 +709,7 @@ impl Screen {
                     bg.unwrap_or(Color32::TRANSPARENT),
                     cell.underline(),
                     cell.italic(),
+                    cell.bold(),
                 ));
                 if style != run_style {
                     flush(&mut job, &mut run, run_style);
@@ -715,6 +722,7 @@ impl Screen {
                 }
             }
             flush(&mut job, &mut run, run_style);
+            let origin = egui::pos2(area.left(), area.top() + row as f32 * row_h);
             if !job.text.trim_end().is_empty()
                 || job
                     .sections
@@ -727,6 +735,10 @@ impl Screen {
                     galley,
                     c.fg,
                 );
+            }
+            if any_bold {
+                let galley = ui.fonts_mut(|f| f.layout_job(heavy));
+                painter.galley(origin + egui::vec2((char_w * 0.07).max(0.6), 0.0), galley, c.fg);
             }
         }
         if look.cursor && !screen.hide_cursor() && screen.scrollback() == 0 {
