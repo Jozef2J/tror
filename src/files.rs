@@ -55,6 +55,8 @@ pub struct ProjectPanel {
     scanned: HashMap<PathBuf, Instant>,
     expanded: BTreeSet<PathBuf>,
     marked: BTreeSet<PathBuf>,
+    pub drag_out: Option<Vec<PathBuf>>,
+    dragged_out: bool,
     anchor: Option<PathBuf>,
     prompt: Option<Prompt>,
     attrs: Option<Attrs>,
@@ -152,6 +154,8 @@ impl ProjectPanel {
             scanned: HashMap::new(),
             expanded: BTreeSet::new(),
             marked: BTreeSet::new(),
+            drag_out: None,
+            dragged_out: false,
             anchor: None,
             prompt: None,
             attrs: None,
@@ -432,8 +436,25 @@ impl ProjectPanel {
                     let row = &rows[index];
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), row_h),
-                        Sense::click(),
+                        Sense::click_and_drag(),
                     );
+                    if response.dragged()
+                        && row.entry.is_some()
+                        && !self.dragged_out
+                        && ui.ctx().pointer_latest_pos().is_none_or(|p| {
+                            !ui.ctx().content_rect().contains(p)
+                        })
+                    {
+                        self.dragged_out = true;
+                        self.drag_out = Some(if self.marked.contains(&row.path) {
+                            self.marked.iter().cloned().collect()
+                        } else {
+                            vec![row.path.clone()]
+                        });
+                    }
+                    if response.drag_stopped() {
+                        self.dragged_out = false;
+                    }
                     let is_dir = row.entry.as_ref().is_none_or(|e| e.is_dir);
                     let marked = row.entry.is_some() && self.marked.contains(&row.path);
                     let painter = ui.painter_at(rect);

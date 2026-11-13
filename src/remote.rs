@@ -455,6 +455,7 @@ pub enum Event {
     Walked {
         root: String,
         files: Vec<(String, u64)>,
+        times: Vec<Option<u64>>,
     },
     Stat {
         path: String,
@@ -1031,13 +1032,19 @@ impl Backend {
         self.write(path, data, progress)
     }
 
-    fn walk(&mut self, root: &str, files: &mut Vec<(String, u64)>) -> Result<(), String> {
+    fn walk(
+        &mut self,
+        root: &str,
+        files: &mut Vec<(String, u64)>,
+        times: &mut Vec<Option<u64>>,
+    ) -> Result<(), String> {
         for entry in self.list(root)? {
             let path = join(root, &entry.name);
             if entry.is_dir {
-                self.walk(&path, files)?;
+                self.walk(&path, files, times)?;
             } else {
                 files.push((path, entry.size));
+                times.push(entry.mtime);
             }
         }
         Ok(())
@@ -1302,12 +1309,14 @@ fn execute(
         }
         Cmd::Walk(root) => {
             let mut files = Vec::new();
-            backend.walk(root, &mut files)?;
+            let mut times = Vec::new();
+            backend.walk(root, &mut files, &mut times)?;
             let summary = format!("{} files", files.len());
             (
                 Event::Walked {
                     root: root.clone(),
                     files,
+                    times,
                 },
                 summary,
             )

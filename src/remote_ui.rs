@@ -38,6 +38,7 @@ pub enum PanelEvent {
 
 enum Walk {
     Size,
+    Sync(PathBuf),
     Download(PathBuf),
     Relay(u8, String),
 }
@@ -98,6 +99,8 @@ pub struct RemotePanel {
     pub incoming: Option<Dragged>,
     relay: HashMap<String, (u8, String)>,
     walks: HashMap<String, Walk>,
+    sync: Option<crate::sync::Dialog>,
+    sync_times: HashMap<PathBuf, u64>,
     pending: usize,
     progress: Option<(u64, u64)>,
     store_seen: u64,
@@ -147,6 +150,8 @@ impl RemotePanel {
             incoming: None,
             relay: HashMap::new(),
             walks: HashMap::new(),
+            sync: None,
+            sync_times: HashMap::new(),
             pending: 0,
             progress: None,
             store_seen: Store::generation(),
@@ -669,7 +674,12 @@ impl RemotePanel {
                     match self.save_to.remove(&path) {
                         Some(local) => {
                             let (text, error) = match std::fs::write(&local, data) {
-                                Ok(()) => (format!("Скачано: {}", local.display()), false),
+                                Ok(()) => {
+                                    if let Some(mtime) = self.sync_times.remove(&local) {
+                                        crate::sync::set_mtime(&local, mtime);
+                                    }
+                                    (format!("Скачано: {}", local.display()), false)
+                                }
                                 Err(e) => (
                                     format!("Не удалось записать {}: {e}", local.display()),
                                     true,
@@ -701,7 +711,7 @@ impl RemotePanel {
                     }
                 }
                 Event::Progress { done, total } => self.progress = Some((done, total)),
-                Event::Walked { root, files } => {
+                Event::Walked { root, files, times } => {
                     self.finished();
                     let name = remote::file_name(&root).to_owned();
                     let base = remote::parent(&root);
@@ -713,6 +723,24 @@ impl RemotePanel {
                     };
                     match self.walks.remove(&root) {
                         None => {}
+                        Some(Walk::Sync(folder)) => {
+                            let prefix = format!("{}/", root.trim_end_matches('/'));
+                            let remote = files
+                                .iter()
+                                .zip(&times)
+                                .filter_map(|((path, size), time)| {
+                                    Some((path.strip_prefix(&prefix)?.to_owned(), (*size, *time)))
+                                })
+                                .collect();
+                            self.sync = Some(crate::sync::Dialog {
+                                local: crate::sync::local_files(&folder),
+                                remote,
+                                remote_root: root.clone(),
+                                local_root: folder,
+                                mode: crate::sync::Mode::Both,
+                                by_time: true,
+                            });
+                        }
                         Some(Walk::Size) => {
                             let bytes: u64 = files.iter().map(|(_, size)| size).sum();
                             let text = format!(
@@ -725,8 +753,11 @@ impl RemotePanel {
                         }
                         Some(Walk::Download(folder)) => {
                             for (path, _) in files {
-                                let mut local = folder.clone();
-                                local.extend(relative(&path).split('/'));
+                                let Some(local) = crate::sync::local_path(&folder, &relative(&path))
+                                else {
+                                    self.push_log(format!("Пропущено небезопасное имя: {path}"), true);
+                                    continue;
+                                };
                                 if let Some(dir) = local.parent() {
                                     let _ = std::fs::create_dir_all(dir);
                                 }
@@ -1502,6 +1533,16 @@ impl RemotePanel {
                                     walk.push(dir.clone());
                                 }
                             }
+                            if dirs.len() == 1
+                                && files.is_empty()
+                                && ui.button("Синхронизировать с папкой на компьютере…").clicked()
+                                && let Some(folder) = std::env::var_os("TROR_PICK_FOLDER")
+                                    .map(PathBuf::from)
+                                    .or_else(|| rfd::FileDialog::new().pick_folder())
+                            {
+                                self.walks.insert(dirs[0].clone(), Walk::Sync(folder));
+                                walk.push(dirs[0].clone());
+                            }
                             if !dirs.is_empty() && ui.button("Размер папки").clicked() {
                                 for dir in &dirs {
                                     self.walks.insert(dir.clone(), Walk::Size);
@@ -1650,7 +1691,173 @@ impl RemotePanel {
         }
     }
 
+    fn sync_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
+        use crate::sync::Mode;
+        let Some(dialog) = &mut self.sync else {
+            return;
+        };
+        let plan = dialog.plan();
+        let mut go = false;
+        let mut close = false;
+        egui::Window::new("Синхронизация папки")
+            .collapsible(false)
+            .resizable(true)
+            .default_size([620.0, 460.0])
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                egui::Grid::new("tror_sync_roots").num_columns(2).show(ui, |ui| {
+                    ui.label(RichText::new("На компьютере").color(pal.subtext));
+                    ui.label(dialog.local_root.display().to_string());
+                    ui.end_row();
+                    ui.label(RichText::new("На сервере").color(pal.subtext));
+                    ui.label(dialog.remote_root.as_str());
+                    ui.end_row();
+                });
+                ui.add_space(6.0);
+                ui.radio_value(&mut dialog.mode, Mode::Both, "В обе стороны — побеждает более новый файл");
+                ui.radio_value(&mut dialog.mode, Mode::Up, "Только на сервер");
+                ui.radio_value(&mut dialog.mode, Mode::Down, "Только на компьютер");
+                ui.checkbox(
+                    &mut dialog.by_time,
+                    "При одинаковом размере сравнивать время изменения",
+                );
+                ui.label(
+                    RichText::new(
+                        "Ничего не удаляется: файлы, которых нет на одной стороне, копируются на неё. \
+                         Файлы с тем же именем перезаписываются.",
+                    )
+                    .size(12.0)
+                    .color(pal.faint),
+                );
+                ui.add_space(6.0);
+                let bytes = |steps: &[crate::sync::Step]| {
+                    size_label(steps.iter().map(|s| s.size).sum::<u64>() as usize)
+                };
+                ui.label(format!(
+                    "На сервер: {} ({}) · на компьютер: {} ({}) · без изменений: {}",
+                    plan.up.len(),
+                    bytes(&plan.up),
+                    plan.down.len(),
+                    bytes(&plan.down),
+                    plan.same
+                ));
+                ui.separator();
+                let rows: Vec<(bool, &crate::sync::Step)> = plan
+                    .up
+                    .iter()
+                    .map(|s| (true, s))
+                    .chain(plan.down.iter().map(|s| (false, s)))
+                    .collect();
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ScrollArea::vertical()
+                        .max_height((ui.available_height() - 44.0).max(80.0))
+                        .auto_shrink(false)
+                        .show_rows(ui, 20.0, rows.len(), |ui, range| {
+                            for (up, step) in &rows[range] {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), 20.0),
+                                    Sense::hover(),
+                                );
+                                let painter = ui.painter_at(rect);
+                                let what = match (up, step.fresh) {
+                                    (true, true) => "→ сервер, новый",
+                                    (true, false) => "→ сервер, заменить",
+                                    (false, true) => "← компьютер, новый",
+                                    (false, false) => "← компьютер, заменить",
+                                };
+                                painter.text(
+                                    egui::pos2(rect.left() + 4.0, rect.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    what,
+                                    egui::FontId::proportional(12.0),
+                                    if step.fresh { pal.subtext } else { pal.warn },
+                                );
+                                painter.text(
+                                    egui::pos2(rect.left() + 170.0, rect.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    &step.relative,
+                                    egui::FontId::proportional(12.5),
+                                    pal.text,
+                                );
+                                painter.text(
+                                    egui::pos2(rect.right() - 6.0, rect.center().y),
+                                    egui::Align2::RIGHT_CENTER,
+                                    size_label(step.size as usize),
+                                    egui::FontId::proportional(11.5),
+                                    pal.faint,
+                                );
+                            }
+                        });
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let total = plan.up.len() + plan.down.len();
+                    let label = if total == 0 {
+                        "Всё уже совпадает".to_owned()
+                    } else {
+                        format!("Синхронизировать, файлов: {total}")
+                    };
+                    go = ui
+                        .add_enabled(
+                            total > 0,
+                            Button::new(RichText::new(label).color(Color32::WHITE)).fill(pal.accent),
+                        )
+                        .clicked();
+                    close = ui.add(Button::new("Отмена").fill(pal.surface)).clicked();
+                });
+            });
+        if go {
+            let Some(dialog) = self.sync.take() else {
+                return;
+            };
+            for step in &plan.down {
+                let Some(local) = crate::sync::local_path(&dialog.local_root, &step.relative) else {
+                    self.push_log(format!("Пропущено небезопасное имя: {}", step.relative), true);
+                    continue;
+                };
+                if let Some(dir) = local.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let path = remote::join(&dialog.remote_root, &step.relative);
+                if let Some(mtime) = step.mtime {
+                    self.sync_times.insert(local.clone(), mtime);
+                }
+                self.save_to.insert(path.clone(), local);
+                self.send(Cmd::Download(path), format!("Синхронизация: {}…", step.relative));
+            }
+            for step in &plan.up {
+                let Some(local) = crate::sync::local_path(&dialog.local_root, &step.relative) else {
+                    continue;
+                };
+                match std::fs::read(&local) {
+                    Ok(data) => {
+                        let path = remote::join(&dialog.remote_root, &step.relative);
+                        self.send(
+                            Cmd::Upload {
+                                path: path.clone(),
+                                data,
+                                doc: None,
+                            },
+                            format!("Синхронизация: {}…", step.relative),
+                        );
+                        if let Some(mtime) = step.mtime {
+                            self.send(Cmd::Touch { path, mtime }, String::new());
+                        }
+                    }
+                    Err(e) => {
+                        self.push_log(format!("Не удалось прочитать {}: {e}", step.relative), true)
+                    }
+                }
+            }
+        } else if close {
+            self.sync = None;
+        }
+    }
+
     pub fn dialogs(&mut self, ctx: &egui::Context, pal: &Palette) -> Vec<PanelEvent> {
+        self.sync_dialog(ctx, pal);
         let mut out = Vec::new();
         self.host_key_dialog(ctx, pal);
         self.prompt_dialog(ctx, pal);

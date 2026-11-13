@@ -162,6 +162,7 @@ pub fn install_fonts(
     ui_font: Option<&Path>,
     code_font: Option<&Path>,
     term_fonts: &[std::path::PathBuf],
+    tab_width: u8,
 ) -> Result<(), String> {
     use egui::{FontData, FontDefinitions, FontFamily};
     let mut fonts = FontDefinitions::default();
@@ -245,6 +246,11 @@ pub fn install_fonts(
             list.extend(fallback.iter().cloned());
             fonts.families.insert(family, list);
             registered.push(path.display().to_string());
+        }
+    }
+    for name in ["user-code", "jbmono"] {
+        if let Some(data) = fonts.font_data.get_mut(name) {
+            std::sync::Arc::make_mut(data).tweak.tab_size = tab_width.max(1) as f32;
         }
     }
     ctx.set_fonts(fonts);

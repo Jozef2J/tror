@@ -79,6 +79,8 @@ pub struct DbProfile {
     pub database: String,
     pub tunnel: String,
     pub file: String,
+    pub tls: bool,
+    pub tls_any_cert: bool,
 }
 
 impl Default for DbProfile {
@@ -93,6 +95,8 @@ impl Default for DbProfile {
             database: String::new(),
             tunnel: String::new(),
             file: String::new(),
+            tls: false,
+            tls_any_cert: false,
         }
     }
 }
@@ -460,6 +464,16 @@ fn open_engine(profile: &DbProfile, host: String, port: u16) -> Result<(Engine, 
                 .db_name((!database.is_empty()).then_some(database))
                 .prefer_socket(false)
                 .tcp_connect_timeout(Some(Duration::from_secs(12)));
+            let loose = profile.tls_any_cert || !profile.tunnel.is_empty();
+            let opts = if profile.tls {
+                opts.ssl_opts(Some(
+                    mysql::SslOpts::default()
+                        .with_danger_accept_invalid_certs(profile.tls_any_cert)
+                        .with_danger_skip_domain_validation(loose),
+                ))
+            } else {
+                opts
+            };
             let conn = mysql::Conn::new(opts).map_err(explain)?;
             let (a, b, c) = conn.server_version();
             Ok((Engine::My(Box::new(conn)), format!("MySQL {a}.{b}.{c}")))
@@ -476,7 +490,21 @@ fn open_engine(profile: &DbProfile, host: String, port: u16) -> Result<(Engine, 
             if !database.is_empty() {
                 config.dbname(database);
             }
-            let mut client = config.connect(postgres::NoTls).map_err(explain_pg)?;
+            let mut client = if profile.tls {
+                config.ssl_mode(postgres::config::SslMode::Require);
+                let tls = native_tls::TlsConnector::builder()
+                    .danger_accept_invalid_certs(profile.tls_any_cert)
+                    .danger_accept_invalid_hostnames(
+                        profile.tls_any_cert || !profile.tunnel.is_empty(),
+                    )
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                config
+                    .connect(postgres_native_tls::MakeTlsConnector::new(tls))
+                    .map_err(explain_pg)?
+            } else {
+                config.connect(postgres::NoTls).map_err(explain_pg)?
+            };
             let version = client
                 .simple_query("SHOW server_version")
                 .ok()
@@ -666,6 +694,45 @@ pub struct DbPanel {
     busy: bool,
     scroll_x: f32,
     editor: Option<Editor>,
+}
+
+fn json(table: &Table) -> String {
+    let rows: Vec<serde_json::Value> = table
+        .rows
+        .iter()
+        .map(|row| {
+            serde_json::Value::Object(
+                table
+                    .columns
+                    .iter()
+                    .zip(row)
+                    .map(|(name, cell)| {
+                        let value = match cell {
+                            Some(text) => serde_json::Value::String(text.clone()),
+                            None => serde_json::Value::Null,
+                        };
+                        (name.clone(), value)
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    serde_json::to_string_pretty(&rows).unwrap_or_default()
+}
+
+fn inserts(table: &Table, kind: DbKind, name: &str) -> String {
+    let columns: Vec<String> = table.columns.iter().map(|c| kind.quote(c)).collect();
+    let mut out = String::new();
+    for row in &table.rows {
+        let values: Vec<String> = row.iter().map(|c| kind.literal(c.as_deref())).collect();
+        out.push_str(&format!(
+            "INSERT INTO {} ({}) VALUES ({});\n",
+            kind.quote(name),
+            columns.join(", "),
+            values.join(", ")
+        ));
+    }
+    out
 }
 
 fn csv(table: &Table, separator: char) -> String {
@@ -1195,7 +1262,7 @@ impl DbPanel {
                 );
             }
             if self.result.as_ref().is_some_and(|t| !t.columns.is_empty()) {
-                if ui.button("Экспорт CSV…").clicked() {
+                if ui.button("Экспорт…").on_hover_text("В файл CSV, JSON или SQL — формат выбирается в окне сохранения").clicked() {
                     export = Some(true);
                 }
                 if ui
@@ -1248,11 +1315,23 @@ impl DbPanel {
         }
         if let (Some(to_file), Some(table)) = (export, &self.result) {
             if to_file {
+                let name = self
+                    .source
+                    .as_ref()
+                    .map_or_else(|| "result".to_owned(), |s| s.table.clone());
                 if let Some(path) = rfd::FileDialog::new()
-                    .set_file_name("result.csv")
+                    .set_file_name(format!("{name}.csv"))
+                    .add_filter("CSV, разделитель «;»", &["csv"])
+                    .add_filter("JSON", &["json"])
+                    .add_filter("SQL — команды INSERT", &["sql"])
                     .save_file()
                 {
-                    match std::fs::write(&path, csv(table, ';')) {
+                    let text = match path.extension().and_then(|e| e.to_str()) {
+                        Some(e) if e.eq_ignore_ascii_case("json") => json(table),
+                        Some(e) if e.eq_ignore_ascii_case("sql") => inserts(table, self.kind, &name),
+                        _ => csv(table, ';'),
+                    };
+                    match std::fs::write(&path, text) {
                         Ok(()) => self.status = format!("Сохранено: {}", path.display()),
                         Err(e) => {
                             self.status = format!("Не сохранено: {e}");
@@ -1802,6 +1881,17 @@ impl DbPanel {
                             }
                         });
                     ui.end_row();
+                    ui.label("Шифрование TLS");
+                    ui.vertical(|ui| {
+                        ui.checkbox(&mut p.tls, "Подключаться по TLS");
+                        if p.tls {
+                            ui.checkbox(
+                                &mut p.tls_any_cert,
+                                "Принимать любой сертификат (самоподписанный)",
+                            );
+                        }
+                    });
+                    ui.end_row();
                     ui.label(if p.tunnel.is_empty() {
                         "Сервер"
                     } else {
@@ -1887,7 +1977,7 @@ impl DbPanel {
                 ui.label(
                     RichText::new(
                         "Пароль хранится в файле профилей в замаскированном, но не зашифрованном виде. \
-                         Соединение без TLS — для удалённых серверов используйте туннель через SSH.",
+                         Без TLS и без туннеля пароль и данные идут по сети открыто.",
                     )
                     .size(12.0)
                     .color(pal.faint),
@@ -2034,6 +2124,25 @@ mod tests {
         assert_eq!(
             csv(&table, ';'),
             "id;title\n1;\"a;b\"\n2;\n3;\"say \"\"hi\"\"\"\n"
+        );
+    }
+
+    #[test]
+    fn result_exports_as_json_and_inserts() {
+        let table = Table {
+            columns: vec!["id".into(), "name".into()],
+            rows: vec![
+                vec![Some("1".into()), Some("O'Neil".into())],
+                vec![Some("2".into()), None],
+            ],
+            ..Table::empty()
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&json(&table)).unwrap();
+        assert_eq!(parsed[0]["name"], "O'Neil");
+        assert!(parsed[1]["name"].is_null());
+        assert_eq!(
+            inserts(&table, DbKind::MySql, "users"),
+            "INSERT INTO `users` (`id`, `name`) VALUES ('1', 'O''Neil');\nINSERT INTO `users` (`id`, `name`) VALUES ('2', NULL);\n"
         );
     }
 

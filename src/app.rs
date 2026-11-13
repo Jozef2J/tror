@@ -92,6 +92,10 @@ enum Action {
     ResetLayout,
     Preview,
     Compare,
+    CheckUpdates,
+    FindFiles,
+    MacroRecord,
+    MacroPlay,
     Goto(u64, usize),
     Plugin(usize),
     Detach(Pane),
@@ -100,6 +104,16 @@ enum Action {
     PluginsReload,
     NextTab,
     PrevTab,
+}
+
+#[derive(Default)]
+struct Updater {
+    rx: Option<std::sync::mpsc::Receiver<crate::update::Event>>,
+    found: Option<crate::update::Release>,
+    manual: bool,
+    busy: bool,
+    swapped: bool,
+    error: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -285,6 +299,10 @@ pub struct TrorApp {
     ctx: egui::Context,
     checked: (u64, bool),
     goto: Option<String>,
+    find_files: crate::findfiles::FindFiles,
+    update: Updater,
+    macros: editor::Macro,
+    recovery: crate::recover::Recovery,
     confirm: Option<Confirm>,
     allow_close: bool,
     focus_editor: bool,
@@ -365,6 +383,10 @@ impl TrorApp {
             ctx: cc.egui_ctx.clone(),
             checked: (0, false),
             goto: None,
+            find_files: Default::default(),
+            update: Default::default(),
+            macros: Default::default(),
+            recovery: Default::default(),
             confirm: None,
             allow_close: false,
             focus_editor: true,
@@ -387,6 +409,11 @@ impl TrorApp {
             doc.pinned = doc.path.as_ref().is_some_and(|p| pinned.contains(p));
         }
         crate::widgets::set_columns(app.settings.columns);
+        app.recover();
+        crate::update::cleanup();
+        if app.settings.updates {
+            app.update.rx = Some(crate::update::check());
+        }
         app.next_id = top;
         if active < app.docs.len() {
             app.active = active;
@@ -526,13 +553,14 @@ impl TrorApp {
         }
         let look = self.settings.look.clone();
         let old = self.applied.take();
-        let fonts = |l: &Look| (l.ui_font.clone(), l.code_font.clone());
+        let fonts = |l: &Look| (l.ui_font.clone(), l.code_font.clone(), l.tab_width);
         if (old.as_ref().map(fonts) != Some(fonts(&look)) || fonts_changed)
             && let Err(e) = theme::install_fonts(
                 ctx,
                 look.ui_font.as_deref(),
                 look.code_font.as_deref(),
                 &wanted_fonts,
+                look.tab_width,
             )
         {
             self.notify(format!("Шрифт не загружен: {e}"), ctx.input(|i| i.time));
@@ -548,6 +576,181 @@ impl TrorApp {
             self.syntaxes.set_theme(scheme, colors);
         }
         self.applied = Some(look);
+    }
+
+    fn update_ui(&mut self, ctx: &egui::Context, pal: &Palette, now: f64) {
+        use crate::update::{Event, Kind};
+        let events: Vec<Event> = self
+            .update
+            .rx
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
+        if self.update.rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(300));
+        }
+        for event in events {
+            self.update.rx = None;
+            self.update.busy = false;
+            match event {
+                Event::Found(release) => self.update.found = Some(release),
+                Event::Current => {
+                    if std::mem::take(&mut self.update.manual) {
+                        self.notify("Установлена последняя версия", now);
+                    }
+                }
+                Event::Failed(e) => {
+                    if std::mem::take(&mut self.update.manual) || self.update.found.is_some() {
+                        self.notify(format!("Обновление не удалось: {e}"), now);
+                    }
+                }
+                Event::Ready(path, kind) => match crate::update::apply(&path, kind) {
+                    Ok(()) if kind == Kind::Installer => {
+                        self.update.found = None;
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                    Ok(()) => self.update.swapped = true,
+                    Err(e) => self.notify(format!("Обновление не удалось: {e}"), now),
+                },
+            }
+        }
+        let Some(release) = self.update.found.clone() else {
+            return;
+        };
+        let kind = crate::update::kind();
+        let mut close = false;
+        egui::Window::new("Доступно обновление")
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.set_width(440.0);
+                ui.label(format!(
+                    "Вышла версия {} — у вас {}.",
+                    release.version,
+                    env!("CARGO_PKG_VERSION")
+                ));
+                if !release.notes.trim().is_empty() {
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                        ui.label(RichText::new(release.notes.trim()).size(12.5).color(pal.subtext));
+                    });
+                }
+                ui.add_space(8.0);
+                if self.update.swapped {
+                    ui.label("Новая версия установлена и запустится при следующем старте программы.");
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(Button::new(RichText::new("Перезапустить сейчас").color(Color32::WHITE)).fill(pal.accent))
+                            .clicked()
+                        {
+                            match crate::update::restart() {
+                                Ok(()) => ctx.send_viewport_cmd(ViewportCommand::Close),
+                                Err(e) => self.update.error = e,
+                            }
+                        }
+                        close = ui.button("Позже").clicked();
+                    });
+                } else if self.update.busy {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Скачиваю и проверяю файл…");
+                    });
+                } else {
+                    let can_install = kind != Kind::Page && release.file.is_some() && release.sums.is_some();
+                    if !can_install {
+                        ui.label(
+                            RichText::new("Для этой установки обновление ставится вручную со страницы выпуска.")
+                                .size(12.0)
+                                .color(pal.faint),
+                        );
+                    } else if kind == Kind::Installer {
+                        ui.label(
+                            RichText::new("Будет скачан и запущен установщик; программа закроется. Несохранённые файлы предложит сохранить.")
+                                .size(12.0)
+                                .color(pal.faint),
+                        );
+                    }
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if can_install
+                            && ui
+                                .add(Button::new(RichText::new("Скачать и установить").color(Color32::WHITE)).fill(pal.accent))
+                                .clicked()
+                        {
+                            self.update.busy = true;
+                            self.update.rx = Some(crate::update::download(release.clone()));
+                        }
+                        if ui.button("Открыть страницу выпуска").clicked() {
+                            let _ = preview::open_url(crate::update::PAGE);
+                        }
+                        close = ui.button("Позже").clicked();
+                    });
+                    ui.add_space(4.0);
+                    ui.checkbox(&mut self.settings.updates, "Проверять обновления при запуске");
+                }
+                if !self.update.error.is_empty() {
+                    ui.label(RichText::new(&self.update.error).color(pal.warn));
+                }
+            });
+        if close {
+            self.update.found = None;
+        }
+    }
+
+    fn recover(&mut self) {
+        let Some(dir) = crate::recover::dir() else {
+            return;
+        };
+        let found = crate::recover::pending(&dir);
+        if found.is_empty() {
+            return;
+        }
+        let count = found.len();
+        for (entry, text) in found {
+            let open = entry
+                .path
+                .as_ref()
+                .and_then(|p| self.docs.iter().position(|d| d.path.as_ref() == Some(p)));
+            let index = match open {
+                Some(index) => index,
+                None => {
+                    if let Some(path) = entry.path.as_ref().filter(|p| p.is_file()) {
+                        self.open_path(path, 0.0);
+                    }
+                    match entry
+                        .path
+                        .as_ref()
+                        .and_then(|p| self.docs.iter().position(|d| d.path.as_ref() == Some(p)))
+                    {
+                        Some(index) => index,
+                        None => {
+                            let mut doc = Document::empty(self.next_id, entry.untitled.max(1));
+                            self.next_id += 1;
+                            doc.path = entry.path.clone();
+                            doc.remote = entry.remote.clone();
+                            let name = entry
+                                .path
+                                .clone()
+                                .or_else(|| entry.remote.as_ref().map(|r| PathBuf::from(&r.1)));
+                            doc.syntax = self.syntaxes.detect(name.as_deref(), &text);
+                            self.docs.push(doc);
+                            self.docs.len() - 1
+                        }
+                    }
+                }
+            };
+            self.docs[index].set_text(&text);
+            self.active = index;
+        }
+        crate::recover::clear(&dir);
+        let _ = self.recovery.snapshot(&dir, &self.docs);
+        self.toast = Some((
+            format!("Восстановлены несохранённые правки, вкладок: {count}"),
+            0.0,
+        ));
     }
 
     fn notify(&mut self, text: impl Into<String>, now: f64) {
@@ -1100,6 +1303,34 @@ impl TrorApp {
                     Err(e) => self.notify(format!("Предпросмотр: {e}"), now),
                 }
             }
+            Action::CheckUpdates => {
+                self.update.manual = true;
+                self.update.rx = Some(crate::update::check());
+                self.notify("Проверяю обновления…", now);
+            }
+            Action::FindFiles => self.find_files.show(),
+            Action::MacroRecord => {
+                if self.macros.recording {
+                    self.macros.recording = false;
+                    let count = self.macros.events.len();
+                    self.notify(format!("Макрос записан, действий: {count}"), now);
+                } else {
+                    self.macros.events.clear();
+                    self.macros.recording = true;
+                    self.notify("Идёт запись макроса — нажмите сочетание ещё раз, чтобы остановить", now);
+                }
+                self.focus_editor = true;
+            }
+            Action::MacroPlay => {
+                if self.macros.recording {
+                    self.notify("Сначала остановите запись макроса", now);
+                } else if self.macros.events.is_empty() {
+                    self.notify("Макрос ещё не записан", now);
+                } else {
+                    self.macros.play += 1;
+                    self.focus_editor = true;
+                }
+            }
             Action::Compare => {
                 if let Some(doc) = self.docs.get(self.active) {
                     self.diff.left = Some(doc.id);
@@ -1210,6 +1441,9 @@ impl TrorApp {
                 "server_search" => Action::Toggle(Pane::ServerSearch),
                 "db" => Action::Toggle(Pane::Db),
                 "compare" => Action::Compare,
+                "find_files" => Action::FindFiles,
+                "macro_record" => Action::MacroRecord,
+                "macro_play" => Action::MacroPlay,
                 _ => Action::Preview,
             });
         }
@@ -1327,6 +1561,10 @@ impl TrorApp {
                 if item(ui, "Перейти к строке…", &key("goto"), has_doc) {
                     actions.push(Action::GotoLine);
                 }
+                ui.separator();
+                if item(ui, "Найти в файлах проекта…", &key("find_files"), true) {
+                    actions.push(Action::FindFiles);
+                }
             });
             ui.menu_button("Вид", |ui| {
                 ui.set_min_width(260.0);
@@ -1442,6 +1680,23 @@ impl TrorApp {
                 if item(ui, "Предпросмотр в браузере", &key("preview"), has_doc)
                 {
                     actions.push(Action::Preview);
+                }
+                ui.separator();
+                if item(ui, "Проверить обновления", "", true) {
+                    actions.push(Action::CheckUpdates);
+                }
+                ui.separator();
+                let record = if self.macros.recording {
+                    "Остановить запись макроса"
+                } else {
+                    "Записать макрос"
+                };
+                if item(ui, record, &key("macro_record"), has_doc) {
+                    actions.push(Action::MacroRecord);
+                }
+                let ready = has_doc && !self.macros.recording && !self.macros.events.is_empty();
+                if item(ui, "Выполнить макрос", &key("macro_play"), ready) {
+                    actions.push(Action::MacroPlay);
                 }
                 ui.separator();
                 if item(ui, "База данных", "", true) {
@@ -2338,6 +2593,7 @@ impl TrorApp {
                     font_size,
                     line_spacing,
                     edit: self.settings.edit,
+                    macros: &mut self.macros,
                     complete: &mut self.complete,
                 },
             );
@@ -2364,6 +2620,7 @@ impl TrorApp {
         }
         let mut search = SearchState::default();
         let mut complete = Completion::default();
+        let mut macros = editor::Macro::default();
         editor::show(
             ui,
             &mut self.docs[index],
@@ -2376,6 +2633,7 @@ impl TrorApp {
                 font_size,
                 line_spacing,
                 edit: self.settings.edit,
+                macros: &mut macros,
                 complete: &mut complete,
             },
         );
@@ -2854,6 +3112,23 @@ impl TabViewer for Viewer<'_> {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn drag_out(frame: &eframe::Frame, paths: Vec<PathBuf>) {
+    let icon = include_bytes!("../assets/tror.png").to_vec();
+    if let Err(e) = drag::start_drag(
+        frame,
+        drag::DragItem::Files(paths),
+        drag::Image::Raw(icon),
+        |_, _| {},
+        drag::Options::default(),
+    ) {
+        trace::popup(format!("Не удалось начать перетаскивание: {e}"), false);
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn drag_out(_frame: &eframe::Frame, _paths: Vec<PathBuf>) {}
+
 impl eframe::App for TrorApp {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let started = std::time::Instant::now();
@@ -2868,6 +3143,12 @@ impl eframe::App for TrorApp {
         {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.confirm = Some(Confirm::Quit);
+        } else if ctx.input(|i| i.viewport().close_requested())
+            && let Some(dir) = crate::recover::dir()
+        {
+            crate::recover::clear(&dir);
+            self.recovery = Default::default();
+            self.recovery.last = f64::INFINITY;
         }
         let detached = self.settings.detached.clone();
         for (index, panel) in self.remotes.iter_mut().enumerate() {
@@ -2991,6 +3272,45 @@ impl eframe::App for TrorApp {
         );
         if !modal_open {
             self.shortcuts(&ctx, &mut actions);
+        }
+        let now = ctx.input(|i| i.time);
+        let unsaved: Vec<PathBuf> = self
+            .docs
+            .iter()
+            .filter(|d| d.dirty())
+            .filter_map(|d| d.path.clone())
+            .collect();
+        match self
+            .find_files
+            .ui(&ctx, &pal, self.project.root.as_deref(), &unsaved)
+        {
+            Some(crate::findfiles::Out::Open(path, line)) => {
+                self.open_path(&path, now);
+                if let Some(doc) = self.docs.get_mut(self.active)
+                    && doc.path.as_deref() == Some(path.as_path())
+                {
+                    doc.goto_line(line);
+                }
+            }
+            Some(crate::findfiles::Out::Changed) => {
+                for doc in self.docs.iter_mut().filter(|d| !d.dirty() && d.path.is_some()) {
+                    let _ = doc.reopen_as(doc.encoding);
+                }
+            }
+            None => {}
+        }
+        self.update_ui(&ctx, &pal, now);
+        if let Some(paths) = self.project.drag_out.take() {
+            drag_out(frame, paths);
+        }
+        if self.settings.autosave && now - self.recovery.last > 10.0 {
+            self.recovery.last = now;
+            if let Some(dir) = crate::recover::dir() {
+                let _ = self.recovery.snapshot(&dir, &self.docs);
+            }
+            if !unsaved.is_empty() || self.docs.iter().any(|d| d.dirty()) {
+                ctx.request_repaint_after(std::time::Duration::from_secs(11));
+            }
         }
 
         let bar = Frame::new().fill(pal.mantle);

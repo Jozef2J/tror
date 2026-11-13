@@ -3,7 +3,6 @@ name: build
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
 
 jobs:
@@ -14,29 +13,58 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact: tror-linux-x86_64
-            path: tror-linux-x86_64.tar.gz
           - os: windows-latest
             artifact: tror-windows-x86_64
-            path: target/release/tror.exe
-          - os: macos-15
-            artifact: tror-macos-universal
-            path: Tror-macos.zip
     runs-on: ${{ matrix.os }}
+    env:
+      HAS_CERT: ${{ secrets.WINDOWS_PFX_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
-      - if: runner.os != 'macOS'
-        run: cargo build --release --locked
+      - run: cargo build --release --locked
       - if: runner.os == 'Linux'
         run: tar -czf tror-linux-x86_64.tar.gz -C target/release tror
-      - if: runner.os == 'macOS'
-        run: packaging/macos.sh
-      - uses: actions/upload-artifact@v4
+      - if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.path }}
+          path: tror-linux-x86_64.tar.gz
+      - if: runner.os == 'Windows' && env.HAS_CERT == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\sign.pfx", [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
+          $tool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          "SIGNTOOL=$($tool.FullName)" >> $env:GITHUB_ENV
+          & $tool.FullName sign /f "$env:RUNNER_TEMP\sign.pfx" /p "$env:WINDOWS_PFX_PASSWORD" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 target\release\tror.exe
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:TROR_VERSION = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc packaging\tror.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item target\release\tror.exe tror.exe
+      - if: runner.os == 'Windows' && env.HAS_CERT == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        run: |
+          & $env:SIGNTOOL sign /f "$env:RUNNER_TEMP\sign.pfx" /p "$env:WINDOWS_PFX_PASSWORD" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 tror-setup.exe
+          Remove-Item "$env:RUNNER_TEMP\sign.pfx"
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            tror.exe
+            tror-setup.exe
 
   linux-webview:
     runs-on: ubuntu-latest
@@ -51,3 +79,61 @@ jobs:
         with:
           name: tror-linux-x86_64-webview
           path: tror-linux-x86_64-webview.tar.gz
+
+  release:
+    needs: [build, linux-webview]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "Выпуск v$VERSION уже есть"
+            exit 0
+          fi
+          if [ ! -f dist/tror-windows-x86_64/tror.exe ]; then
+            echo "Нет сборки Windows — выпуск не создаётся"
+            exit 0
+          fi
+          mkdir out
+          cp dist/tror-windows-x86_64/tror.exe dist/tror-windows-x86_64/tror-setup.exe out/
+          if [ -f dist/tror-linux-x86_64/tror-linux-x86_64.tar.gz ]; then
+            tar -xzf dist/tror-linux-x86_64/tror-linux-x86_64.tar.gz -C out
+            mv out/tror out/tror-linux-x86_64
+          fi
+          if [ -f dist/tror-linux-x86_64-webview/tror-linux-x86_64-webview.tar.gz ]; then
+            tar -xzf dist/tror-linux-x86_64-webview/tror-linux-x86_64-webview.tar.gz -C out
+            mv out/tror out/tror-linux-x86_64-webview
+          fi
+          (cd out && sha256sum * > SHA256SUMS)
+          git log -1 --pretty=%B > notes.txt
+          gh release create "v$VERSION" out/* --title "Tror $VERSION" --notes-file notes.txt --target "$GITHUB_SHA"
+
+  macos:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+      - run: packaging/macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tror-macos-universal
+          path: Tror-macos.zip
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          gh release upload "v$VERSION" Tror-macos.zip --clobber || echo "Выпуска v$VERSION ещё нет"

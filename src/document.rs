@@ -1277,6 +1277,52 @@ impl Document {
         self.last_edit = None;
     }
 
+    pub fn bracket_pair(&self, head: usize) -> [Option<usize>; 2] {
+        const OPEN: [char; 3] = ['(', '[', '{'];
+        const CLOSE: [char; 3] = [')', ']', '}'];
+        const REACH: usize = 20_000;
+        let len = self.len();
+        let at = [head, head.wrapping_sub(1)].into_iter().find(|i| {
+            *i < len && {
+                let c = self.rope.char(*i);
+                OPEN.contains(&c) || CLOSE.contains(&c)
+            }
+        });
+        let Some(at) = at else {
+            return [None, None];
+        };
+        let c = self.rope.char(at);
+        let mut depth = 0usize;
+        if let Some(kind) = OPEN.iter().position(|o| *o == c) {
+            for (step, ch) in self.rope.chars_at(at).enumerate().take(REACH) {
+                if ch == OPEN[kind] {
+                    depth += 1;
+                } else if ch == CLOSE[kind] {
+                    depth -= 1;
+                    if depth == 0 {
+                        return [Some(at), Some(at + step)];
+                    }
+                }
+            }
+        } else if let Some(kind) = CLOSE.iter().position(|o| *o == c) {
+            let mut chars = self.rope.chars_at(at + 1);
+            for step in 0..REACH.min(at + 1) {
+                let Some(ch) = chars.prev() else {
+                    break;
+                };
+                if ch == CLOSE[kind] {
+                    depth += 1;
+                } else if ch == OPEN[kind] {
+                    depth -= 1;
+                    if depth == 0 {
+                        return [Some(at), Some(at - step)];
+                    }
+                }
+            }
+        }
+        [Some(at), None]
+    }
+
     pub fn goto_line(&mut self, line: usize) {
         let line = line.clamp(1, self.line_count()) - 1;
         let pos = self.rope.line_to_char(line);
@@ -1288,6 +1334,19 @@ impl Document {
 mod tests {
     use super::*;
     use encoding_rs::WINDOWS_1251;
+
+    #[test]
+    fn bracket_pair_respects_nesting_in_both_directions() {
+        let mut doc = Document::empty(1, 1);
+        doc.insert_text("a(b[c]{d}(e))f");
+        assert_eq!(doc.bracket_pair(1), [Some(1), Some(12)]);
+        assert_eq!(doc.bracket_pair(13), [Some(12), Some(1)]);
+        assert_eq!(doc.bracket_pair(3), [Some(3), Some(5)]);
+        assert_eq!(doc.bracket_pair(0), [None, None]);
+        let mut open = Document::empty(2, 2);
+        open.insert_text("(x");
+        assert_eq!(open.bracket_pair(0), [Some(0), None]);
+    }
 
     fn text(doc: &Document) -> String {
         doc.rope.to_string()

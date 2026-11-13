@@ -26,6 +26,7 @@ pub struct Look {
     pub font_size: f32,
     pub line_spacing: f32,
     pub radius: u8,
+    pub tab_width: u8,
     pub log_dark: Colors,
     pub log_light: Colors,
 }
@@ -54,6 +55,7 @@ impl Default for Look {
             font_size: 14.0,
             line_spacing: 1.5,
             radius: 7,
+            tab_width: 4,
             log_dark: Colors::new(),
             log_light: Colors::new(),
         }
@@ -98,6 +100,7 @@ impl Look {
         self.font_size = self.font_size.clamp(8.0, 40.0);
         self.line_spacing = self.line_spacing.clamp(1.0, 3.0);
         self.radius = self.radius.min(16);
+        self.tab_width = self.tab_width.clamp(1, 16);
         self.accent = self.accent.min(theme::ACCENTS.len() - 1);
     }
 }
@@ -112,6 +115,8 @@ pub struct Edit {
     pub blink: bool,
     pub suggest: bool,
     pub hints: bool,
+    pub whitespace: bool,
+    pub brackets: bool,
 }
 
 impl Default for Edit {
@@ -124,6 +129,8 @@ impl Default for Edit {
             blink: true,
             suggest: true,
             hints: true,
+            whitespace: false,
+            brackets: true,
         }
     }
 }
@@ -160,6 +167,8 @@ pub struct Settings {
     pub tab_colors: BTreeMap<String, u8>,
     pub edit: Edit,
     pub restore: bool,
+    pub autosave: bool,
+    pub updates: bool,
     pub scrollback: u32,
     pub db_rows: u32,
     pub columns: [f32; 3],
@@ -195,6 +204,8 @@ impl Default for Settings {
             tab_colors: BTreeMap::new(),
             edit: Edit::default(),
             restore: true,
+            autosave: true,
+            updates: true,
             scrollback: 5000,
             db_rows: 5000,
             columns: crate::widgets::COLUMN_DEFAULTS,
@@ -456,45 +467,72 @@ fn editor_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
         "Переносить длинные строки (Alt+Z)",
         "",
     );
-    let edit = &mut settings.edit;
-    toggle_row(ui, pal, &mut edit.line_numbers, "Номера строк", "");
+    toggle_row(ui, pal, &mut settings.edit.line_numbers, "Номера строк", "");
     toggle_row(
         ui,
         pal,
-        &mut edit.current_line,
+        &mut settings.edit.current_line,
         "Подсвечивать строку с курсором",
         "",
     );
     toggle_row(
         ui,
         pal,
-        &mut edit.blink,
+        &mut settings.edit.blink,
         "Мигающий курсор",
         "Без мигания окно в покое не перерисовывается совсем.",
     );
-    heading(ui, pal, "Отступы", "");
     toggle_row(
         ui,
         pal,
-        &mut edit.spaces,
+        &mut settings.edit.brackets,
+        "Подсвечивать парную скобку",
+        "",
+    );
+    toggle_row(
+        ui,
+        pal,
+        &mut settings.edit.whitespace,
+        "Показывать пробелы и табуляции",
+        "Пробел — точка, табуляция — стрелка.",
+    );
+    heading(ui, pal, "Отступы", "");
+    ui.horizontal(|ui| {
+        ui.label("Ширина табуляции, в пробелах");
+        let mut value = settings.look.tab_width as f32;
+        if crate::widgets::stepper(ui, pal, "tab_width", &mut value, (1.0, 16.0), 1.0, "") {
+            settings.look.tab_width = value as u8;
+        }
+    });
+    ui.add_space(4.0);
+    toggle_row(
+        ui,
+        pal,
+        &mut settings.edit.spaces,
         "Клавиша Tab вставляет пробелы",
         "Иначе вставляется символ табуляции.",
     );
-    if edit.spaces {
+    if settings.edit.spaces {
         ui.horizontal(|ui| {
             ui.label("Пробелов в отступе");
-            let mut value = edit.indent as f32;
+            let mut value = settings.edit.indent as f32;
             if crate::widgets::stepper(ui, pal, "indent", &mut value, (1.0, 8.0), 1.0, "") {
-                edit.indent = value as u8;
+                settings.edit.indent = value as u8;
             }
         });
     }
     heading(ui, pal, "Подсказки", "");
-    toggle_row(ui, pal, &mut edit.suggest, "Автодополнение при наборе", "");
     toggle_row(
         ui,
         pal,
-        &mut edit.hints,
+        &mut settings.edit.suggest,
+        "Автодополнение при наборе",
+        "",
+    );
+    toggle_row(
+        ui,
+        pal,
+        &mut settings.edit.hints,
         "Подсказка параметров функции",
         "Появляется после открывающей скобки.",
     );
@@ -509,6 +547,20 @@ fn tabs_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
         &mut settings.restore,
         "Открывать при запуске файлы прошлого сеанса",
         "Закреплённые вкладки и их порядок тоже восстанавливаются.",
+    );
+    toggle_row(
+        ui,
+        pal,
+        &mut settings.autosave,
+        "Сохранять несохранённые правки для восстановления после сбоя",
+        "Раз в 10 секунд, в служебную папку программы. Сами файлы при этом не перезаписываются.",
+    );
+    toggle_row(
+        ui,
+        pal,
+        &mut settings.updates,
+        "Проверять обновления при запуске",
+        "Один запрос к github.com о последнем выпуске. Ничего не скачивается без вашего согласия.",
     );
     ui.label(
         RichText::new(

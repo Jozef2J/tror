@@ -1,6 +1,6 @@
 [package]
 name = "tror"
-version = "0.15.1"
+version = "0.16.0"
 description = "Быстрый компактный редактор кода"
 edition = "2024"
 
@@ -15,16 +15,19 @@ encoding_rs = "0.8.44"
 flate2 = "1.1.11"
 log = "0.4.35"
 memchr = "2.8.3"
-mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust"] }
+mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust", "native-tls"] }
 native-tls = "0.2.18"
 ocb3 = "0.2.0"
 postgres = "0.19.14"
+postgres-native-tls = "0.5"
 regex = "1.13.1"
 rfd = "0.18.0"
 ropey = { version = "1", default-features = false, features = ["simd"] }
 rusqlite = { version = "0.42.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.10"
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
 similar = "3.2.1"
 ssh2 = { version = "0.9.7", features = ["vendored-openssl"] }
 suppaftp = { version = "12.2.1", features = ["deprecated", "native-tls"] }
@@ -43,6 +46,7 @@ strip = true
 winresource = "0.1"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+drag = "2.1.1"
 wry = { version = "0.57.2", default-features = false, features = ["os-webview"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

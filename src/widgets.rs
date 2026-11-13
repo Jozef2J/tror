@@ -456,7 +456,7 @@ pub fn stepper(
     (*value - before).abs() > f32::EPSILON
 }
 
-pub const COLUMN_DEFAULTS: [f32; 3] = [52.0, 34.0, 94.0];
+pub const COLUMN_DEFAULTS: [f32; 3] = [52.0, 34.0, 106.0];
 pub const COLUMN_GAP: f32 = 8.0;
 static COLUMNS: std::sync::Mutex<[f32; 3]> = std::sync::Mutex::new(COLUMN_DEFAULTS);
 

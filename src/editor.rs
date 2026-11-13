@@ -30,7 +30,41 @@ pub struct View<'a> {
     pub font_size: f32,
     pub line_spacing: f32,
     pub edit: crate::prefs::Edit,
+    pub macros: &'a mut Macro,
     pub complete: &'a mut Completion,
+}
+
+#[derive(Default)]
+pub struct Macro {
+    pub recording: bool,
+    pub events: Vec<Event>,
+    pub play: u32,
+}
+
+impl Macro {
+    fn feed(&mut self, events: &mut Vec<Event>) {
+        if self.recording {
+            self.events.extend(
+                events
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            event,
+                            Event::Text(_)
+                                | Event::Paste(_)
+                                | Event::Copy
+                                | Event::Cut
+                                | Event::Key { pressed: true, .. }
+                        )
+                    })
+                    .cloned(),
+            );
+        } else {
+            for _ in 0..std::mem::take(&mut self.play) {
+                events.extend(self.events.iter().cloned());
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -451,9 +485,10 @@ enum Typed {
     Backspace,
 }
 
-fn handle_events(ui: &Ui, doc: &mut Document, m: &Metrics) -> Typed {
+fn handle_events(ui: &Ui, doc: &mut Document, m: &Metrics, macros: &mut Macro) -> Typed {
     let mut typed = Typed::None;
-    let events = ui.input(|i| i.events.clone());
+    let mut events = ui.input(|i| i.events.clone());
+    macros.feed(&mut events);
     for event in events {
         if let Event::Key {
             key,
@@ -853,6 +888,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         font_size,
         line_spacing,
         edit,
+        macros,
         complete,
     } = view;
     let font = FontId::monospace(font_size);
@@ -950,7 +986,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             complete.accept(doc);
         }
         let stepped = complete.open;
-        let typed = handle_events(ui, doc, &m);
+        let typed = handle_events(ui, doc, &m, macros);
         if doc.multi() {
             complete.close();
             complete.hint = None;
@@ -1282,6 +1318,11 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     let sel = doc.selection();
     let head = doc.sel.1;
     let head_line = doc.rope.char_to_line(head);
+    let pair = if edit.brackets && sel.is_empty() {
+        doc.bracket_pair(head)
+    } else {
+        [None, None]
+    };
     let sorted = (sel.start, sel.end);
     let mut cursor_rect = None;
     let mut extra_rects: Vec<Rect> = Vec::new();
@@ -1410,6 +1451,41 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 layout.galley.clone(),
                 doc.hl.default_color,
             );
+        }
+        if edit.whitespace && layout.grid == 0 && layout.len <= LONG_LINE {
+            let mark = pal.faint.gamma_multiply(0.55);
+            for (col, ch) in doc.rope.line(line).chars().enumerate() {
+                if ch != ' ' && ch != '\t' {
+                    continue;
+                }
+                let (x, at) = layout.place(col, char_w);
+                let mid = row_top(at) + row_h * 0.5;
+                if ch == ' ' {
+                    painter.circle_filled(egui::pos2(sx(x) + char_w * 0.5, mid), 1.0, mark);
+                } else {
+                    let (next, _) = layout.place(col + 1, char_w);
+                    let (from, to) = (sx(x) + 2.0, (sx(next) - 2.0).max(sx(x) + 6.0));
+                    let stroke = Stroke::new(1.0, mark);
+                    painter.line_segment([egui::pos2(from, mid), egui::pos2(to, mid)], stroke);
+                    painter.line_segment([egui::pos2(to - 3.0, mid - 3.0), egui::pos2(to, mid)], stroke);
+                    painter.line_segment([egui::pos2(to - 3.0, mid + 3.0), egui::pos2(to, mid)], stroke);
+                }
+            }
+        }
+        for at in pair.iter().flatten() {
+            if *at >= line_start && *at < line_end.max(line_start + 1) && layout.grid == 0 {
+                let (x, r) = layout.place(at - line_start, char_w);
+                let top = row_top(r);
+                painter.rect_stroke(
+                    Rect::from_min_max(
+                        egui::pos2(sx(x), top + 1.0),
+                        egui::pos2(sx(x) + char_w, top + row_h - 1.0),
+                    ),
+                    2.0,
+                    Stroke::new(1.0, pal.accent),
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
         if line == head_line {
             let (x, at) = layout.place(head - line_start, char_w);
