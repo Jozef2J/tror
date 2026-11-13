@@ -339,7 +339,8 @@ impl FindFiles {
         let mut open = true;
         let busy = self.rx.is_some();
         egui::Window::new("Поиск в файлах проекта")
-            .open(&mut open)
+            .frame(crate::widgets::window_frame(pal))
+            .title_bar(false)
             .default_size([720.0, 460.0])
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
@@ -347,6 +348,9 @@ impl FindFiles {
             .min_height(240.0)
             .collapsible(false)
             .show(ctx, |ui| {
+                if crate::app::window_header(ui, pal, "Поиск в файлах проекта", true) {
+                    open = false;
+                }
                 let Some(root) = root else {
                     ui.label(
                         RichText::new("Сначала откройте папку проекта: Файл → Открыть папку.")
@@ -392,8 +396,7 @@ impl FindFiles {
                     go |= ui
                         .add_enabled(
                             ready,
-                            Button::new(RichText::new("Найти").color(Color32::WHITE))
-                                .fill(pal.accent),
+                            crate::widgets::primary("Найти", pal),
                         )
                         .clicked();
                     if busy
@@ -443,7 +446,7 @@ impl FindFiles {
                     self.start(root, ui.ctx());
                 }
                 if !self.note.is_empty() {
-                    ui.label(RichText::new(&self.note).size(12.0).color(pal.subtext));
+                    ui.label(RichText::new(&self.note).small().color(pal.subtext));
                 }
                 ui.separator();
                 ui.spacing_mut().item_spacing.y = 0.0;

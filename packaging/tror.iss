@@ -4,6 +4,7 @@
 AppId={{8F3B6C1E-5C0A-4E4B-9A55-7A6B1C0D2E11}
 AppName=Tror
 AppVersion={#Version}
+AppVerName=Tror
 AppPublisher=Jozef2J
 AppPublisherURL=https://github.com/Jozef2J/tror
 DefaultDirName={autopf}\Tror
@@ -48,3 +49,4 @@ Root: HKA; Subkey: "Software\Classes\Directory\shell\Tror\command"; ValueType: s
 
 [Run]
 Filename: "{app}\tror.exe"; Description: "{cm:LaunchProgram,Tror}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\tror.exe"; Flags: nowait runasoriginaluser; Check: WizardSilent

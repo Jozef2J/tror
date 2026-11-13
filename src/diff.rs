@@ -274,11 +274,11 @@ impl DiffPanel {
                         self.added,
                         self.removed
                     ))
-                    .size(12.5)
+                    .small()
                     .color(pal.subtext),
                 );
             }
-            ui.label(RichText::new(&self.note).size(12.5).color(pal.subtext));
+            ui.label(RichText::new(&self.note).small().color(pal.subtext));
         });
         ui.add_space(6.0);
         if self.rows.is_empty() {

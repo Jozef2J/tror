@@ -96,6 +96,7 @@ enum Action {
     FindFiles,
     MacroRecord,
     MacroPlay,
+    Fold(u8),
     Goto(u64, usize),
     Plugin(usize),
     Detach(Pane),
@@ -113,6 +114,7 @@ struct Updater {
     manual: bool,
     busy: bool,
     swapped: bool,
+    setup: Option<std::path::PathBuf>,
     error: String,
 }
 
@@ -157,37 +159,40 @@ pub(crate) fn size_label(bytes: usize) -> String {
 }
 
 pub(crate) fn dialog_button(ui: &mut Ui, pal: &Palette, text: &str, primary: bool) -> bool {
-    let (fill, color) = if primary {
-        (pal.accent, pal.base)
+    let button = if primary {
+        crate::widgets::primary(text, pal)
     } else {
-        (pal.surface, pal.text)
+        crate::widgets::secondary(text, pal)
     };
-    ui.add(
-        Button::new(RichText::new(text).color(color))
-            .fill(fill)
-            .min_size(egui::vec2(0.0, 28.0)),
-    )
-    .clicked()
+    ui.add(button.min_size(egui::vec2(0.0, 28.0))).clicked()
+}
+
+pub(crate) fn window_header(ui: &mut Ui, pal: &Palette, title: &str, closable: bool) -> bool {
+    let mut close = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).size(15.5).color(pal.text));
+        if closable {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                close = icon_button(ui, pal, Icon::Close).clicked();
+            });
+        }
+    });
+    ui.add_space(4.0);
+    close
 }
 
 pub(crate) fn dialog(id: impl std::hash::Hash + std::fmt::Debug, pal: &Palette) -> Modal {
-    Modal::new(egui::Id::unique(id)).frame(
-        Frame::new()
-            .fill(pal.mantle)
-            .stroke(Stroke::new(1.0, pal.border))
-            .corner_radius(12)
-            .inner_margin(Margin::same(18)),
-    )
+    Modal::new(egui::Id::unique(id)).frame(crate::widgets::window_frame(pal))
 }
 
 #[derive(Clone, Copy)]
-enum Icon {
+pub(crate) enum Icon {
     Up,
     Down,
     Close,
 }
 
-fn icon_button(ui: &mut Ui, pal: &Palette, icon: Icon) -> egui::Response {
+pub(crate) fn icon_button(ui: &mut Ui, pal: &Palette, icon: Icon) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), Sense::click());
     if response.hovered() {
         ui.painter().rect_filled(rect, 6.0, pal.surface);
@@ -290,9 +295,6 @@ pub struct TrorApp {
     db: DbPanel,
     preview: Preview,
     plugins: crate::plugins::Plugins,
-    embedded: crate::webview::Embedded,
-    page: Option<String>,
-    page_area: Option<Rect>,
     console_shown: bool,
     settings_shown: bool,
     logo: Option<egui::TextureHandle>,
@@ -324,6 +326,9 @@ impl TrorApp {
             .and_then(|s| eframe::get_value::<DockState<Pane>>(s, DOCK_KEY))
             .unwrap_or_else(dock::new);
         dock::translate(&mut dock);
+        dock::hide(&mut dock, Pane::Preview);
+        settings.detached.retain(|p| *p != Pane::Preview);
+        crate::preview::forget_webview();
         crate::trace::install();
         let hosts = settings
             .hosts
@@ -362,9 +367,6 @@ impl TrorApp {
             diff: DiffPanel::default(),
             db: DbPanel::default(),
             preview: Preview::default(),
-            embedded: crate::webview::Embedded::default(),
-            page: None,
-            page_area: None,
             plugins: crate::plugins::Plugins::new(
                 eframe::storage_dir("Tror").map(|dir| dir.join("plugins")),
             ),
@@ -604,14 +606,18 @@ impl TrorApp {
                         self.notify(format!("Обновление не удалось: {e}"), now);
                     }
                 }
-                Event::Ready(path, kind) => match crate::update::apply(&path, kind) {
-                    Ok(()) if kind == Kind::Installer => {
-                        self.update.found = None;
-                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                Event::Ready(path, Kind::Installer) => {
+                    self.update.setup = Some(path);
+                    self.update.found = None;
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                }
+                Event::Ready(path, _) => {
+                    let version = self.update.found.as_ref().map(|r| r.version.clone()).unwrap_or_default();
+                    match crate::update::apply(&path, &version) {
+                        Ok(()) => self.update.swapped = true,
+                        Err(e) => self.notify(format!("Обновление не удалось: {e}"), now),
                     }
-                    Ok(()) => self.update.swapped = true,
-                    Err(e) => self.notify(format!("Обновление не удалось: {e}"), now),
-                },
+                }
             }
         }
         let Some(release) = self.update.found.clone() else {
@@ -619,77 +625,72 @@ impl TrorApp {
         };
         let kind = crate::update::kind();
         let mut close = false;
+        let notes = crate::update::notes(&release.notes);
         egui::Window::new("Доступно обновление")
+            .title_bar(false)
             .collapsible(false)
             .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
+            .frame(crate::widgets::window_frame(pal))
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0))
             .show(ctx, |ui| {
                 ui.set_width(440.0);
-                ui.label(format!(
-                    "Вышла версия {} — у вас {}.",
-                    release.version,
-                    env!("CARGO_PKG_VERSION")
-                ));
-                if !release.notes.trim().is_empty() {
-                    ui.add_space(4.0);
-                    egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-                        ui.label(RichText::new(release.notes.trim()).size(12.5).color(pal.subtext));
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(RichText::new("Доступно обновление").small().color(pal.accent));
+                        ui.label(RichText::new(format!("Tror {}", release.version)).size(17.0).color(pal.text));
                     });
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        ui.label(RichText::new(format!("у вас {}", env!("CARGO_PKG_VERSION"))).small().color(pal.faint));
+                    });
+                });
+                if !notes.is_empty() {
+                    ui.separator();
+                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 5.0;
+                        for (i, (bullet, line)) in notes.iter().enumerate() {
+                            if *bullet {
+                                ui.horizontal_top(|ui| {
+                                    ui.label(RichText::new("•").color(pal.accent));
+                                    ui.add(egui::Label::new(RichText::new(line).color(pal.subtext)).wrap());
+                                });
+                            } else if i == 0 {
+                                ui.add(egui::Label::new(RichText::new(line).color(pal.text)).wrap());
+                            } else {
+                                ui.add(egui::Label::new(RichText::new(line).color(pal.subtext)).wrap());
+                            }
+                        }
+                    });
+                    ui.separator();
                 }
-                ui.add_space(8.0);
                 if self.update.swapped {
-                    ui.label("Новая версия установлена и запустится при следующем старте программы.");
-                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if ui
-                            .add(Button::new(RichText::new("Перезапустить сейчас").color(Color32::WHITE)).fill(pal.accent))
-                            .clicked()
-                        {
+                        if ui.add(crate::widgets::primary("Перезапустить сейчас", pal)).clicked() {
                             match crate::update::restart() {
                                 Ok(()) => ctx.send_viewport_cmd(ViewportCommand::Close),
                                 Err(e) => self.update.error = e,
                             }
                         }
-                        close = ui.button("Позже").clicked();
+                        close = ui.add(crate::widgets::secondary("Позже", pal)).clicked();
                     });
                 } else if self.update.busy {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Скачиваю и проверяю файл…");
+                        ui.label(RichText::new("Скачиваю и проверяю файл…").color(pal.subtext));
                     });
                 } else {
                     let can_install = kind != Kind::Page && release.file.is_some() && release.sums.is_some();
-                    if !can_install {
-                        ui.label(
-                            RichText::new("Для этой установки обновление ставится вручную со страницы выпуска.")
-                                .size(12.0)
-                                .color(pal.faint),
-                        );
-                    } else if kind == Kind::Installer {
-                        ui.label(
-                            RichText::new("Будет скачан и запущен установщик; программа закроется. Несохранённые файлы предложит сохранить.")
-                                .size(12.0)
-                                .color(pal.faint),
-                        );
-                    }
-                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if can_install
-                            && ui
-                                .add(Button::new(RichText::new("Скачать и установить").color(Color32::WHITE)).fill(pal.accent))
-                                .clicked()
-                        {
+                        if can_install && ui.add(crate::widgets::primary("Скачать и установить", pal)).clicked() {
                             self.update.busy = true;
                             self.update.rx = Some(crate::update::download(release.clone()));
                         }
-                        if ui.button("Открыть страницу выпуска").clicked() {
+                        if ui.add(crate::widgets::secondary("Открыть страницу выпуска", pal)).clicked() {
                             let _ = preview::open_url(crate::update::PAGE);
                         }
-                        close = ui.button("Позже").clicked();
+                        close = ui.add(crate::widgets::secondary("Позже", pal)).clicked();
                     });
-                    ui.add_space(4.0);
-                    ui.checkbox(&mut self.settings.updates, "Проверять обновления при запуске");
                 }
                 if !self.update.error.is_empty() {
                     ui.label(RichText::new(&self.update.error).color(pal.warn));
@@ -914,7 +915,6 @@ impl TrorApp {
                     if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc.0) {
                         d.mark_saved(doc.1);
                     }
-                    self.embedded.reload();
                     self.notify(format!("Сохранено на сервере: {path}"), now);
                 }
                 PanelEvent::Open {
@@ -1028,9 +1028,6 @@ impl TrorApp {
             Ok(()) => {
                 let title = doc.title();
                 self.preview.touch();
-                if self.page.as_deref().is_some_and(|url| url.contains(".php")) {
-                    self.embedded.reload();
-                }
                 self.notify(format!("Сохранено: {title}"), now);
                 true
             }
@@ -1249,6 +1246,22 @@ impl TrorApp {
                     self.goto = Some(String::new());
                 }
             }
+            Action::Fold(kind) => {
+                if let Some(doc) = self.docs.get_mut(self.active) {
+                    match kind {
+                        0 => {
+                            doc.fold_here();
+                        }
+                        1 => {
+                            doc.unfold_here();
+                        }
+                        2 => doc.fold_all(),
+                        _ => doc.unfold_all(),
+                    }
+                    doc.reveal = true;
+                }
+                self.focus_editor = true;
+            }
             Action::ToggleTheme => self.settings.look.dark = !self.settings.look.dark,
             Action::ToggleWrap => self.settings.wrap = !self.settings.wrap,
             Action::Toggle(pane) => {
@@ -1292,10 +1305,6 @@ impl TrorApp {
                     },
                 };
                 match url {
-                    Ok(url) if crate::webview::AVAILABLE => {
-                        self.page = Some(url);
-                        dock::show(&mut self.dock, Pane::Preview, &self.settings.floats);
-                    }
                     Ok(url) => match preview::open_url(&url) {
                         Ok(()) => self.notify(format!("Открыто в браузере: {url}"), now),
                         Err(e) => self.notify(format!("Предпросмотр: {e}"), now),
@@ -1432,6 +1441,10 @@ impl TrorApp {
                 "find_next" => Action::FindNext,
                 "find_prev" => Action::FindPrev,
                 "goto" => Action::GotoLine,
+                "fold" => Action::Fold(0),
+                "unfold" => Action::Fold(1),
+                "fold_all" => Action::Fold(2),
+                "unfold_all" => Action::Fold(3),
                 "wrap" => Action::ToggleWrap,
                 "theme" => Action::ToggleTheme,
                 "settings" => Action::Show(Pane::Settings),
@@ -1560,6 +1573,17 @@ impl TrorApp {
                 ui.separator();
                 if item(ui, "Перейти к строке…", &key("goto"), has_doc) {
                     actions.push(Action::GotoLine);
+                }
+                ui.separator();
+                for (kind, label, id) in [
+                    (0, "Свернуть блок", "fold"),
+                    (1, "Развернуть блок", "unfold"),
+                    (2, "Свернуть всё", "fold_all"),
+                    (3, "Развернуть всё", "unfold_all"),
+                ] {
+                    if item(ui, label, &key(id), has_doc) {
+                        actions.push(Action::Fold(kind));
+                    }
                 }
                 ui.separator();
                 if item(ui, "Найти в файлах проекта…", &key("find_files"), true) {
@@ -2045,7 +2069,7 @@ impl TrorApp {
                 };
                 if ui
                     .add(
-                        Button::new(RichText::new(label).size(12.0).color(pal.subtext))
+                        Button::new(RichText::new(label).small().color(pal.subtext))
                             .frame(false),
                     )
                     .clicked()
@@ -2053,7 +2077,7 @@ impl TrorApp {
                     s.replace_mode = !s.replace_mode;
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.add(egui::Label::new(info.size(12.0)).truncate());
+                    ui.add(egui::Label::new(info.small()).truncate());
                 });
             });
         });
@@ -2076,14 +2100,14 @@ impl TrorApp {
                 ui.label(
                     RichText::new(toast.unwrap_or_default())
                         .color(pal.subtext)
-                        .size(12.5),
+                        .small(),
                 );
                 return;
             };
             let left = toast.unwrap_or_else(|| doc.location().unwrap_or_else(|| doc.title()));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                let small = |text: String| RichText::new(text).size(12.5).color(pal.subtext);
+                let small = |text: String| RichText::new(text).small().color(pal.subtext);
 
                 ui.menu_button(small(doc.eol.label().into()), |ui| {
                     for eol in [Eol::Lf, Eol::Crlf, Eol::Cr] {
@@ -2642,51 +2666,6 @@ impl TrorApp {
         }
     }
 
-    fn preview_pane(&mut self, ui: &mut Ui, pal: &Palette) {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            if ui.add(Button::new("Обновить").fill(pal.surface)).clicked() {
-                self.embedded.reload();
-            }
-            if let Some(url) = &self.page {
-                if ui
-                    .add(Button::new("В браузере").fill(pal.surface))
-                    .clicked()
-                {
-                    let _ = preview::open_url(url);
-                }
-                ui.add(
-                    egui::Label::new(RichText::new(url).size(12.5).color(pal.subtext)).truncate(),
-                );
-            }
-        });
-        ui.add_space(4.0);
-        let area = ui.available_rect_before_wrap();
-        ui.painter().rect_filled(area, 0.0, pal.base);
-        let note = if let Some(error) = &self.embedded.error {
-            format!(
-                "Встроенный просмотр не запустился: {error}\nСтраницу можно открыть кнопкой «В браузере»."
-            )
-        } else if !crate::webview::AVAILABLE {
-            "Встроенный предпросмотр есть в сборках для Windows, macOS и в сборке Linux с WebKitGTK (tror-linux-x86_64-webview).\nЗдесь F12 открывает страницу в системном браузере.".to_owned()
-        } else if self.page.is_none() {
-            "Откройте файл и нажмите F12".to_owned()
-        } else {
-            "Страница скрыта, пока открыто меню или диалог".to_owned()
-        };
-        ui.painter().text(
-            area.center(),
-            egui::Align2::CENTER_CENTER,
-            note,
-            FontId::proportional(13.0),
-            pal.faint,
-        );
-        if self.page.is_some() {
-            self.page_area = Some(area);
-        }
-    }
-
     fn log_pane(&mut self, ui: &mut Ui, pal: &Palette) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -2704,7 +2683,7 @@ impl TrorApp {
                     ui.add(
                         egui::Label::new(
                             RichText::new("Сырой обмен с сервером: команды и ответы FTP, этапы SSH/SFTP, запросы к базе")
-                                .size(12.0)
+                                .small()
                                 .color(pal.faint),
                         )
                         .truncate(),
@@ -2998,7 +2977,7 @@ impl TabViewer for Viewer<'_> {
                 }
             }
             Pane::Db => app.db.ui(ui, &pal, &mut app.remotes[0].store, font_size),
-            Pane::Preview => app.preview_pane(ui, &pal),
+            Pane::Preview => {}
         };
         let (min_w, min_h) = pane.min_size();
         let room = ui.available_size();
@@ -3130,6 +3109,12 @@ fn drag_out(frame: &eframe::Frame, paths: Vec<PathBuf>) {
 fn drag_out(_frame: &eframe::Frame, _paths: Vec<PathBuf>) {}
 
 impl eframe::App for TrorApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(path) = self.update.setup.take() {
+            let _ = crate::update::run_setup(&path);
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let started = std::time::Instant::now();
         let ctx = ui.ctx().clone();
@@ -3350,7 +3335,6 @@ impl eframe::App for TrorApp {
         let style = dock::style(&pal, ui.style(), self.settings.look.radius);
         self.console_shown = false;
         self.settings_shown = false;
-        self.page_area = None;
         CentralPanel::no_frame().show(ui, |ui| {
             let mut viewer = Viewer {
                 app: self,
@@ -3429,17 +3413,6 @@ impl eframe::App for TrorApp {
         if !self.settings_shown {
             self.capturing = None;
         }
-        let covered = modal_open || ctx.any_popup_open() || ctx.dragged_id().is_some();
-        match (&self.page, self.page_area) {
-            (Some(url), Some(area)) if !covered => {
-                self.embedded.show(frame, url, area, ctx.pixels_per_point());
-            }
-            _ => self.embedded.hide(),
-        }
-        crate::webview::pump(
-            &ctx,
-            self.page.is_some() && dock::has(&self.dock, Pane::Preview),
-        );
 
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             let screen = ctx.content_rect();

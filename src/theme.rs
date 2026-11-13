@@ -337,7 +337,7 @@ pub fn apply(ctx: &egui::Context, p: &Palette, dark: bool, radius: u8, ui_size: 
         for (style, size) in [
             (egui::TextStyle::Body, ui_size),
             (egui::TextStyle::Button, ui_size),
-            (egui::TextStyle::Small, ui_size - 2.0),
+            (egui::TextStyle::Small, ui_size - 1.5),
             (egui::TextStyle::Heading, ui_size + 4.5),
             (egui::TextStyle::Monospace, ui_size - 0.5),
         ] {

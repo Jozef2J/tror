@@ -214,6 +214,30 @@ pub fn open_folder(path: &Path) -> Result<(), String> {
     open_url(&path.display().to_string())
 }
 
+pub fn forget_webview() {
+    let mut dirs = Vec::new();
+    if cfg!(windows)
+        && let Ok(exe) = std::env::current_exe()
+        && let (Some(dir), Some(name)) = (exe.parent(), exe.file_name())
+    {
+        dirs.push(dir.join(format!("{}.WebView2", name.to_string_lossy())));
+    }
+    if cfg!(target_os = "macos")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        let home = PathBuf::from(home).join("Library");
+        dirs.push(home.join("WebKit/io.github.jozef2j.tror"));
+        dirs.push(home.join("Caches/io.github.jozef2j.tror/WebKit"));
+    }
+    std::thread::spawn(move || {
+        for dir in dirs {
+            if dir.is_dir() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    });
+}
+
 fn free_port() -> Result<u16, String> {
     TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())

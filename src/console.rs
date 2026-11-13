@@ -549,7 +549,7 @@ impl ConsolePanel {
                             ui.menu_button("Оформление сеанса", |ui| {
                                 ui.set_min_width(220.0);
                                 ui.label(
-                                    RichText::new("Цветовая схема").size(12.0).color(pal.faint),
+                                    RichText::new("Цветовая схема").small().color(pal.faint),
                                 );
                                 ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                                     if ui
@@ -587,7 +587,7 @@ impl ConsolePanel {
                         ui.separator();
                         ui.label(
                             RichText::new("Разделение экрана")
-                                .size(12.0)
+                                .small()
                                 .color(pal.faint),
                         );
                         for split in [Split::Single, Split::Columns, Split::Rows, Split::Grid] {
@@ -1055,8 +1055,8 @@ impl ConsolePanel {
                                 if !p.key_file.trim().is_empty() {
                                     ui.label("");
                                     match remote::key_kind(&p.key_file) {
-                                        Ok(kind) => ui.label(RichText::new(format!("ключ: {kind}")).size(12.0).color(pal.subtext)),
-                                        Err(e) => ui.label(RichText::new(e).size(12.0).color(pal.warn)),
+                                        Ok(kind) => ui.label(RichText::new(format!("ключ: {kind}")).small().color(pal.subtext)),
+                                        Err(e) => ui.label(RichText::new(e).small().color(pal.warn)),
                                     };
                                     ui.end_row();
                                     ui.label("Парольная фраза");
@@ -1093,7 +1093,7 @@ impl ConsolePanel {
                                         Ok(text) => (format!("Работает: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
                                         Err(e) => (format!("Ошибка: {e}"), pal.warn),
                                     };
-                                    ui.label(RichText::new(text).size(12.5).color(color));
+                                    ui.label(RichText::new(text).small().color(color));
                                 }
                             });
                             ui.end_row();
@@ -1106,7 +1106,7 @@ impl ConsolePanel {
                         TermProtocol::Mosh => "Mosh входит по SSH, запускает на сервере mosh-server и дальше работает по UDP: сеанс переживает обрывы, смену сети и сон ноутбука. На сервере должен быть установлен mosh, а порты UDP 60000–61000 — открыты.",
                     };
                     let color = if p.protocol == TermProtocol::Telnet { pal.warn } else { pal.subtext };
-                    ui.label(RichText::new(note).size(12.0).color(color));
+                    ui.label(RichText::new(note).small().color(color));
                 });
             });
             ui.add_space(10.0);

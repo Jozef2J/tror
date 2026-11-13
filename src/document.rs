@@ -246,6 +246,10 @@ pub struct Document {
     pub max_line_chars: usize,
     pub content_w: f64,
     pub activity: f64,
+    pub folds: Vec<(usize, usize)>,
+    pub hidden: Vec<(usize, usize)>,
+    pub(crate) skip: Vec<usize>,
+    pub(crate) ends: std::cell::RefCell<(u64, std::collections::HashMap<usize, Option<usize>>)>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     last_edit: Option<(EditKind, Instant)>,
@@ -299,6 +303,10 @@ impl Document {
             max_line_chars: 0,
             content_w: 0.0,
             activity: 0.0,
+            folds: Vec::new(),
+            hidden: Vec::new(),
+            skip: vec![0],
+            ends: Default::default(),
             undo: Vec::new(),
             redo: Vec::new(),
             last_edit: None,
@@ -433,6 +441,7 @@ impl Document {
             (Rope::from_str(text), longest_line(text))
         };
         self.rope = rope;
+        self.drop_folds();
         self.max_line_chars = longest;
         self.hl = Highlighter::default();
         self.sel = (0, 0);
@@ -587,6 +596,7 @@ impl Document {
             old_end_line - start_line + 1,
             new_end_line - start_line + 1,
         );
+        self.shift_folds(start_line, old_end_line, new_end_line);
         if new_end_line - start_line < 64 {
             for line in start_line..=new_end_line {
                 self.max_line_chars = self.max_line_chars.max(self.line_len(line));
@@ -613,6 +623,7 @@ impl Document {
     pub fn set_text(&mut self, text: &str) {
         self.checkpoint(EditKind::Other);
         self.rope = Rope::from_str(text);
+        self.drop_folds();
         self.max_line_chars = longest_line(text);
         self.hl.reset();
         let pos = self.sel.1.min(self.len());
@@ -625,6 +636,7 @@ impl Document {
         self.block = None;
         self.hl.replace_all(&self.rope, &snapshot.rope);
         self.rope = snapshot.rope;
+        self.drop_folds();
         self.sel = snapshot.sel;
         self.version = snapshot.version;
         self.max_line_chars = self.max_line_chars.max(snapshot.max_line_chars);

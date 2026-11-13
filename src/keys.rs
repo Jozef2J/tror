@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use eframe::egui::{Key, KeyboardShortcut, Modifiers};
 
-pub const COMMANDS: [(&str, &str, &str, bool); 29] = [
+pub const COMMANDS: [(&str, &str, &str, bool); 33] = [
     ("new", "Новый файл", "Ctrl+N", true),
     ("open", "Открыть файл", "Ctrl+O", true),
     ("open_folder", "Открыть папку", "Ctrl+Shift+O", true),
@@ -18,6 +18,10 @@ pub const COMMANDS: [(&str, &str, &str, bool); 29] = [
     ("find_next", "Найти далее", "F3", true),
     ("find_prev", "Найти ранее", "Shift+F3", true),
     ("goto", "Перейти к строке", "Ctrl+G", true),
+    ("fold", "Свернуть блок", "Ctrl+Alt+F", true),
+    ("unfold", "Развернуть блок", "Ctrl+Alt+Shift+F", true),
+    ("fold_all", "Свернуть всё", "Alt+0", true),
+    ("unfold_all", "Развернуть всё", "", true),
     ("find_files", "Найти в файлах проекта", "Ctrl+Shift+F", true),
     ("macro_record", "Запись макроса: начать или остановить", "Ctrl+Shift+R", true),
     ("macro_play", "Выполнить макрос", "Ctrl+Shift+P", true),

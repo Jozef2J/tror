@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
@@ -223,6 +223,14 @@ enum Engine {
 }
 
 impl Engine {
+    fn alive(&mut self) -> bool {
+        match self {
+            Engine::My(conn) => conn.ping().is_ok(),
+            Engine::Pg(client) => !client.is_closed() && client.simple_query("SELECT 1").is_ok(),
+            Engine::Lite(_) => true,
+        }
+    }
+
     fn kind(&self) -> DbKind {
         match self {
             Engine::My(_) => DbKind::MySql,
@@ -532,68 +540,57 @@ fn open_engine(profile: &DbProfile, host: String, port: u16) -> Result<(Engine, 
     }
 }
 
-fn test_profile(profile: DbProfile, ssh: Option<(Profile, Option<String>)>) -> Result<String, String> {
-    let mut host = profile.host.trim().to_owned();
-    let mut port = profile.port;
-    let mut _tunnel = None;
-    if profile.kind != DbKind::Sqlite
-        && let Some((ssh, known)) = ssh
-    {
-        let tunnel = remote::tunnel(&ssh, known.as_deref(), &host, port)?;
-        host = "127.0.0.1".into();
-        port = tunnel.port;
-        _tunnel = Some(tunnel);
-    }
-    let (mut engine, version) = open_engine(&profile, host, port)?;
+fn test_profile(profile: DbProfile, ssh: Ssh) -> Result<String, String> {
+    let (mut engine, version, _tunnel) = link(&profile, &ssh)?;
     engine.query("SELECT 1")?;
     Ok(version)
 }
 
-fn serve(
-    profile: DbProfile,
-    ssh: Option<(Profile, Option<String>)>,
-    cmds: Receiver<Cmd>,
-    events: Sender<Event>,
-    wake: &dyn Fn(),
-) {
+type Ssh = Option<(Profile, Option<String>)>;
+
+fn link(profile: &DbProfile, ssh: &Ssh) -> Result<(Engine, String, Option<remote::Tunnel>), String> {
+    let mut host = profile.host.trim().to_owned();
+    let mut port = profile.port;
+    let mut tunnel = None;
+    if profile.kind != DbKind::Sqlite
+        && let Some((ssh, known)) = ssh
+    {
+        let open = remote::tunnel(ssh, known.as_deref(), &host, port)
+            .map_err(|e| format!("туннель: {e}"))?;
+        host = "127.0.0.1".into();
+        port = open.port;
+        tunnel = Some(open);
+    }
+    let (engine, version) = open_engine(profile, host, port)?;
+    Ok((engine, version, tunnel))
+}
+
+const KEEPALIVE: Duration = Duration::from_secs(25);
+
+fn serve(profile: DbProfile, ssh: Ssh, cmds: Receiver<Cmd>, events: Sender<Event>, wake: &dyn Fn()) {
     let send = |event: Event| {
         let _ = events.send(event);
         wake();
     };
-    let mut host = profile.host.trim().to_owned();
-    let mut port = profile.port;
-    let mut _tunnel = None;
-    if profile.kind != DbKind::Sqlite
-        && let Some((ssh, known)) = ssh
-    {
-        match remote::tunnel(&ssh, known.as_deref(), &host, port) {
-            Ok(tunnel) => {
-                host = "127.0.0.1".into();
-                port = tunnel.port;
-                _tunnel = Some(tunnel);
-            }
-            Err(e) => {
-                trace::line(format!("[DB] tunnel failed: {e}"), true);
-                send(Event::Closed(e));
-                return;
-            }
-        }
-    }
     let target = match profile.kind {
         DbKind::Sqlite => format!("sqlite://{}", profile.file.trim()),
         DbKind::MySql => format!(
-            "mysql://{}@{host}:{port}/{}",
+            "mysql://{}@{}:{}/{}",
             profile.user.trim(),
+            profile.host.trim(),
+            profile.port,
             profile.database.trim()
         ),
         DbKind::Postgres => format!(
-            "postgres://{}@{host}:{port}/{}",
+            "postgres://{}@{}:{}/{}",
             profile.user.trim(),
+            profile.host.trim(),
+            profile.port,
             profile.database.trim()
         ),
     };
     trace::line(format!("[DB] connecting to {target}"), false);
-    let (mut engine, version) = match open_engine(&profile, host, port) {
+    let (mut engine, version, mut tunnel) = match link(&profile, &ssh) {
         Ok(ok) => ok,
         Err(e) => {
             trace::line(format!("[DB] {e}"), true);
@@ -603,7 +600,41 @@ fn serve(
     };
     trace::server(format!("[DB] connected, {version}"));
     send(Event::Connected(version));
-    for cmd in cmds {
+    let mut used: Option<String> = None;
+    let mut last = Instant::now();
+    let mut lost = false;
+    let revive = |engine: &mut Engine, tunnel: &mut Option<remote::Tunnel>, used: &Option<String>| {
+        let (fresh, _, open) = link(&profile, &ssh)?;
+        *engine = fresh;
+        *tunnel = open;
+        if let Some(sql) = used {
+            let _ = engine.query(sql);
+        }
+        trace::line("[DB] reconnected", false);
+        Ok::<(), String>(())
+    };
+    loop {
+        let cmd = match cmds.recv_timeout(KEEPALIVE) {
+            Ok(cmd) => cmd,
+            Err(RecvTimeoutError::Timeout) => {
+                if !lost && !engine.alive() {
+                    trace::line("[DB] connection lost", true);
+                    lost = revive(&mut engine, &mut tunnel, &used).is_err();
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        if (lost || last.elapsed() > Duration::from_secs(8)) && !engine.alive() {
+            trace::line("[DB] connection lost", true);
+            if let Err(e) = revive(&mut engine, &mut tunnel, &used) {
+                lost = true;
+                trace::line(format!("[DB] {e}"), true);
+                send(Event::Error(format!("Соединение потеряно, переподключиться не удалось: {e}")));
+                continue;
+            }
+        }
+        lost = false;
         let result = match cmd {
             Cmd::Query(sql, source) => {
                 trace::client(format!("[DB] > {}", sql.trim()));
@@ -614,6 +645,11 @@ fn serve(
                         table.affected,
                         table.elapsed.as_secs_f64() * 1000.0
                     ));
+                    if sql.get(..4).is_some_and(|w| w.eq_ignore_ascii_case("use "))
+                        || sql.get(..16).is_some_and(|w| w.eq_ignore_ascii_case("set search_path "))
+                    {
+                        used = Some(sql.clone());
+                    }
                     let keys = source
                         .as_ref()
                         .map(|s| engine.primary_key(s))
@@ -633,6 +669,7 @@ fn serve(
                 Ok(Event::Result(table, source, keys))
             }),
         };
+        last = Instant::now();
         match result {
             Ok(event) => send(event),
             Err(e) => {
@@ -1028,7 +1065,7 @@ impl DbPanel {
                 ui.spinner();
             }
             ui.add(
-                egui::Label::new(RichText::new(&self.status).size(12.5).color(if self.error {
+                egui::Label::new(RichText::new(&self.status).small().color(if self.error {
                     pal.warn
                 } else {
                     pal.subtext
@@ -1131,7 +1168,7 @@ impl DbPanel {
                 DbKind::Postgres => "Схемы и таблицы",
                 DbKind::Sqlite => "Таблицы",
             };
-            ui.label(RichText::new(title).size(12.0).color(pal.faint));
+            ui.label(RichText::new(title).small().color(pal.faint));
             if ui
                 .small_button("↺")
                 .on_hover_text("Обновить список")
@@ -1243,7 +1280,7 @@ impl DbPanel {
             let run = ui
                 .add_enabled(
                     !self.busy,
-                    Button::new(RichText::new("Выполнить").color(pal.base)).fill(pal.accent),
+                    crate::widgets::primary("Выполнить", pal),
                 )
                 .clicked();
             if (run || (run_key && output.response.has_focus())) && !self.busy {
@@ -1257,7 +1294,7 @@ impl DbPanel {
                 };
                 ui.label(
                     RichText::new(format!("{what}: {}", self.current))
-                        .size(12.5)
+                        .small()
                         .color(pal.subtext),
                 );
             }
@@ -1285,11 +1322,7 @@ impl DbPanel {
                 if count > 0 {
                     if ui
                         .add(
-                            Button::new(
-                                RichText::new(format!("Применить изменения ({count})"))
-                                    .color(pal.base),
-                            )
-                            .fill(pal.accent),
+                            crate::widgets::primary(format!("Применить изменения ({count})"), pal),
                         )
                         .clicked()
                     {
@@ -1350,13 +1383,13 @@ impl DbPanel {
         {
             ui.label(
                 RichText::new("У таблицы нет первичного ключа — правка в сетке недоступна, меняйте данные запросами.")
-                    .size(12.0)
+                    .small()
                     .color(pal.faint),
             );
         } else if self.editable() {
             ui.label(
                 RichText::new("Двойной щелчок по ячейке — правка, Enter — принять, Esc — отмена. Правый щелчок — NULL и удаление строки.")
-                    .size(12.0)
+                    .small()
                     .color(pal.faint),
             );
         }
@@ -1940,13 +1973,13 @@ impl DbPanel {
                     Ok(text) => (format!("Работает: {text}"), egui::Color32::from_rgb(0x3f, 0xc2, 0x6e)),
                     Err(e) => (format!("Ошибка: {e}"), pal.warn),
                 };
-                ui.label(RichText::new(text).size(12.5).color(color));
+                ui.label(RichText::new(text).small().color(color));
             }
             ui.add_space(6.0);
             if p.kind == DbKind::Sqlite {
                 ui.label(
                     RichText::new("Файл SQLite открывается напрямую с этого компьютера. Если файла нет, он будет создан.")
-                        .size(12.0)
+                        .small()
                         .color(pal.subtext),
                 );
             } else {
@@ -1972,14 +2005,14 @@ impl DbPanel {
                          укажите адрес базы так, как его видит сам хост — обычно 127.0.0.1 или localhost, порт {default_port}."
                     )
                 };
-                ui.label(RichText::new(tunnel_note).size(12.0).color(pal.subtext));
+                ui.label(RichText::new(tunnel_note).small().color(pal.subtext));
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(
                         "Пароль хранится в файле профилей в замаскированном, но не зашифрованном виде. \
                          Без TLS и без туннеля пароль и данные идут по сети открыто.",
                     )
-                    .size(12.0)
+                    .small()
                     .color(pal.faint),
                 );
             }
@@ -2066,7 +2099,7 @@ impl DbPanel {
             ui.label(
                 RichText::new("Будут выполнены запросы, в одной транзакции:")
                     .color(pal.subtext)
-                    .size(12.5),
+                    .small(),
             );
             ui.add_space(6.0);
             ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
@@ -2290,5 +2323,68 @@ mod tests {
         let table = engine.query("SELECT price FROM goods WHERE id = 2").unwrap();
         assert_eq!(table.rows[0][0].as_deref(), Some("5"));
         assert!(engine.query("SELEC nonsense").is_err());
+    }
+}
+#[cfg(test)]
+mod idle {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn live_idle_reconnect() {
+        let profile = DbProfile {
+            user: "t".into(),
+            password: "t".into(),
+            port: 3306,
+            ..Default::default()
+        };
+        let (mut raw, _) = open_engine(&profile, "127.0.0.1".into(), 3306).unwrap();
+        std::thread::sleep(Duration::from_secs(7));
+        eprintln!("raw after idle: {:?}", raw.query("SELECT 1").err());
+        let (tx, cmds) = channel();
+        let (events, rx) = channel();
+        std::thread::spawn(move || serve(profile, None, cmds, events, &|| {}));
+        assert!(matches!(rx.recv().unwrap(), Event::Connected(_)));
+        tx.send(Cmd::Query("USE demo".into(), None)).unwrap();
+        assert!(matches!(rx.recv().unwrap(), Event::Result(..)));
+        tx.send(Cmd::Query("SELECT v FROM x".into(), None)).unwrap();
+        assert!(matches!(rx.recv().unwrap(), Event::Result(..)));
+        std::thread::sleep(Duration::from_secs(9));
+        tx.send(Cmd::Query("SELECT v FROM x".into(), None)).unwrap();
+        match rx.recv().unwrap() {
+            Event::Result(t, ..) => assert_eq!(t.rows[0][0].as_deref(), Some("a")),
+            Event::Error(e) => panic!("{e}"),
+            _ => panic!(),
+        }
+    }
+}
+#[cfg(test)]
+mod idle_pg {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn live_pg_idle_reconnect() {
+        let profile = DbProfile {
+            kind: DbKind::Postgres,
+            user: "postgres".into(),
+            port: 5433,
+            database: "postgres".into(),
+            ..Default::default()
+        };
+        let (mut raw, _) = open_engine(&profile, "127.0.0.1".into(), 5433).unwrap();
+        std::thread::sleep(Duration::from_secs(7));
+        eprintln!("raw after idle: {:?}", raw.query("SELECT 1").err());
+        let (tx, cmds) = channel();
+        let (events, rx) = channel();
+        std::thread::spawn(move || serve(profile, None, cmds, events, &|| {}));
+        assert!(matches!(rx.recv().unwrap(), Event::Connected(_)));
+        std::thread::sleep(Duration::from_secs(9));
+        tx.send(Cmd::Query("SELECT v FROM x".into(), None)).unwrap();
+        match rx.recv().unwrap() {
+            Event::Result(t, ..) => assert_eq!(t.rows[0][0].as_deref(), Some("a")),
+            Event::Error(e) => panic!("{e}"),
+            _ => panic!(),
+        }
     }
 }

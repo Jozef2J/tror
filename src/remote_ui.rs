@@ -1049,7 +1049,7 @@ impl RemotePanel {
                     egui::Label::new(
                         RichText::new(format!("{busy}{percent}{queue}"))
                             .color(pal.subtext)
-                            .size(12.5),
+                            .small(),
                     )
                     .truncate(),
                 );
@@ -1107,7 +1107,7 @@ impl RemotePanel {
                 egui::Label::new(
                     RichText::new("  Подключитесь к серверу в панели файлов (F8) — поиск идёт в открытой там папке.")
                         .color(pal.faint)
-                        .size(12.5),
+                        .small(),
                 )
                 .wrap(),
             );
@@ -1127,7 +1127,7 @@ impl RemotePanel {
             for (content, label) in [(true, "В тексте файлов"), (false, "В именах")]
             {
                 let active = self.search_content == content;
-                let mut button = Button::new(RichText::new(label).size(12.5));
+                let mut button = Button::new(RichText::new(label).small());
                 if active {
                     button = button.fill(pal.surface);
                 }
@@ -1148,14 +1148,14 @@ impl RemotePanel {
             ui.label(
                 RichText::new(&self.search_status)
                     .color(pal.subtext)
-                    .size(12.5),
+                    .small(),
             );
         });
         crate::widgets::wrapped_row(ui, 6.0, |ui| {
             ui.label(
                 RichText::new("Не искать в папках:")
                     .color(pal.subtext)
-                    .size(12.5),
+                    .small(),
             );
             ui.add(
                 TextEdit::singleline(&mut self.search_excludes)
@@ -1313,16 +1313,24 @@ impl RemotePanel {
             ui.scope_id().with(("tror_remote_blank", self.id)),
             Sense::click(),
         );
-        let area = ScrollArea::vertical()
+        let wide = crate::widgets::rows_width(
+            ui,
+            rows.iter().map(|r| {
+                (r.depth as f32 * 14.0 + if tree { 14.0 } else { 0.0 }, r.name.as_str())
+            }),
+            widths,
+        );
+        let area = ScrollArea::both()
             .id_salt(("tror_remote_rows", self.id))
             .auto_shrink(false)
             .max_height((ui.available_height() - reserve).max(40.0))
             .show_rows(ui, row_h, total, |ui, range| {
                 ui.spacing_mut().item_spacing.y = 0.0;
+                let view = ui.clip_rect();
                 for index in range {
                     let row = &rows[index];
                     let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), row_h),
+                        egui::vec2(wide, row_h),
                         Sense::click_and_drag(),
                     );
                     let entry = row.entry.clone();
@@ -1369,7 +1377,7 @@ impl RemotePanel {
                         &name,
                         pal,
                     );
-                    let mut right = rect.right() - 6.0;
+                    let mut right = view.right().min(rect.right()) - 6.0;
                     let info = entry.as_ref();
                     crate::widgets::column_cell(
                         &painter,
@@ -1700,12 +1708,15 @@ impl RemotePanel {
         let mut go = false;
         let mut close = false;
         egui::Window::new("Синхронизация папки")
+            .frame(crate::widgets::window_frame(pal))
+            .title_bar(false)
             .collapsible(false)
             .resizable(true)
             .default_size([620.0, 460.0])
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
+                crate::app::window_header(ui, pal, "Синхронизация папки", false);
                 egui::Grid::new("tror_sync_roots").num_columns(2).show(ui, |ui| {
                     ui.label(RichText::new("На компьютере").color(pal.subtext));
                     ui.label(dialog.local_root.display().to_string());
@@ -1727,7 +1738,7 @@ impl RemotePanel {
                         "Ничего не удаляется: файлы, которых нет на одной стороне, копируются на неё. \
                          Файлы с тем же именем перезаписываются.",
                     )
-                    .size(12.0)
+                    .small()
                     .color(pal.faint),
                 );
                 ui.add_space(6.0);
@@ -1802,10 +1813,10 @@ impl RemotePanel {
                     go = ui
                         .add_enabled(
                             total > 0,
-                            Button::new(RichText::new(label).color(Color32::WHITE)).fill(pal.accent),
+                            crate::widgets::primary(label, pal),
                         )
                         .clicked();
-                    close = ui.add(Button::new("Отмена").fill(pal.surface)).clicked();
+                    close = crate::app::dialog_button(ui, pal, "Отмена", false);
                 });
             });
         if go {
@@ -2032,7 +2043,7 @@ impl RemotePanel {
                     });
                     ui.label(
                         RichText::new("Обычно папкам ставят 755, файлам 644 — примените дважды с разными галочками.")
-                            .size(12.0)
+                            .small()
                             .color(pal.subtext),
                     );
                 }
@@ -2048,13 +2059,13 @@ impl RemotePanel {
                     );
                     if state.mtime != state.mtime_was && widgets::parse_date(&state.mtime).is_none()
                     {
-                        ui.label(RichText::new("не дата").color(pal.warn).size(12.0));
+                        ui.label(RichText::new("не дата").color(pal.warn).small());
                     }
                 });
                 if !sftp {
                     ui.label(
                         RichText::new("По FTP дата меняется командой MFMT — её поддерживают не все серверы.")
-                            .size(12.0)
+                            .small()
                             .color(pal.subtext),
                     );
                 }
@@ -2062,7 +2073,7 @@ impl RemotePanel {
             if !sftp {
                 ui.label(
                     RichText::new("По FTP права меняются командой SITE CHMOD; на Windows-серверах она обычно не работает.")
-                        .size(12.0)
+                        .small()
                         .color(pal.subtext),
                 );
             }
@@ -2351,11 +2362,11 @@ impl RemotePanel {
                                     match remote::key_kind(&p.key_file) {
                                         Ok(kind) => ui.label(
                                             RichText::new(format!("ключ: {kind}"))
-                                                .size(12.0)
+                                                .small()
                                                 .color(pal.subtext),
                                         ),
                                         Err(e) => {
-                                            ui.label(RichText::new(e).size(12.0).color(pal.warn))
+                                            ui.label(RichText::new(e).small().color(pal.warn))
                                         }
                                     };
                                     ui.end_row();
@@ -2393,7 +2404,7 @@ impl RemotePanel {
                                         Ok(text) => (format!("Работает: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
                                         Err(e) => (format!("Ошибка: {e}"), pal.warn),
                                     };
-                                    ui.label(RichText::new(text).size(12.5).color(color));
+                                    ui.label(RichText::new(text).small().color(color));
                                 }
                             });
                             ui.end_row();
@@ -2413,7 +2424,7 @@ impl RemotePanel {
                             ui.end_row();
                             if p.protocol == Protocol::Sftp {
                                 ui.label("");
-                                ui.label(RichText::new("Консоль по этому профилю").color(pal.subtext).size(12.0));
+                                ui.label(RichText::new("Консоль по этому профилю").color(pal.subtext).small());
                                 ui.end_row();
                                 crate::console::appearance_rows(
                                     ui,
@@ -2446,7 +2457,7 @@ impl RemotePanel {
                             pal.subtext,
                         ),
                     };
-                    ui.label(RichText::new(text).color(color).size(12.0));
+                    ui.label(RichText::new(text).color(color).small());
                 });
             });
             ui.add_space(10.0);
@@ -2455,7 +2466,7 @@ impl RemotePanel {
                     "Профили хранятся в {location}. Пароли в файле скрыты от случайного взгляда, но не зашифрованы."
                 ))
                 .color(pal.subtext)
-                .size(12.0),
+                .small(),
             );
             ui.add_space(8.0);
             ui.horizontal(|ui| {

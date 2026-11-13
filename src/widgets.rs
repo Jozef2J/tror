@@ -2,6 +2,28 @@ use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, TextEdit,
 
 use crate::theme::Palette;
 
+pub fn primary(text: impl Into<String>, pal: &Palette) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text.into()).color(pal.base)).fill(pal.accent)
+}
+
+pub fn secondary(text: impl Into<String>, pal: &Palette) -> egui::Button<'static> {
+    egui::Button::new(text.into()).fill(pal.surface)
+}
+
+pub fn window_frame(pal: &Palette) -> egui::Frame {
+    egui::Frame::new()
+        .fill(pal.mantle)
+        .stroke(Stroke::new(1.0, pal.border))
+        .corner_radius(12)
+        .inner_margin(egui::Margin::same(18))
+        .shadow(egui::Shadow {
+            offset: [0, 8],
+            blur: 24,
+            spread: 0,
+            color: Color32::from_black_alpha(70),
+        })
+}
+
 pub fn wrapped_row<R>(ui: &mut Ui, margin: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
     egui::Frame::NONE
         .inner_margin(egui::Margin::symmetric(margin as i8, 0))
@@ -278,7 +300,7 @@ pub fn perm_grid(ui: &mut Ui, pal: &Palette, mode: &mut u32, octal: &mut String)
         .show(ui, |ui| {
             ui.label("");
             for label in ["чтение", "запись", "выполнение"] {
-                ui.label(RichText::new(label).size(12.0).color(pal.subtext));
+                ui.label(RichText::new(label).small().color(pal.subtext));
             }
             ui.end_row();
             for (shift, who) in [(6, "Владелец"), (3, "Группа"), (0, "Остальные")]
@@ -514,6 +536,33 @@ pub fn fit_columns(width: f32, shown: [bool; 3]) -> [f32; 3] {
         }
     }
     fit
+}
+
+pub fn rows_width<'a>(
+    ui: &Ui,
+    rows: impl Iterator<Item = (f32, &'a str)>,
+    widths: [f32; 3],
+) -> f32 {
+    let view = ui.available_width();
+    let guess = |(indent, name): (f32, &str)| indent + name.chars().count() as f32 * 7.0;
+    let Some((indent, name)) = rows.max_by(|a, b| guess(*a).total_cmp(&guess(*b))) else {
+        return view;
+    };
+    let text = ui.ctx().fonts_mut(|f| {
+        f.layout_no_wrap(
+            name.to_owned(),
+            egui::FontId::proportional(13.0),
+            Color32::WHITE,
+        )
+        .size()
+        .x
+    });
+    let columns: f32 = widths
+        .iter()
+        .filter(|w| **w > 0.0)
+        .map(|w| w + COLUMN_GAP)
+        .sum();
+    view.max(indent + 28.0 + text + 12.0 + columns + 6.0)
 }
 
 pub fn column_cell(

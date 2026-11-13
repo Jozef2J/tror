@@ -311,7 +311,7 @@ impl ProjectPanel {
             }
             if !recent.is_empty() {
                 ui.add_space(8.0);
-                ui.label(RichText::new("Недавние").size(12.0).color(pal.faint));
+                ui.label(RichText::new("Недавние").small().color(pal.faint));
                 for path in recent.iter().take(8) {
                     let name = path
                         .file_name()
@@ -427,15 +427,23 @@ impl ProjectPanel {
         ui.spacing_mut().item_spacing.y = 0.0;
         let outer = ui.available_rect_before_wrap();
         let blank = ui.interact(outer, ui.scope_id().with("tror_project_blank"), Sense::click());
-        let area = ScrollArea::vertical()
+        let wide = crate::widgets::rows_width(
+            ui,
+            rows.iter().map(|r| {
+                (r.depth as f32 * 14.0 + if tree { 14.0 } else { 0.0 }, r.name.as_str())
+            }),
+            widths,
+        );
+        let area = ScrollArea::both()
             .id_salt("tror_project_rows")
             .auto_shrink(false)
             .show_rows(ui, row_h, rows.len(), |ui, range| {
                 ui.spacing_mut().item_spacing.y = 0.0;
+                let view = ui.clip_rect();
                 for index in range {
                     let row = &rows[index];
                     let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), row_h),
+                        egui::vec2(wide, row_h),
                         Sense::click_and_drag(),
                     );
                     if response.dragged()
@@ -479,7 +487,7 @@ impl ProjectPanel {
                         &row.name,
                         pal,
                     );
-                    let mut right = rect.right() - 6.0;
+                    let mut right = view.right().min(rect.right()) - 6.0;
                     let entry = row.entry.as_ref();
                     crate::widgets::column_cell(
                         &painter,

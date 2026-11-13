@@ -305,7 +305,7 @@ fn heading(ui: &mut Ui, pal: &Palette, text: &str, hint: &str) {
     ui.add_space(18.0);
     ui.label(RichText::new(text).family(theme::medium()).size(15.5));
     if !hint.is_empty() {
-        ui.label(RichText::new(hint).size(12.0).color(pal.faint));
+        ui.label(RichText::new(hint).small().color(pal.faint));
     }
     ui.add_space(6.0);
 }
@@ -452,7 +452,7 @@ fn toggle_row(ui: &mut Ui, pal: &Palette, value: &mut bool, label: &str, hint: &
     if !hint.is_empty() {
         ui.horizontal(|ui| {
             ui.add_space(26.0);
-            ui.label(RichText::new(hint).size(12.0).color(pal.faint));
+            ui.label(RichText::new(hint).small().color(pal.faint));
         });
     }
     ui.add_space(4.0);
@@ -568,7 +568,7 @@ fn tabs_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
              Закреплённые вкладки стоят в начале и меняются местами только между собой. \
              Закрепить, покрасить или вынести вкладку в новую область можно из её меню по правому щелчку.",
         )
-        .size(12.0)
+        .small()
         .color(pal.faint),
     );
     heading(
@@ -604,7 +604,7 @@ fn console_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
     });
     ui.label(
         RichText::new("Действует для сеансов, открытых после изменения.")
-            .size(12.0)
+            .small()
             .color(pal.faint),
     );
 }

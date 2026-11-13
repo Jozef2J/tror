@@ -391,20 +391,27 @@ fn grid_row(
 }
 
 fn visible_lines(ui: &Ui, doc: &Document, m: &Metrics, view_h: f32) -> Vec<(usize, f64)> {
-    let lines = doc.line_count();
     let row = m.row_h as f64;
     let scroll = doc.scroll_y.max(0.0);
-    let first = ((scroll / row) as usize).min(lines - 1);
+    let first_row = ((scroll / row) as usize).min(doc.shown_count() - 1);
+    let first = doc.line_of_visual(first_row);
     if !m.wrap {
-        let offset = -(scroll - first as f64 * row);
-        return (first..(first + m.rows + 2).min(lines))
-            .enumerate()
-            .map(|(i, line)| (line, offset + i as f64 * row))
-            .collect();
+        let offset = -(scroll - first_row as f64 * row);
+        let mut out = Vec::new();
+        let mut next = Some(first);
+        while let Some(line) = next
+            && out.len() < m.rows + 2
+        {
+            out.push((line, offset + out.len() as f64 * row));
+            next = doc.next_shown(line);
+        }
+        return out;
     }
     let mut out = Vec::new();
     let mut y = 0.0;
-    for line in first..lines {
+    let mut next = Some(first);
+    while let Some(line) = next {
+        next = doc.next_shown(line);
         let height = layout_line(ui, doc, line, m).rows() as f64 * row;
         if line == first {
             let frac = (scroll / row - first as f64).clamp(0.0, 1.0);
@@ -427,17 +434,17 @@ fn wrapped_step(ui: &Ui, doc: &Document, m: &Metrics, pos: usize, goal: f64, dow
     if down {
         if row + 1 < layout.rows() {
             start + layout.col_at_row(goal, row + 1, m.char_w)
-        } else if line + 1 < doc.line_count() {
-            let next = layout_line(ui, doc, line + 1, m);
-            doc.rope.line_to_char(line + 1) + next.col_at_row(goal, 0, m.char_w)
+        } else if let Some(below) = doc.next_shown(line) {
+            let next = layout_line(ui, doc, below, m);
+            doc.rope.line_to_char(below) + next.col_at_row(goal, 0, m.char_w)
         } else {
             doc.len()
         }
     } else if row > 0 {
         start + layout.col_at_row(goal, row - 1, m.char_w)
-    } else if line > 0 {
-        let prev = layout_line(ui, doc, line - 1, m);
-        doc.rope.line_to_char(line - 1) + prev.col_at_row(goal, prev.rows() - 1, m.char_w)
+    } else if let Some(above) = doc.prev_shown(line) {
+        let prev = layout_line(ui, doc, above, m);
+        doc.rope.line_to_char(above) + prev.col_at_row(goal, prev.rows() - 1, m.char_w)
     } else {
         0
     }
@@ -466,7 +473,8 @@ fn move_vertical(ui: &Ui, doc: &mut Document, m: &Metrics, delta: isize, extend:
     let goal = doc
         .goal_x
         .unwrap_or_else(|| layout_line(ui, doc, line, m).x_of(col, m.char_w));
-    let target = (line as isize + delta).clamp(0, doc.line_count() as isize - 1) as usize;
+    let visual = (doc.to_visual(line) as isize + delta).clamp(0, doc.shown_count() as isize - 1);
+    let target = doc.line_of_visual(visual as usize);
     let pos = if target == line && delta < 0 {
         0
     } else if target == line {
@@ -791,6 +799,25 @@ fn context_items(ui: &mut Ui, doc: &mut Document, id: Id) {
     if item(ui, "Уменьшить отступ", "Shift+Tab".into(), true) {
         doc.outdent();
     }
+    ui.menu_button("Сворачивание", |ui| {
+        ui.set_min_width(200.0);
+        if ui.button("Свернуть блок").clicked() {
+            doc.fold_here();
+            ui.close();
+        }
+        if ui.button("Развернуть блок").clicked() {
+            doc.unfold_here();
+            ui.close();
+        }
+        if ui.button("Свернуть всё").clicked() {
+            doc.fold_all();
+            ui.close();
+        }
+        if ui.button("Развернуть всё").clicked() {
+            doc.unfold_all();
+            ui.close();
+        }
+    });
     ui.separator();
     ui.menu_button("Регистр", |ui| {
         ui.set_min_width(220.0);
@@ -897,9 +924,9 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     let lines = doc.line_count();
     let digits = lines.to_string().len().max(3);
     let gutter_w = if edit.line_numbers {
-        digits as f32 * char_w + 28.0
+        digits as f32 * char_w + 32.0
     } else {
-        14.0
+        16.0
     };
     let full = ui.available_rect_before_wrap();
     ui.allocate_rect(full, Sense::hover());
@@ -1026,7 +1053,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         let x = (p.x - text_rect.left() - PAD_X) as f64 + doc.scroll_x;
         if !wrap {
             let y = py as f64 + doc.scroll_y;
-            let line = ((y / row).floor().max(0.0) as usize).min(doc.line_count() - 1);
+            let line = doc.line_of_visual((y / row).floor().max(0.0) as usize);
             return doc.rope.line_to_char(line) + layout_line(ui, doc, line, &m).col_at(x);
         }
         let visible = visible_lines(ui, doc, &m, view_h as f32);
@@ -1150,7 +1177,12 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     }
     response.context_menu(|ui| context_items(ui, doc, id));
 
-    let lines = doc.line_count();
+    let head_line = doc.rope.char_to_line(doc.sel.1);
+    if doc.hidden_range(head_line).is_some() {
+        doc.reveal_line(head_line);
+        doc.reveal = true;
+    }
+    let lines = doc.shown_count();
     let cw = char_w as f64;
     let view_w = m.view_w as f64;
     let content_w = doc.content_w.max(doc.max_line_chars as f64 * cw);
@@ -1180,7 +1212,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         };
         let below = cursor_y.is_none_or(|y| y + row > view_h);
         if above {
-            doc.scroll_y = (line as f64 + at as f64 / layout.rows() as f64) * row;
+            doc.scroll_y = (doc.to_visual(line) as f64 + at as f64 / layout.rows() as f64) * row;
         } else if below {
             let mut room = (view_h as f32 - row_h).max(0.0);
             let mut top_line = line;
@@ -1189,23 +1221,26 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             top_row -= take;
             room -= take as f32 * row_h;
             let mut rows = layout.rows();
-            while top_row == 0 && top_line > 0 && room >= row_h {
-                let prev = layout_line(ui, doc, top_line - 1, &m).rows();
+            while top_row == 0
+                && room >= row_h
+                && let Some(above) = doc.prev_shown(top_line)
+            {
+                let prev = layout_line(ui, doc, above, &m).rows();
                 let take = ((room / row_h) as usize).min(prev);
                 room -= take as f32 * row_h;
-                top_line -= 1;
+                top_line = above;
                 top_row = prev - take;
                 rows = prev;
                 if take < prev {
                     break;
                 }
             }
-            doc.scroll_y = (top_line as f64 + top_row as f64 / rows as f64) * row + 0.01;
+            doc.scroll_y = (doc.to_visual(top_line) as f64 + top_row as f64 / rows as f64) * row + 0.01;
         }
     } else if reveal {
         let head = doc.sel.1;
         let line = doc.rope.char_to_line(head);
-        let top = line as f64 * row;
+        let top = doc.to_visual(line) as f64 * row;
         if top < doc.scroll_y - row * 3.0 || top > doc.scroll_y + view_h + row * 2.0 {
             doc.scroll_y = top - view_h / 2.0;
         } else if top < doc.scroll_y {
@@ -1336,6 +1371,10 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         .then(|| doc.selected_text())
         .filter(|t| !t.contains('\n') && !t.trim().is_empty());
 
+    let gutter_click = ui.interact(gutter_rect, id.with("fold_gutter"), Sense::click());
+    let mut fold_rows: Vec<(usize, f32, f32)> = Vec::new();
+    let mut shown_rows: Vec<(usize, f32, f32)> = Vec::new();
+    let mut fold_marks: Vec<(usize, Rect)> = Vec::new();
     for (line, offset) in visible {
         let top64 = origin_y as f64 + offset;
         let row_top = |r: usize| (top64 + r as f64 * row) as f32;
@@ -1452,6 +1491,24 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 doc.hl.default_color,
             );
         }
+        let folded = doc.is_folded(line);
+        if folded {
+            let (x, at) = layout.place(layout.len, char_w);
+            let top = row_top(at);
+            let mark = Rect::from_min_size(
+                egui::pos2(sx(x) + char_w, top + 3.0),
+                egui::vec2(char_w * 3.0, row_h - 6.0),
+            );
+            painter.rect_filled(mark, 4.0, pal.surface);
+            for dot in [-1.0, 0.0, 1.0] {
+                painter.circle_filled(mark.center() + egui::vec2(dot * 4.0, 0.0), 1.3, pal.subtext);
+            }
+            fold_marks.push((line, mark));
+        }
+        shown_rows.push((line, y, y + row_h * 0.5));
+        if folded || doc.foldable(line) {
+            fold_rows.push((line, y, row_top(rows)));
+        }
         if edit.whitespace && layout.grid == 0 && layout.len <= LONG_LINE {
             let mark = pal.faint.gamma_multiply(0.55);
             for (col, ch) in doc.rope.line(line).chars().enumerate() {
@@ -1507,7 +1564,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         }
         if edit.line_numbers {
             gutter_painter.text(
-                egui::pos2(gutter_rect.right() - 14.0, y + row_h * 0.5),
+                egui::pos2(gutter_rect.right() - 18.0, y + row_h * 0.5),
                 Align2::RIGHT_CENTER,
                 line + 1,
                 font.clone(),
@@ -1520,6 +1577,95 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         }
     }
 
+    let fold_x = gutter_rect.right() - 8.0;
+    let current = doc
+        .block_around(doc.rope.char_to_line(doc.sel.1))
+        .filter(|(head, _)| !doc.is_folded(*head));
+    let hover_y = ui
+        .input(|i| i.pointer.hover_pos())
+        .filter(|_| gutter_click.hovered())
+        .map(|p| p.y);
+    let end_y = |end: usize| -> Option<f32> {
+        let last = shown_rows.last()?;
+        if end > last.0 {
+            return Some(gutter_rect.bottom());
+        }
+        shown_rows
+            .iter()
+            .find(|r| r.0 >= end)
+            .map(|r| if r.0 == end { r.2 } else { r.1 })
+    };
+    let mut stems: Vec<(f32, f32, bool, bool)> = Vec::new();
+    for &(line, _, _) in &fold_rows {
+        if doc.is_folded(line) || current.is_some_and(|c| c.0 == line) {
+            continue;
+        }
+        if let (Some(end), Some(head)) = (doc.block_end(line), shown_rows.iter().find(|r| r.0 == line))
+            && let Some(bottom) = end_y(end)
+        {
+            stems.push((head.2, bottom, end <= shown_rows.last().map_or(0, |r| r.0), false));
+        }
+    }
+    if let Some((head, end)) = current
+        && let Some(bottom) = end_y(end)
+    {
+        let top = shown_rows
+            .iter()
+            .find(|r| r.0 == head)
+            .map_or(gutter_rect.top(), |r| r.2);
+        if top < bottom {
+            stems.push((top, bottom, end <= shown_rows.last().map_or(0, |r| r.0), true));
+        }
+    }
+    for (top, bottom, closed, hot) in stems {
+        let color = if hot { pal.accent } else { pal.faint.gamma_multiply(0.45) };
+        let stroke = Stroke::new(1.0, color);
+        gutter_painter.line_segment([egui::pos2(fold_x, top), egui::pos2(fold_x, bottom)], stroke);
+        if closed {
+            gutter_painter.line_segment(
+                [egui::pos2(fold_x, bottom), egui::pos2(fold_x + 5.0, bottom)],
+                stroke,
+            );
+        }
+    }
+    for &(line, top, bottom) in &fold_rows {
+        let folded = doc.is_folded(line);
+        let center = egui::pos2(fold_x, top + row_h * 0.5);
+        let hot = current.is_some_and(|c| c.0 == line)
+            || hover_y.is_some_and(|y| y >= top && y < bottom);
+        let color = if hot || folded { pal.accent } else { pal.faint.gamma_multiply(0.8) };
+        let rect = Rect::from_center_size(center, egui::vec2(9.0, 9.0));
+        gutter_painter.rect_filled(rect, 1.5, pal.base);
+        gutter_painter.rect_stroke(rect, 1.5, Stroke::new(1.0, color), egui::StrokeKind::Inside);
+        let stroke = Stroke::new(1.0, color);
+        gutter_painter.line_segment([center - egui::vec2(2.5, 0.0), center + egui::vec2(2.5, 0.0)], stroke);
+        if folded {
+            gutter_painter.line_segment([center - egui::vec2(0.0, 2.5), center + egui::vec2(0.0, 2.5)], stroke);
+        }
+    }
+    let pointer_at = ui.input(|i| i.pointer.interact_pos());
+    let toggled = if gutter_click.clicked() {
+        pointer_at.and_then(|p| {
+            fold_rows
+                .iter()
+                .find(|(_, top, bottom)| p.y >= *top && p.y < *bottom)
+                .map(|r| r.0)
+        })
+    } else if response.clicked() {
+        pointer_at.and_then(|p| fold_marks.iter().find(|(_, r)| r.contains(p)).map(|r| r.0))
+    } else {
+        None
+    };
+    if let Some(line) = toggled {
+        doc.toggle_fold(line);
+        ui.memory_mut(|mem| mem.request_focus(id));
+        ctx.request_repaint();
+    }
+    for (_, mark) in &fold_marks {
+        if ui.rect_contains_pointer(*mark) {
+            ctx.set_cursor_icon(CursorIcon::PointingHand);
+        }
+    }
     if focused && let Some(rect) = cursor_rect {
         let phase = now - doc.activity;
         if !edit.blink || (phase * 2.0) as i64 % 2 == 0 {

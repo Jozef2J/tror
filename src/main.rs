@@ -10,6 +10,7 @@ mod document;
 mod editor;
 mod files;
 mod findfiles;
+mod fold;
 mod highlight;
 mod keys;
 mod mosh;
@@ -26,7 +27,6 @@ mod terminal;
 mod theme;
 mod trace;
 mod update;
-mod webview;
 mod widgets;
 
 use eframe::egui;
@@ -35,13 +35,6 @@ pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLoc
 
 fn main() -> eframe::Result {
     STARTED.get_or_init(std::time::Instant::now);
-    #[cfg(all(target_os = "linux", feature = "webview"))]
-    if std::env::var_os("DISPLAY").is_some() {
-        unsafe {
-            std::env::remove_var("WAYLAND_DISPLAY");
-            std::env::set_var("GDK_BACKEND", "x11");
-        }
-    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Tror")

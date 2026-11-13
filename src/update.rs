@@ -38,6 +38,7 @@ pub struct Release {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
     Installer,
+    Installed,
     Portable,
     Page,
 }
@@ -75,21 +76,24 @@ pub fn kind() -> Kind {
     let Some(dir) = exe.parent() else {
         return Kind::Page;
     };
-    if cfg!(windows) && dir.join("unins000.exe").is_file() {
-        return Kind::Installer;
-    }
     let probe = dir.join(".tror-write-test");
     let writable = std::fs::write(&probe, b"").is_ok();
     let _ = std::fs::remove_file(&probe);
-    if writable { Kind::Portable } else { Kind::Page }
+    let installed = cfg!(windows) && dir.join("unins000.exe").is_file();
+    match (installed, writable) {
+        (true, true) => Kind::Installed,
+        (true, false) => Kind::Installer,
+        (false, true) => Kind::Portable,
+        (false, false) => Kind::Page,
+    }
 }
 
 fn asset_name(kind: Kind) -> Option<&'static str> {
     match kind {
         Kind::Page => None,
         Kind::Installer => Some("tror-setup.exe"),
+        Kind::Installed => Some("tror.exe"),
         Kind::Portable if cfg!(windows) => Some("tror.exe"),
-        Kind::Portable if cfg!(feature = "webview") => Some("tror-linux-x86_64-webview"),
         Kind::Portable => Some("tror-linux-x86_64"),
     }
 }
@@ -234,17 +238,80 @@ pub fn swap(exe: &Path, fresh: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn apply(path: &Path, kind: Kind) -> Result<(), String> {
-    match kind {
-        Kind::Installer => std::process::Command::new(path)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
-        _ => {
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            swap(&exe, path)
+pub fn apply(path: &Path, version: &str) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    swap(&exe, path)?;
+    if in_setup_dir(&exe) {
+        registry_version(version);
+    }
+    Ok(())
+}
+
+fn in_setup_dir(exe: &Path) -> bool {
+    cfg!(windows)
+        && exe
+            .parent()
+            .is_some_and(|d| d.join("unins000.exe").is_file())
+}
+
+#[cfg(windows)]
+fn registry_version(version: &str) {
+    use std::os::windows::process::CommandExt;
+    let _ = std::process::Command::new("reg")
+        .args([
+            "add",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{8F3B6C1E-5C0A-4E4B-9A55-7A6B1C0D2E11}_is1",
+            "/v",
+            "DisplayVersion",
+            "/d",
+            version,
+            "/f",
+        ])
+        .creation_flags(0x0800_0000)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(not(windows))]
+fn registry_version(_version: &str) {}
+
+pub fn notes(text: &str) -> Vec<(bool, String)> {
+    let mut out: Vec<(bool, String)> = Vec::new();
+    let mut open = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("Co-Authored-By:")
+            || line.starts_with("Claude-Session:")
+            || line.starts_with('🤖')
+            || line.contains("claude.ai/code")
+        {
+            continue;
+        }
+        if line.is_empty() {
+            open = false;
+            continue;
+        }
+        if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            out.push((true, item.trim().to_owned()));
+            open = true;
+        } else if open && let Some(last) = out.last_mut() {
+            last.1.push(' ');
+            last.1.push_str(line);
+        } else {
+            out.push((false, line.to_owned()));
+            open = out.len() > 1;
         }
     }
+    out
+}
+
+pub fn run_setup(path: &Path) -> Result<(), String> {
+    std::process::Command::new(path)
+        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 pub fn restart() -> Result<(), String> {
@@ -264,6 +331,20 @@ pub fn cleanup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notes_join_wrapped_lines_and_drop_attribution() {
+        let text = "0.17.0: title\n\nFirst para\ncontinues.\n\n- one\n  more\n- two\n\nCo-Authored-By: X\nClaude-Session: https://claude.ai/code/x\n";
+        assert_eq!(
+            notes(text),
+            vec![
+                (false, "0.17.0: title".into()),
+                (false, "First para continues.".into()),
+                (true, "one more".into()),
+                (true, "two".into()),
+            ]
+        );
+    }
 
     #[test]
     #[ignore]
