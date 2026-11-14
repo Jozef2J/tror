@@ -3,13 +3,17 @@ use std::path::{Path, PathBuf};
 use ropey::Rope;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use wasmi::{Caller, Config, Engine, Extern, Instance, Linker, Memory, Module, Store, TypedFunc};
+use wasmi::{
+    Caller, Config, Engine, Extern, Instance, Linker, Memory, Module, Store, StoreLimits,
+    StoreLimitsBuilder, TypedFunc,
+};
 
 #[cfg(not(test))]
 const FUEL: u64 = 1_000_000_000;
 #[cfg(test)]
 const FUEL: u64 = 2_000_000;
 const API: u32 = 1;
+const MEMORY: usize = 512 << 20;
 #[cfg(test)]
 const FUEL_PROBE: u64 = 300_000_000;
 
@@ -71,6 +75,7 @@ struct Host {
     reply: Vec<u8>,
     permissions: Vec<String>,
     storage: PathBuf,
+    limits: StoreLimits,
 }
 
 pub struct Loaded {
@@ -104,10 +109,16 @@ fn inside(root: &Path, path: &str) -> Result<PathBuf, String> {
     let base = root.canonicalize().map_err(|e| e.to_string())?;
     let parent = full.parent().ok_or("неверный путь")?;
     let parent = parent.canonicalize().map_err(|e| e.to_string())?;
-    if !parent.starts_with(&base) {
+    let target = parent.join(full.file_name().ok_or("неверный путь")?);
+    let real = match target.canonicalize() {
+        Ok(real) => real,
+        Err(_) if target.symlink_metadata().is_err() => target.clone(),
+        Err(e) => return Err(e.to_string()),
+    };
+    if !parent.starts_with(&base) || !real.starts_with(&base) {
         return Err("путь вне папки проекта".into());
     }
-    Ok(parent.join(full.file_name().ok_or("неверный путь")?))
+    Ok(target)
 }
 
 fn storage_load(path: &Path) -> serde_json::Map<String, Value> {
@@ -294,8 +305,10 @@ impl Loaded {
             reply: Vec::new(),
             permissions: manifest.permissions.clone(),
             storage: dir.join("storage.json"),
+            limits: StoreLimitsBuilder::new().memory_size(MEMORY).build(),
         };
         let mut store = Store::new(&engine, host);
+        store.limiter(|host| &mut host.limits);
         store.set_fuel(FUEL).map_err(|e| e.to_string())?;
         let mut linker = <Linker<Host>>::new(&engine);
         linker
@@ -470,6 +483,11 @@ mod tests {
     (local $n i32)
     (if (i32.eq (i32.load8_u (i32.add (local.get $ptr) (i32.const 11))) (i32.const 105))
       (then (return (i64.const 0))))
+    (if (i32.eq (i32.load8_u (i32.add (local.get $ptr) (i32.const 11))) (i32.const 103))
+      (then
+        (if (i32.eq (memory.grow (i32.const 9000)) (i32.const -1))
+          (then (return (i64.const 0))))
+        (return (i64.or (i64.shl (i64.const 400) (i64.const 32)) (i64.const 16)))))
     (if (i32.eq (i32.load8_u (i32.add (local.get $ptr) (i32.const 11))) (i32.const 108))
       (then (loop $spin (br $spin))))
     (if (i32.eq (i32.load8_u (i32.add (local.get $ptr) (i32.const 11))) (i32.const 101))
@@ -548,8 +566,20 @@ mod tests {
             reply: Vec::new(),
             permissions: vec!["fs".into()],
             storage: dir.join("s.json"),
+            limits: StoreLimits::default(),
         };
         assert!(request(&mut host, "read_file", &json!({"path":"../secret"})).is_err());
+        #[cfg(unix)]
+        {
+            let outside = std::env::temp_dir().join(format!("tror-out-{}", std::process::id()));
+            std::fs::write(&outside, "x").unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+            let err =
+                request(&mut host, "write_file", &json!({"path":"link","text":"y"})).unwrap_err();
+            assert!(err.contains("вне"), "{err}");
+            assert_eq!(std::fs::read_to_string(&outside).unwrap(), "x");
+            std::fs::remove_file(outside).ok();
+        }
         std::fs::write(dir.join("a.txt"), "data").unwrap();
         assert_eq!(
             request(&mut host, "read_file", &json!({"path":"a.txt"})).unwrap(),
@@ -582,6 +612,12 @@ mod tests {
     }
 
     #[test]
+    fn memory_growth_is_limited() {
+        let mut p = plugin();
+        assert_eq!(p.send(&json!({"method":"grow"}), None).error, None);
+    }
+
+    #[test]
     fn replace_keeps_selection_consistent() {
         let mut host = Host {
             snap: Some(snap("abcdef", None)),
@@ -589,6 +625,7 @@ mod tests {
             reply: Vec::new(),
             permissions: Vec::new(),
             storage: PathBuf::new(),
+            limits: StoreLimits::default(),
         };
         host.snap.as_mut().unwrap().sel = (4, 6);
         request(
