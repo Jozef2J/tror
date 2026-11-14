@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use wasmi::{Caller, Config, Engine, Extern, Instance, Linker, Memory, Module, Store, TypedFunc};
 
 #[cfg(not(test))]
-const FUEL: u64 = 3_000_000_000;
+const FUEL: u64 = 1_000_000_000;
 #[cfg(test)]
 const FUEL: u64 = 2_000_000;
 const API: u32 = 1;
