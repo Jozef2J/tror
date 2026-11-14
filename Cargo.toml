@@ -17,6 +17,7 @@ flate2 = "1.1.11"
 log = "0.4.35"
 memchr = "2.8.3"
 png = "0.18"
+wasmi = { version = "2.0.0", default-features = false, features = ["std", "validate", "portable-dispatch"] }
 mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust", "native-tls"] }
 native-tls = "0.2.18"
 ocb3 = "0.2.0"
@@ -64,6 +65,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 dbus-secret-service-keyring-store = { version = "1", features = ["crypto-openssl", "vendored"] }
 
 [dev-dependencies]
+wat = "1"
 ron = "0.12.3"
 
 [patch.crates-io]

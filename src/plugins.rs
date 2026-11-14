@@ -10,6 +10,63 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 
 const GUIDE: &str = r#"Плагины TrorPad
 
+Есть два вида плагинов.
+
+1. Плагины на Rust (WebAssembly) — основной вид.
+Плагин — это папка с файлами plugin.json и plugin.wasm. Код работает
+внутри TrorPad в песочнице: без доступа к сети, к паролям и к файлам вне
+открытой папки проекта (и то только с разрешением "fs").
+
+{
+  "id": "text-tools",
+  "name": "Текстовые инструменты",
+  "version": "1.0.0",
+  "permissions": [],
+  "events": ["saved", "opened"],
+  "commands": [
+    { "id": "sort", "title": "Сортировать строки", "key": "Ctrl+Alt+S" }
+  ]
+}
+
+commands — пункты меню «Плагины», key — необязательное сочетание клавиш.
+events   — события: "saved" (файл сохранён), "opened" (файл открыт).
+permissions — "fs": чтение и запись файлов внутри папки проекта.
+
+Плагин пишется на Rust с библиотекой trorpad-plugin:
+
+  [lib]
+  crate-type = ["cdylib"]
+
+  [dependencies]
+  trorpad-plugin = { git = "https://github.com/Jozef2J/tror" }
+
+  use trorpad_plugin::{Plugin, host};
+
+  #[derive(Default)]
+  struct Upper;
+
+  impl Plugin for Upper {
+      fn command(&mut self, _id: &str) -> Result<(), String> {
+          let text = host::selected_text()?;
+          host::replace_selection(&text.to_uppercase())
+      }
+  }
+
+  trorpad_plugin::export!(Upper);
+
+Сборка: rustup target add wasm32-unknown-unknown
+        cargo build --release --target wasm32-unknown-unknown
+Готовый .wasm из target/wasm32-unknown-unknown/release переименуйте
+в plugin.wasm и положите рядом с plugin.json в отдельную папку здесь.
+
+Что доступно в host: text, selection, selected_text, info, replace,
+replace_selection, select, notify, log, log_error, open_tab, read_file,
+write_file, storage_get, storage_set. Позиции считаются в символах.
+Все правки одной команды отменяются одним Ctrl+Z. Если плагин зациклится
+или упадёт, TrorPad остановит его до «Перечитать». Пример — плагин
+«Текстовые инструменты» в выпусках на GitHub.
+
+2. Внешние программы.
 Плагин — это файл .json в этой папке. Он описывает внешнюю программу:
 TrorPad передаёт ей текст через стандартный ввод и забирает результат
 из стандартного вывода. Программа может быть на чём угодно: PHP, Python,
@@ -109,6 +166,7 @@ pub struct Finished {
 pub struct Plugins {
     pub dir: Option<PathBuf>,
     pub list: Vec<Plugin>,
+    pub wasm: Vec<crate::wasm::Loaded>,
     pub errors: Vec<String>,
     pub running: usize,
     tx: Sender<Finished>,
@@ -249,6 +307,7 @@ impl Plugins {
         let mut plugins = Self {
             dir,
             list: Vec::new(),
+            wasm: Vec::new(),
             errors: Vec::new(),
             running: 0,
             tx,
@@ -259,19 +318,30 @@ impl Plugins {
     }
 
     pub fn reload(&mut self) {
-        let (list, errors) = self.dir.as_deref().map(load).unwrap_or_default();
+        let (list, mut errors) = self.dir.as_deref().map(load).unwrap_or_default();
+        let (wasm, wasm_errors) = self
+            .dir
+            .as_deref()
+            .map(crate::wasm::load_all)
+            .unwrap_or_default();
+        errors.extend(wasm_errors);
         self.list = list;
+        self.wasm = wasm;
         self.errors = errors;
+    }
+
+    pub fn count(&self) -> usize {
+        self.list.len() + self.wasm.len()
     }
 
     pub fn prepare(&mut self) -> Result<PathBuf, String> {
         let dir = self.dir.clone().ok_or("нет папки данных программы")?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let guide = dir.join("КАК-ПИСАТЬ-ПЛАГИНЫ.txt");
-        if !guide.exists() {
+        if std::fs::read_to_string(&guide).ok().as_deref() != Some(GUIDE) {
             std::fs::write(&guide, GUIDE).map_err(|e| e.to_string())?;
         }
-        let empty = load(&dir).0.is_empty();
+        let empty = load(&dir).0.is_empty() && crate::wasm::load_all(&dir).0.is_empty();
         let example = dir.join("sort-lines.json");
         if empty && !example.exists() {
             std::fs::write(&example, EXAMPLE).map_err(|e| e.to_string())?;

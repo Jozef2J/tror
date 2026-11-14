@@ -29,6 +29,7 @@ mod theme;
 mod trace;
 mod update;
 mod vault;
+mod wasm;
 mod widgets;
 
 use eframe::egui;

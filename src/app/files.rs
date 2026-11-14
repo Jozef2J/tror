@@ -110,6 +110,7 @@ impl TrorApp {
                 self.active = self.docs.len() - 1;
                 self.focus_editor = true;
                 self.remember(path);
+                self.plugin_event("opened", self.active, now);
             }
             Err(e) => self.notify(format!("Не удалось открыть {}: {e}", path.display()), now),
         }
@@ -191,6 +192,7 @@ impl TrorApp {
                 let title = doc.title();
                 self.preview.touch();
                 self.notify(format!("Сохранено: {title}"), now);
+                self.plugin_event("saved", index, now);
                 true
             }
             Err(e) => {
@@ -225,6 +227,7 @@ impl TrorApp {
                 self.preview.touch();
                 self.remember(&path);
                 self.notify(format!("Сохранено: {}", path.display()), now);
+                self.plugin_event("saved", index, now);
                 true
             }
             Err(e) => {

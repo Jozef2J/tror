@@ -1,0 +1,12 @@
+[package]
+name = "text-tools"
+version = "1.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+trorpad-plugin = { path = "../../trorpad-plugin" }
+serde_json = { version = "1", features = ["preserve_order"] }

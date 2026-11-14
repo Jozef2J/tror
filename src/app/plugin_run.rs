@@ -1,3 +1,5 @@
+use serde_json::json;
+
 use super::*;
 
 impl TrorApp {
@@ -107,6 +109,112 @@ impl TrorApp {
                     now,
                 ),
             }
+        }
+    }
+}
+
+impl TrorApp {
+    pub(super) fn plugin_command(&mut self, plugin: usize, command: usize, now: f64) {
+        let Some(id) = self
+            .plugins
+            .wasm
+            .get(plugin)
+            .and_then(|p| p.manifest.commands.get(command))
+            .map(|c| c.id.clone())
+        else {
+            return;
+        };
+        let target = (!self.docs.is_empty()).then_some(self.active);
+        self.plugin_send(
+            plugin,
+            &json!({"method": "command", "params": {"id": id}}),
+            target,
+            now,
+        );
+    }
+
+    pub(super) fn plugin_event(&mut self, event: &str, index: usize, now: f64) {
+        let Some(doc) = self.docs.get(index) else {
+            return;
+        };
+        let message = json!({"method": "event", "params": {"name": event, "path": doc.location()}});
+        for plugin in 0..self.plugins.wasm.len() {
+            let wasm = &self.plugins.wasm[plugin];
+            if wasm.broken.is_none() && wasm.wants(event) {
+                self.plugin_send(plugin, &message, Some(index), now);
+            }
+        }
+    }
+
+    fn plugin_send(
+        &mut self,
+        plugin: usize,
+        message: &serde_json::Value,
+        target: Option<usize>,
+        now: f64,
+    ) {
+        use crate::wasm::{Effect, Snapshot};
+        let root = self.project.root.clone();
+        let snap = target.and_then(|i| self.docs.get(i)).map(|doc| Snapshot {
+            rope: doc.rope.clone(),
+            sel: doc.sel,
+            path: doc.location(),
+            syntax: doc.syntax.clone(),
+            root: root.clone(),
+        });
+        let snap = snap.or_else(|| {
+            root.clone().map(|root| Snapshot {
+                rope: Default::default(),
+                sel: (0, 0),
+                path: None,
+                syntax: String::new(),
+                root: Some(root),
+            })
+        });
+        let has_doc = target.is_some_and(|i| i < self.docs.len());
+        let Some(loaded) = self.plugins.wasm.get_mut(plugin) else {
+            return;
+        };
+        let name = loaded.manifest.name.clone();
+        let started = std::time::Instant::now();
+        let outcome = loaded.send(message, snap);
+        if self.perf.is_some() {
+            eprintln!(
+                "плагин {name}: {:.1} мс",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let mut edits = Vec::new();
+        let mut moved = false;
+        for effect in outcome.effects {
+            match effect {
+                Effect::Edit(range, text) => edits.push((range, text)),
+                Effect::Select(..) => moved = true,
+                Effect::Notify(text) => self.notify(format!("{name}: {text}"), now),
+                Effect::Log(text, error) => {
+                    crate::trace::line(format!("[plugin {name}] {text}"), error)
+                }
+                Effect::OpenTab(title, text) => {
+                    self.new_doc();
+                    let syntax = self.syntaxes.detect(Some(Path::new(&title)), &text);
+                    if let Some(doc) = self.docs.last_mut() {
+                        doc.insert_text(&text);
+                        doc.move_to(0, false);
+                        doc.syntax = syntax;
+                    }
+                }
+            }
+        }
+        if has_doc
+            && (!edits.is_empty() || moved)
+            && let (Some(index), Some(sel)) = (target, outcome.sel)
+            && let Some(doc) = self.docs.get_mut(index)
+        {
+            doc.apply_edits(&edits, sel);
+        }
+        if let Some(error) = outcome.error {
+            crate::trace::line(format!("[plugin {name}] {error}"), true);
+            self.notify(format!("Плагин «{name}»: {error}"), now);
         }
     }
 }

@@ -1,0 +1,14 @@
+{
+  "id": "text-tools",
+  "name": "Текстовые инструменты",
+  "version": "1.0.0",
+  "wasm": "plugin.wasm",
+  "events": ["saved"],
+  "commands": [
+    { "id": "sort", "title": "Сортировать строки" },
+    { "id": "unique", "title": "Удалить повторяющиеся строки" },
+    { "id": "reverse", "title": "Обратный порядок строк" },
+    { "id": "json", "title": "Форматировать JSON", "key": "Ctrl+Alt+J" },
+    { "id": "stats", "title": "Статистика текста" }
+  ]
+}

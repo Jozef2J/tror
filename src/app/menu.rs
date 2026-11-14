@@ -408,7 +408,31 @@ impl TrorApp {
                         actions.push(Action::Plugin(index));
                     }
                 }
-                if self.plugins.list.is_empty() {
+                for (index, plugin) in self.plugins.wasm.iter().enumerate() {
+                    let enabled = plugin.broken.is_none();
+                    let commands = &plugin.manifest.commands;
+                    let mut entry = |ui: &mut Ui, command: usize, title: &str| {
+                        let shortcut = crate::keys::parse(&commands[command].key)
+                            .map(|s| crate::keys::format(&s))
+                            .unwrap_or_default();
+                        if item(ui, title, &shortcut, enabled) {
+                            actions.push(Action::PluginCommand(index, command));
+                        }
+                    };
+                    match commands.len() {
+                        0 => {}
+                        1 => entry(ui, 0, &commands[0].title),
+                        _ => {
+                            ui.menu_button(&plugin.manifest.name, |ui| {
+                                ui.set_min_width(240.0);
+                                for (command, def) in commands.iter().enumerate() {
+                                    entry(ui, command, &def.title);
+                                }
+                            });
+                        }
+                    }
+                }
+                if self.plugins.count() == 0 {
                     ui.weak("Плагинов пока нет");
                 }
                 ui.separator();

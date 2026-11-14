@@ -78,9 +78,33 @@ jobs:
             trorpad.exe
             trorpad-setup.exe
 
+  plugin:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: sdk
+      - run: cargo test --locked --manifest-path sdk/Cargo.toml
+      - run: cargo build --locked --release --manifest-path sdk/Cargo.toml --target wasm32-unknown-unknown -p text-tools
+      - run: |
+          mkdir -p pack/text-tools
+          cp sdk/target/wasm32-unknown-unknown/release/text_tools.wasm pack/text-tools/plugin.wasm
+          cp sdk/examples/text-tools/plugin.json pack/text-tools/
+          (cd pack && zip -r ../trorpad-plugin-text-tools.zip text-tools)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          retention-days: 14
+          name: trorpad-plugin-text-tools
+          path: trorpad-plugin-text-tools.zip
+
   release:
     timeout-minutes: 10
-    needs: [build]
+    needs: [build, plugin]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     permissions:
@@ -110,6 +134,9 @@ jobs:
             tar -xzf dist/trorpad-linux-x86_64/trorpad-linux-x86_64.tar.gz -C out
             mv out/trorpad out/trorpad-linux-x86_64
             cp out/trorpad-linux-x86_64 out/tror-linux-x86_64
+          fi
+          if [ -f dist/trorpad-plugin-text-tools/trorpad-plugin-text-tools.zip ]; then
+            cp dist/trorpad-plugin-text-tools/trorpad-plugin-text-tools.zip out/
           fi
           (cd out && sha256sum * > SHA256SUMS)
           git log -1 --pretty=%B > notes.txt

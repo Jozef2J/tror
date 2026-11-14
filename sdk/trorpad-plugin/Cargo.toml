@@ -1,0 +1,9 @@
+[package]
+name = "trorpad-plugin"
+version = "1.0.0"
+edition = "2024"
+description = "SDK для плагинов TrorPad на Rust (wasm32-unknown-unknown)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

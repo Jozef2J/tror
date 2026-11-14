@@ -321,6 +321,7 @@ impl TrorApp {
                 dock::show(&mut self.dock, Pane::Diff, &self.settings.floats);
             }
             Action::Plugin(index) => self.run_plugin(index, ctx),
+            Action::PluginCommand(plugin, command) => self.plugin_command(plugin, command, now),
             Action::PluginsFolder => {
                 let opened = self
                     .plugins
@@ -334,16 +335,20 @@ impl TrorApp {
             Action::PluginsReload => {
                 self.plugins.reload();
                 let errors = self.plugins.errors.clone();
+                for plugin in &self.plugins.wasm {
+                    let m = &plugin.manifest;
+                    crate::trace::line(format!("[plugin] {} {} ({})", m.name, m.version, m.id), false);
+                }
                 for error in &errors {
                     crate::trace::line(format!("[plugin] {error}"), true);
                 }
                 self.notify(
                     if errors.is_empty() {
-                        format!("Плагинов загружено: {}", self.plugins.list.len())
+                        format!("Плагинов загружено: {}", self.plugins.count())
                     } else {
                         format!(
                             "Плагинов загружено: {}, с ошибками: {} (подробности в журнале)",
-                            self.plugins.list.len(),
+                            self.plugins.count(),
                             errors.len()
                         )
                     },
@@ -440,6 +445,16 @@ impl TrorApp {
                 && ctx.input_mut(|i| i.consume_shortcut(&shortcut))
             {
                 actions.push(Action::Plugin(index));
+            }
+        }
+        for (index, plugin) in self.plugins.wasm.iter().enumerate() {
+            for (command, def) in plugin.manifest.commands.iter().enumerate() {
+                if let Some(shortcut) = crate::keys::parse(&def.key)
+                    && crate::keys::usable(&shortcut)
+                    && ctx.input_mut(|i| i.consume_shortcut(&shortcut))
+                {
+                    actions.push(Action::PluginCommand(index, command));
+                }
             }
         }
         if self.search.open

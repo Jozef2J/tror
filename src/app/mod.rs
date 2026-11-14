@@ -115,6 +115,7 @@ enum Action {
     Edit(&'static str),
     Goto(u64, usize),
     Plugin(usize),
+    PluginCommand(usize, usize),
     Detach(Pane),
     Attach(Pane),
     PluginsFolder,

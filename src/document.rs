@@ -623,6 +623,23 @@ impl Document {
         self.reveal = true;
     }
 
+    pub fn apply_edits(&mut self, edits: &[(Range<usize>, String)], sel: (usize, usize)) {
+        self.extra.clear();
+        self.block = None;
+        if !edits.is_empty() {
+            self.checkpoint(EditKind::Other);
+            for (range, text) in edits {
+                let len = self.len();
+                self.apply(range.start.min(len)..range.end.min(len), text);
+            }
+        }
+        let len = self.len();
+        self.sel = (sel.0.min(len), sel.1.min(len));
+        self.last_edit = None;
+        self.goal_x = None;
+        self.reveal = true;
+    }
+
     pub fn set_text(&mut self, text: &str) {
         self.checkpoint(EditKind::Other);
         self.rope = Rope::from_str(text);
