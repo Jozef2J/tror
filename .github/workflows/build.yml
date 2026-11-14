@@ -96,7 +96,6 @@ jobs:
           cp sdk/target/wasm32-unknown-unknown/release/text_tools.wasm pack/text-tools/plugin.wasm
           cp sdk/examples/text-tools/plugin.json pack/text-tools/
           (cd pack && zip -r ../trorpad-plugin-text-tools.zip text-tools)
-          base64 -w0 trorpad-plugin-text-tools.zip; echo
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           retention-days: 14

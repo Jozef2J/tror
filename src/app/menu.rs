@@ -425,7 +425,8 @@ impl TrorApp {
                                 actions.push(Action::PluginPanel(index, panel));
                             }
                         }
-                        if !manifest.settings.is_empty() && item(ui, "Настройки…", "", true) {
+                        if !manifest.settings.is_empty() && item(ui, "Настройки…", "", true)
+                        {
                             actions.push(Action::PluginSettings(index));
                         }
                     };

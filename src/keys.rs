@@ -90,6 +90,11 @@ pub fn usable(shortcut: &KeyboardShortcut) -> bool {
     !plain || function
 }
 
+pub fn weight(s: &KeyboardShortcut) -> u8 {
+    let m = s.modifiers;
+    m.shift as u8 + m.alt as u8 + (m.command || m.ctrl || m.mac_cmd) as u8
+}
+
 pub struct Keys {
     bound: Vec<(usize, KeyboardShortcut)>,
 }
@@ -104,10 +109,6 @@ impl Keys {
                 Some((index, parse(text)?))
             })
             .collect();
-        let weight = |s: &KeyboardShortcut| {
-            let m = s.modifiers;
-            m.shift as u8 + m.alt as u8 + (m.command || m.ctrl || m.mac_cmd) as u8
-        };
         bound.sort_by_key(|(_, shortcut)| std::cmp::Reverse(weight(shortcut)));
         Self { bound }
     }

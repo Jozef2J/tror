@@ -451,7 +451,6 @@ impl TrorApp {
             app.update.rx = Some(crate::update::check());
         }
         app.next_id = top;
-        app.sync_plugin_panels();
         if active < app.docs.len() {
             app.active = active;
         }
@@ -465,6 +464,7 @@ impl TrorApp {
                 app.open_path(&path, 0.0);
             }
         }
+        app.sync_plugin_panels();
         app
     }
 }

@@ -340,7 +340,10 @@ impl TrorApp {
                 let errors = self.plugins.errors.clone();
                 for plugin in &self.plugins.wasm {
                     let m = &plugin.manifest;
-                    crate::trace::line(format!("[plugin] {} {} ({})", m.name, m.version, m.id), false);
+                    crate::trace::line(
+                        format!("[plugin] {} {} ({})", m.name, m.version, m.id),
+                        false,
+                    );
                 }
                 for error in &errors {
                     crate::trace::line(format!("[plugin] {error}"), true);
@@ -385,7 +388,33 @@ impl TrorApp {
             return;
         }
         let keys = crate::keys::Keys::new(&self.settings.keys);
+        let weight = crate::keys::weight;
+        let mut extra: Vec<(egui::KeyboardShortcut, Action)> = Vec::new();
+        for (index, plugin) in self.plugins.list.iter().enumerate() {
+            if let Some(shortcut) = crate::keys::parse(&plugin.shortcut) {
+                extra.push((shortcut, Action::Plugin(index)));
+            }
+        }
+        for (index, plugin) in self.plugins.wasm.iter().enumerate() {
+            for (command, def) in plugin.manifest.commands.iter().enumerate() {
+                if let Some(shortcut) = crate::keys::parse(&def.key) {
+                    extra.push((shortcut, Action::PluginCommand(index, command)));
+                }
+            }
+        }
+        extra.retain(|(shortcut, _)| crate::keys::usable(shortcut));
+        extra.sort_by_key(|(shortcut, _)| std::cmp::Reverse(weight(shortcut)));
+        let mut extra = extra.into_iter().peekable();
         for (index, shortcut) in keys.bound() {
+            while let Some((next, _)) = extra.peek()
+                && weight(next) > weight(shortcut)
+            {
+                if let Some((next, action)) = extra.next()
+                    && ctx.input_mut(|i| i.consume_shortcut(&next))
+                {
+                    actions.push(action);
+                }
+            }
             let (id, _, _, editing) = crate::keys::COMMANDS[*index];
             if self.console.focused() && editing {
                 continue;
@@ -442,22 +471,9 @@ impl TrorApp {
                 _ => Action::Preview,
             });
         }
-        for (index, plugin) in self.plugins.list.iter().enumerate() {
-            if let Some(shortcut) = crate::keys::parse(&plugin.shortcut)
-                && crate::keys::usable(&shortcut)
-                && ctx.input_mut(|i| i.consume_shortcut(&shortcut))
-            {
-                actions.push(Action::Plugin(index));
-            }
-        }
-        for (index, plugin) in self.plugins.wasm.iter().enumerate() {
-            for (command, def) in plugin.manifest.commands.iter().enumerate() {
-                if let Some(shortcut) = crate::keys::parse(&def.key)
-                    && crate::keys::usable(&shortcut)
-                    && ctx.input_mut(|i| i.consume_shortcut(&shortcut))
-                {
-                    actions.push(Action::PluginCommand(index, command));
-                }
+        for (shortcut, action) in extra {
+            if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+                actions.push(action);
             }
         }
         if self.search.open
