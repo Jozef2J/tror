@@ -70,6 +70,7 @@ impl eframe::App for TrorApp {
         }
         self.check_missing(&ctx);
         let modal_open = self.goto.is_some()
+            || self.plugin_dialog.is_some()
             || self.macro_dialog.is_some()
             || self.rename.is_some()
             || self.confirm.is_some()
@@ -109,6 +110,7 @@ impl eframe::App for TrorApp {
         self.transfers();
         self.db.poll();
         self.plugin_results(now);
+        self.plugin_finished(now);
         for note in self.console.poll() {
             self.notify(note, now);
         }
@@ -341,6 +343,7 @@ impl eframe::App for TrorApp {
         }
 
         self.goto_modal(&ctx, &pal);
+        self.plugin_modal(&ctx, &pal);
         self.macro_modal(&ctx, &pal);
         self.rename_modal(&ctx, &pal);
         self.confirm_modal(&ctx);

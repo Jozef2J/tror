@@ -321,7 +321,9 @@ impl TrorApp {
                 dock::show(&mut self.dock, Pane::Diff, &self.settings.floats);
             }
             Action::Plugin(index) => self.run_plugin(index, ctx),
-            Action::PluginCommand(plugin, command) => self.plugin_command(plugin, command, now),
+            Action::PluginCommand(plugin, command) => self.plugin_command(plugin, command),
+            Action::PluginPanel(plugin, panel) => self.open_plugin_panel(plugin, panel),
+            Action::PluginSettings(plugin) => self.open_plugin_settings(plugin),
             Action::PluginsFolder => {
                 let opened = self
                     .plugins
@@ -334,6 +336,7 @@ impl TrorApp {
             }
             Action::PluginsReload => {
                 self.plugins.reload();
+                self.sync_plugin_panels();
                 let errors = self.plugins.errors.clone();
                 for plugin in &self.plugins.wasm {
                     let m = &plugin.manifest;

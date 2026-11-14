@@ -19,6 +19,30 @@ pub enum Pane {
     Preview,
     Project,
     HostsN(u8),
+    Plugin(u64),
+}
+
+static PLUGIN_PANES: std::sync::Mutex<Vec<(u64, String, String)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_plugin_panes(panes: Vec<(u64, String, String)>) {
+    if let Ok(mut list) = PLUGIN_PANES.lock() {
+        *list = panes;
+    }
+}
+
+fn plugin_pane(key: u64) -> Option<(String, String)> {
+    PLUGIN_PANES
+        .lock()
+        .ok()?
+        .iter()
+        .find(|p| p.0 == key)
+        .map(|p| (p.1.clone(), p.2.clone()))
+}
+
+pub fn plugin_key(plugin: &str, panel: &str) -> u64 {
+    format!("{plugin}/{panel}")
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
 #[derive(PartialEq)]
@@ -56,6 +80,7 @@ impl Pane {
             Pane::Db => (300.0, 160.0),
             Pane::Settings | Pane::Diff => (320.0, 160.0),
             Pane::Preview => (200.0, 120.0),
+            Pane::Plugin(_) => (180.0, 100.0),
         }
     }
 
@@ -63,6 +88,7 @@ impl Pane {
         match self {
             Pane::Hosts2 => "Подключение 2".into(),
             Pane::HostsN(n) => format!("Подключение {}", n as usize + 1),
+            Pane::Plugin(key) => plugin_pane(key).map_or_else(|| "Плагин".into(), |p| p.0),
             other => other.label().into(),
         }
     }
@@ -72,7 +98,7 @@ impl Pane {
             Pane::Welcome => "TrorPad",
             Pane::Doc(_) => "",
             Pane::Hosts => "Удалённые хосты",
-            Pane::Hosts2 | Pane::HostsN(_) => "",
+            Pane::Hosts2 | Pane::HostsN(_) | Pane::Plugin(_) => "",
             Pane::Project => "Проект",
             Pane::Console => "Консоль",
             Pane::Log => "Журнал",
@@ -88,6 +114,11 @@ impl Pane {
         match self {
             Pane::Hosts | Pane::Hosts2 | Pane::HostsN(_) | Pane::Project => Zone::Left,
             Pane::Console | Pane::Log | Pane::ServerSearch => Zone::Bottom,
+            Pane::Plugin(key) => match plugin_pane(key).map(|p| p.1).as_deref() {
+                Some("bottom") => Zone::Bottom,
+                Some("center") => Zone::Center,
+                _ => Zone::Left,
+            },
             _ => Zone::Center,
         }
     }

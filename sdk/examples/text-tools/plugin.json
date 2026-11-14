@@ -1,7 +1,7 @@
 {
   "id": "text-tools",
   "name": "Текстовые инструменты",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "wasm": "plugin.wasm",
   "events": ["saved"],
   "commands": [
@@ -9,6 +9,16 @@
     { "id": "unique", "title": "Удалить повторяющиеся строки" },
     { "id": "reverse", "title": "Обратный порядок строк" },
     { "id": "json", "title": "Форматировать JSON", "key": "Ctrl+Alt+J" },
+    { "id": "wrap", "title": "Обернуть в тег…", "key": "Ctrl+Alt+W" },
+    { "id": "case", "title": "Изменить регистр…" },
     { "id": "stats", "title": "Статистика текста" }
+  ],
+  "panels": [
+    { "id": "words", "title": "Частые слова", "dock": "left" }
+  ],
+  "settings": [
+    { "key": "numeric", "title": "Числа сортировать по значению", "type": "bool", "default": true },
+    { "key": "indent", "title": "Отступ в JSON", "type": "choice", "options": ["2", "4", "tab"], "default": "4" },
+    { "key": "top", "title": "Слов в панели", "type": "number", "default": 15 }
   ]
 }

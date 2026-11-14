@@ -9,4 +9,5 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 trorpad-plugin = { path = "../../trorpad-plugin" }
+serde = "1"
 serde_json = { version = "1", features = ["preserve_order"] }

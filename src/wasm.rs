@@ -9,7 +9,7 @@ use wasmi::{
 };
 
 #[cfg(not(test))]
-const FUEL: u64 = 1_000_000_000;
+const FUEL: u64 = 4_000_000_000;
 #[cfg(test)]
 const FUEL: u64 = 2_000_000;
 const API: u32 = 1;
@@ -26,6 +26,26 @@ pub struct CommandDef {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+pub struct PanelDef {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub dock: String,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct SettingDef {
+    pub key: String,
+    pub title: String,
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub default: Value,
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
 pub struct Manifest {
     pub id: String,
     pub name: String,
@@ -39,6 +59,10 @@ pub struct Manifest {
     pub events: Vec<String>,
     #[serde(default)]
     pub commands: Vec<CommandDef>,
+    #[serde(default)]
+    pub panels: Vec<PanelDef>,
+    #[serde(default)]
+    pub settings: Vec<SettingDef>,
 }
 
 fn default_wasm() -> String {
@@ -50,6 +74,7 @@ pub struct Outcome {
     pub effects: Vec<Effect>,
     pub sel: Option<(usize, usize)>,
     pub error: Option<String>,
+    pub broken: bool,
 }
 
 pub struct Snapshot {
@@ -67,19 +92,24 @@ pub enum Effect {
     Notify(String),
     Log(String, bool),
     OpenTab(String, String),
+    Prompt(String, String, String),
+    Pick(String, String, Vec<String>),
+    Panel(String, Value),
+    ShowPanel(String),
 }
 
 struct Host {
     snap: Option<Snapshot>,
     effects: Vec<Effect>,
     reply: Vec<u8>,
-    permissions: Vec<String>,
-    storage: PathBuf,
+    manifest: Manifest,
+    dir: PathBuf,
     limits: StoreLimits,
 }
 
 pub struct Loaded {
     pub manifest: Manifest,
+    pub dir: PathBuf,
     store: Store<Host>,
     memory: Memory,
     alloc: TypedFunc<u32, u32>,
@@ -121,6 +151,26 @@ fn inside(root: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+pub fn settings_of(dir: &Path, manifest: &Manifest) -> serde_json::Map<String, Value> {
+    let saved = storage_load(&dir.join("settings.json"));
+    manifest
+        .settings
+        .iter()
+        .map(|d| {
+            let value = saved
+                .get(&d.key)
+                .cloned()
+                .unwrap_or_else(|| d.default.clone());
+            (d.key.clone(), value)
+        })
+        .collect()
+}
+
+pub fn save_settings(dir: &Path, values: &serde_json::Map<String, Value>) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(values).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("settings.json"), text).map_err(|e| e.to_string())
+}
+
 fn storage_load(path: &Path) -> serde_json::Map<String, Value> {
     std::fs::read_to_string(path)
         .ok()
@@ -138,7 +188,7 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
     };
     let n = |k: &str| params.get(k).and_then(Value::as_u64).unwrap_or_default() as usize;
     let allowed = |host: &Host, p: &str| {
-        if host.permissions.iter().any(|x| x == p) {
+        if host.manifest.permissions.iter().any(|x| x == p) {
             Ok(())
         } else {
             Err(format!("нет разрешения «{p}» в plugin.json"))
@@ -162,18 +212,52 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
             host.effects.push(Effect::OpenTab(s("title"), s("text")));
             Ok(Value::Null)
         }
-        "storage_get" => Ok(storage_load(&host.storage)
+        "prompt" => {
+            host.effects
+                .push(Effect::Prompt(s("id"), s("title"), s("value")));
+            Ok(Value::Null)
+        }
+        "pick" => {
+            let items = params
+                .get("items")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_str().unwrap_or_default().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            host.effects.push(Effect::Pick(s("id"), s("title"), items));
+            Ok(Value::Null)
+        }
+        "panel" | "show_panel" => {
+            let id = s("id");
+            if !host.manifest.panels.iter().any(|p| p.id == id) {
+                return Err(format!("панель «{id}» не описана в plugin.json"));
+            }
+            host.effects.push(if method == "panel" {
+                Effect::Panel(id, params.get("ui").cloned().unwrap_or(Value::Null))
+            } else {
+                Effect::ShowPanel(id)
+            });
+            Ok(Value::Null)
+        }
+        "setting" => settings_of(&host.dir, &host.manifest)
+            .get(&s("key"))
+            .cloned()
+            .ok_or_else(|| format!("настройка «{}» не описана в plugin.json", s("key"))),
+        "storage_get" => Ok(storage_load(&host.dir.join("storage.json"))
             .get(&s("key"))
             .cloned()
             .unwrap_or(Value::Null)),
         "storage_set" => {
-            let mut map = storage_load(&host.storage);
+            let mut map = storage_load(&host.dir.join("storage.json"));
             map.insert(
                 s("key"),
                 params.get("value").cloned().unwrap_or(Value::Null),
             );
             let text = serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?;
-            std::fs::write(&host.storage, text).map_err(|e| e.to_string())?;
+            std::fs::write(host.dir.join("storage.json"), text).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "read_file" | "write_file" => {
@@ -303,8 +387,8 @@ impl Loaded {
             snap: None,
             effects: Vec::new(),
             reply: Vec::new(),
-            permissions: manifest.permissions.clone(),
-            storage: dir.join("storage.json"),
+            manifest: manifest.clone(),
+            dir: dir.clone(),
             limits: StoreLimitsBuilder::new().memory_size(MEMORY).build(),
         };
         let mut store = Store::new(&engine, host);
@@ -334,6 +418,7 @@ impl Loaded {
             .map_err(|e| format!("trorpad_handle: {e}"))?;
         Ok(Self {
             manifest,
+            dir,
             store,
             memory,
             alloc,
@@ -347,6 +432,7 @@ impl Loaded {
         if let Some(reason) = &self.broken {
             return Outcome {
                 error: Some(format!("плагин остановлен: {reason}")),
+                broken: true,
                 ..Outcome::default()
             };
         }
@@ -364,6 +450,7 @@ impl Loaded {
                 effects,
                 sel,
                 error,
+                broken: false,
             },
             Err(e) => {
                 effects.retain(|e| matches!(e, Effect::Log(..)));
@@ -383,6 +470,7 @@ impl Loaded {
                     effects,
                     sel: None,
                     error: Some(reason),
+                    broken: true,
                 }
             }
         }
@@ -417,6 +505,65 @@ impl Loaded {
             .get("error")
             .and_then(Value::as_str)
             .map(str::to_owned))
+    }
+}
+
+pub struct Job {
+    pub message: Value,
+    pub snap: Option<Snapshot>,
+    pub doc: Option<(u64, u64)>,
+    pub wake: Box<dyn Fn() + Send>,
+}
+
+pub struct Done {
+    pub plugin: usize,
+    pub doc: Option<(u64, u64)>,
+    pub outcome: Outcome,
+    pub took: std::time::Duration,
+}
+
+pub struct Worker {
+    pub manifest: Manifest,
+    pub dir: PathBuf,
+    pub broken: Option<String>,
+    pub busy: usize,
+    tx: std::sync::mpsc::Sender<Job>,
+}
+
+impl Worker {
+    pub fn spawn(plugin: usize, mut loaded: Loaded, done: std::sync::mpsc::Sender<Done>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        let manifest = loaded.manifest.clone();
+        let dir = loaded.dir.clone();
+        std::thread::spawn(move || {
+            for job in rx {
+                let started = std::time::Instant::now();
+                let outcome = loaded.send(&job.message, job.snap);
+                let sent = done.send(Done {
+                    plugin,
+                    doc: job.doc,
+                    outcome,
+                    took: started.elapsed(),
+                });
+                (job.wake)();
+                if sent.is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            manifest,
+            dir,
+            broken: None,
+            busy: 0,
+            tx,
+        }
+    }
+
+    pub fn run(&mut self, job: Job) {
+        if self.tx.send(job).is_ok() {
+            self.busy += 1;
+        }
     }
 
     pub fn wants(&self, event: &str) -> bool {
@@ -511,6 +658,8 @@ mod tests {
             permissions: vec!["fs".into()],
             events: vec!["saved".into()],
             commands: Vec::new(),
+            panels: Vec::new(),
+            settings: Vec::new(),
         };
         let bytes = wat::parse_str(ECHO).unwrap();
         let dir = std::env::temp_dir();
@@ -520,6 +669,23 @@ mod tests {
             None
         );
         loaded
+    }
+
+    fn test_host(snap: Snapshot, dir: PathBuf) -> Host {
+        let mut manifest = plugin().manifest;
+        manifest.panels = serde_json::from_value(json!([{"id":"main","title":"Главная"}])).unwrap();
+        manifest.settings = serde_json::from_value(json!([
+            {"key":"name","title":"Имя","type":"text","default":"мир"}
+        ]))
+        .unwrap();
+        Host {
+            snap: Some(snap),
+            effects: Vec::new(),
+            reply: Vec::new(),
+            manifest,
+            dir,
+            limits: StoreLimits::default(),
+        }
     }
 
     fn snap(text: &str, root: Option<PathBuf>) -> Snapshot {
@@ -560,14 +726,7 @@ mod tests {
             Some(snap("x", Some(dir.clone()))),
         );
         assert_eq!(out.error.as_deref(), Some("boom"));
-        let mut host = Host {
-            snap: Some(snap("x", Some(dir.clone()))),
-            effects: Vec::new(),
-            reply: Vec::new(),
-            permissions: vec!["fs".into()],
-            storage: dir.join("s.json"),
-            limits: StoreLimits::default(),
-        };
+        let mut host = test_host(snap("x", Some(dir.clone())), dir.clone());
         assert!(request(&mut host, "read_file", &json!({"path":"../secret"})).is_err());
         #[cfg(unix)]
         {
@@ -585,7 +744,7 @@ mod tests {
             request(&mut host, "read_file", &json!({"path":"a.txt"})).unwrap(),
             json!("data")
         );
-        host.permissions.clear();
+        host.manifest.permissions.clear();
         assert!(
             request(&mut host, "read_file", &json!({"path":"a.txt"}))
                 .unwrap_err()
@@ -612,6 +771,75 @@ mod tests {
     }
 
     #[test]
+    fn dialogs_panels_and_settings() {
+        let dir = std::env::temp_dir().join(format!("tror-ui-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut host = test_host(snap("x", None), dir.clone());
+        request(
+            &mut host,
+            "prompt",
+            &json!({"id":"q","title":"Имя?","value":"a"}),
+        )
+        .unwrap();
+        request(
+            &mut host,
+            "pick",
+            &json!({"id":"p","title":"Что?","items":["x","y"]}),
+        )
+        .unwrap();
+        request(
+            &mut host,
+            "panel",
+            &json!({"id":"main","ui":{"type":"text","text":"привет"}}),
+        )
+        .unwrap();
+        assert!(request(&mut host, "panel", &json!({"id":"nope"})).is_err());
+        request(&mut host, "show_panel", &json!({"id":"main"})).unwrap();
+        assert_eq!(
+            host.effects,
+            vec![
+                Effect::Prompt("q".into(), "Имя?".into(), "a".into()),
+                Effect::Pick("p".into(), "Что?".into(), vec!["x".into(), "y".into()]),
+                Effect::Panel("main".into(), json!({"type":"text","text":"привет"})),
+                Effect::ShowPanel("main".into()),
+            ]
+        );
+        assert_eq!(
+            request(&mut host, "setting", &json!({"key":"name"})).unwrap(),
+            json!("мир")
+        );
+        let mut values = settings_of(&dir, &host.manifest);
+        values.insert("name".into(), json!("Jozef"));
+        save_settings(&dir, &values).unwrap();
+        assert_eq!(
+            request(&mut host, "setting", &json!({"key":"name"})).unwrap(),
+            json!("Jozef")
+        );
+        assert!(request(&mut host, "setting", &json!({"key":"x"})).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn worker_runs_jobs_in_background() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut worker = Worker::spawn(3, plugin(), tx);
+        let woke = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = woke.clone();
+        worker.run(Job {
+            message: json!({"method":"command","params":{"id":"x"}}),
+            snap: Some(snap("hello world", None)),
+            doc: Some((7, 2)),
+            wake: Box::new(move || flag.store(true, std::sync::atomic::Ordering::SeqCst)),
+        });
+        assert_eq!(worker.busy, 1);
+        let done = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!((done.plugin, done.doc), (3, Some((7, 2))));
+        assert_eq!(done.outcome.effects.len(), 2);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(woke.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
     fn memory_growth_is_limited() {
         let mut p = plugin();
         assert_eq!(p.send(&json!({"method":"grow"}), None).error, None);
@@ -619,14 +847,7 @@ mod tests {
 
     #[test]
     fn replace_keeps_selection_consistent() {
-        let mut host = Host {
-            snap: Some(snap("abcdef", None)),
-            effects: Vec::new(),
-            reply: Vec::new(),
-            permissions: Vec::new(),
-            storage: PathBuf::new(),
-            limits: StoreLimits::default(),
-        };
+        let mut host = test_host(snap("abcdef", None), PathBuf::new());
         host.snap.as_mut().unwrap().sel = (4, 6);
         request(
             &mut host,

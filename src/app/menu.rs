@@ -410,24 +410,35 @@ impl TrorApp {
                 }
                 for (index, plugin) in self.plugins.wasm.iter().enumerate() {
                     let enabled = plugin.broken.is_none();
-                    let commands = &plugin.manifest.commands;
-                    let mut entry = |ui: &mut Ui, command: usize, title: &str| {
-                        let shortcut = crate::keys::parse(&commands[command].key)
-                            .map(|s| crate::keys::format(&s))
-                            .unwrap_or_default();
-                        if item(ui, title, &shortcut, enabled) {
-                            actions.push(Action::PluginCommand(index, command));
+                    let manifest = &plugin.manifest;
+                    let mut entries = |ui: &mut Ui| {
+                        for (command, def) in manifest.commands.iter().enumerate() {
+                            let shortcut = crate::keys::parse(&def.key)
+                                .map(|s| crate::keys::format(&s))
+                                .unwrap_or_default();
+                            if item(ui, &def.title, &shortcut, enabled) {
+                                actions.push(Action::PluginCommand(index, command));
+                            }
+                        }
+                        for (panel, def) in manifest.panels.iter().enumerate() {
+                            if item(ui, &def.title, "", enabled) {
+                                actions.push(Action::PluginPanel(index, panel));
+                            }
+                        }
+                        if !manifest.settings.is_empty() && item(ui, "Настройки…", "", true) {
+                            actions.push(Action::PluginSettings(index));
                         }
                     };
-                    match commands.len() {
+                    let count = manifest.commands.len()
+                        + manifest.panels.len()
+                        + usize::from(!manifest.settings.is_empty());
+                    match count {
                         0 => {}
-                        1 => entry(ui, 0, &commands[0].title),
+                        1 if manifest.settings.is_empty() => entries(ui),
                         _ => {
-                            ui.menu_button(&plugin.manifest.name, |ui| {
+                            ui.menu_button(&manifest.name, |ui| {
                                 ui.set_min_width(240.0);
-                                for (command, def) in commands.iter().enumerate() {
-                                    entry(ui, command, &def.title);
-                                }
+                                entries(ui);
                             });
                         }
                     }

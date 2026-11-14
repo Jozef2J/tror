@@ -505,6 +505,7 @@ impl TabViewer for Viewer<'_> {
             }
             Pane::Db => app.db.ui(ui, &pal, &mut app.remotes[0].store, font_size),
             Pane::Preview => {}
+            Pane::Plugin(key) => app.plugin_pane(ui, key, &pal),
         };
         let (min_w, min_h) = pane.min_size();
         let room = ui.available_size();

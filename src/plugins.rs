@@ -25,12 +25,21 @@ const GUIDE: &str = r#"Плагины TrorPad
   "events": ["saved", "opened"],
   "commands": [
     { "id": "sort", "title": "Сортировать строки", "key": "Ctrl+Alt+S" }
+  ],
+  "panels": [
+    { "id": "words", "title": "Частые слова", "dock": "left" }
+  ],
+  "settings": [
+    { "key": "indent", "title": "Отступ", "type": "choice", "options": ["2", "4"], "default": "4" }
   ]
 }
 
 commands — пункты меню «Плагины», key — необязательное сочетание клавиш.
 events   — события: "saved" (файл сохранён), "opened" (файл открыт).
 permissions — "fs": чтение и запись файлов внутри папки проекта.
+panels   — панели плагина; dock: "left", "bottom" или "center".
+settings — настройки (type: "text", "bool", "number", "choice"),
+           окно «Настройки…» в меню плагина.
 
 Плагин пишется на Rust с библиотекой trorpad-plugin:
 
@@ -61,10 +70,19 @@ permissions — "fs": чтение и запись файлов внутри п�
 
 Что доступно в host: text, selection, selected_text, info, replace,
 replace_selection, select, notify, log, log_error, open_tab, read_file,
-write_file, storage_get, storage_set. Позиции считаются в символах.
-Все правки одной команды отменяются одним Ctrl+Z. Если плагин зациклится
-или упадёт, TrorPad остановит его до «Перечитать». Пример — плагин
-«Текстовые инструменты» в выпусках на GitHub.
+write_file, storage_get, storage_set, prompt (ввод строки), pick (выбор
+из списка), panel и show_panel (содержимое панели), setting.
+Ответ на prompt и pick приходит в метод answer, нажатия в панели —
+в panel_event, открытие панели — в panel_open. Панель описывается
+функциями модуля ui: column, row, heading, text, small, code, button,
+primary, input, multiline, checkbox, select, list, progress, separator.
+Позиции в тексте считаются в символах.
+
+Плагин работает в фоне, окно не замирает. Все правки одной команды
+отменяются одним Ctrl+Z; если файл успели изменить, правки не
+применяются. Если плагин зациклится или упадёт, TrorPad остановит его
+до «Перечитать». Пример — плагин «Текстовые инструменты» в выпусках
+на GitHub.
 
 2. Внешние программы.
 Плагин — это файл .json в этой папке. Он описывает внешнюю программу:
@@ -166,7 +184,8 @@ pub struct Finished {
 pub struct Plugins {
     pub dir: Option<PathBuf>,
     pub list: Vec<Plugin>,
-    pub wasm: Vec<crate::wasm::Loaded>,
+    pub wasm: Vec<crate::wasm::Worker>,
+    done: Receiver<crate::wasm::Done>,
     pub errors: Vec<String>,
     pub running: usize,
     tx: Sender<Finished>,
@@ -304,10 +323,12 @@ pub fn execute(
 impl Plugins {
     pub fn new(dir: Option<PathBuf>) -> Self {
         let (tx, rx) = channel();
+        let done = channel().1;
         let mut plugins = Self {
             dir,
             list: Vec::new(),
             wasm: Vec::new(),
+            done,
             errors: Vec::new(),
             running: 0,
             tx,
@@ -325,9 +346,35 @@ impl Plugins {
             .map(crate::wasm::load_all)
             .unwrap_or_default();
         errors.extend(wasm_errors);
+        let (done_tx, done_rx) = channel();
         self.list = list;
-        self.wasm = wasm;
+        self.wasm = wasm
+            .into_iter()
+            .enumerate()
+            .map(|(i, loaded)| crate::wasm::Worker::spawn(i, loaded, done_tx.clone()))
+            .collect();
+        self.done = done_rx;
         self.errors = errors;
+    }
+
+    pub fn finished(&mut self) -> Vec<crate::wasm::Done> {
+        let done: Vec<crate::wasm::Done> = self.done.try_iter().collect();
+        for item in &done {
+            if let Some(worker) = self.wasm.get_mut(item.plugin) {
+                worker.busy = worker.busy.saturating_sub(1);
+                if item.outcome.broken {
+                    worker.broken = item.outcome.error.clone();
+                }
+            }
+        }
+        done
+    }
+
+    pub fn busy(&self) -> Option<&str> {
+        self.wasm
+            .iter()
+            .find(|w| w.busy > 0)
+            .map(|w| w.manifest.name.as_str())
     }
 
     pub fn count(&self) -> usize {

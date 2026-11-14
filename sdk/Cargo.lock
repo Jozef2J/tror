@@ -120,6 +120,7 @@ dependencies = [
 name = "text-tools"
 version = "1.0.0"
 dependencies = [
+ "serde",
  "serde_json",
  "trorpad-plugin",
 ]

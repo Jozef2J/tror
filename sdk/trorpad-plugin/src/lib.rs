@@ -2,10 +2,28 @@ use std::alloc::Layout;
 
 pub use serde_json::{self, Value, json};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    pub value: String,
+    pub index: Option<usize>,
+}
+
 pub trait Plugin: Default + 'static {
     fn command(&mut self, id: &str) -> Result<(), String>;
 
     fn event(&mut self, _name: &str, _params: &Value) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn answer(&mut self, _id: &str, _answer: Answer) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn panel_open(&mut self, _panel: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn panel_event(&mut self, _panel: &str, _id: &str, _value: &Value) -> Result<(), String> {
         Ok(())
     }
 }
@@ -139,6 +157,30 @@ pub mod host {
         unit("write_file", json!({ "path": path, "text": text }))
     }
 
+    pub fn prompt(id: &str, title: &str, value: &str) -> Result<(), String> {
+        unit(
+            "prompt",
+            json!({ "id": id, "title": title, "value": value }),
+        )
+    }
+
+    pub fn pick<S: AsRef<str>>(id: &str, title: &str, items: &[S]) -> Result<(), String> {
+        let items: Vec<&str> = items.iter().map(AsRef::as_ref).collect();
+        unit("pick", json!({ "id": id, "title": title, "items": items }))
+    }
+
+    pub fn panel(id: &str, ui: Value) -> Result<(), String> {
+        unit("panel", json!({ "id": id, "ui": ui }))
+    }
+
+    pub fn show_panel(id: &str) -> Result<(), String> {
+        unit("show_panel", json!({ "id": id }))
+    }
+
+    pub fn setting<T: DeserializeOwned>(key: &str) -> Result<T, String> {
+        parse(request("setting", json!({ "key": key }))?)
+    }
+
     pub fn storage_get<T: DeserializeOwned>(key: &str) -> Result<Option<T>, String> {
         match request("storage_get", json!({ "key": key }))? {
             Value::Null => Ok(None),
@@ -194,6 +236,80 @@ pub mod text {
     }
 }
 
+pub mod ui {
+    use super::{Value, json};
+
+    pub fn column(children: Vec<Value>) -> Value {
+        json!({ "type": "column", "children": children })
+    }
+
+    pub fn row(children: Vec<Value>) -> Value {
+        json!({ "type": "row", "children": children })
+    }
+
+    pub fn heading(text: &str) -> Value {
+        json!({ "type": "heading", "text": text })
+    }
+
+    pub fn text(text: &str) -> Value {
+        json!({ "type": "text", "text": text })
+    }
+
+    pub fn strong(text: &str) -> Value {
+        json!({ "type": "text", "text": text, "strong": true })
+    }
+
+    pub fn small(text: &str) -> Value {
+        json!({ "type": "text", "text": text, "small": true })
+    }
+
+    pub fn code(text: &str) -> Value {
+        json!({ "type": "code", "text": text })
+    }
+
+    pub fn button(id: &str, text: &str) -> Value {
+        json!({ "type": "button", "id": id, "text": text })
+    }
+
+    pub fn primary(id: &str, text: &str) -> Value {
+        json!({ "type": "button", "id": id, "text": text, "primary": true })
+    }
+
+    pub fn input(id: &str, value: &str, hint: &str) -> Value {
+        json!({ "type": "input", "id": id, "value": value, "hint": hint })
+    }
+
+    pub fn multiline(id: &str, value: &str) -> Value {
+        json!({ "type": "input", "id": id, "value": value, "multiline": true })
+    }
+
+    pub fn checkbox(id: &str, text: &str, value: bool) -> Value {
+        json!({ "type": "checkbox", "id": id, "text": text, "value": value })
+    }
+
+    pub fn select<S: AsRef<str>>(id: &str, value: &str, options: &[S]) -> Value {
+        let options: Vec<&str> = options.iter().map(AsRef::as_ref).collect();
+        json!({ "type": "select", "id": id, "value": value, "options": options })
+    }
+
+    pub fn list<S: AsRef<str>>(id: &str, items: &[S], selected: Option<usize>) -> Value {
+        let items: Vec<&str> = items.iter().map(AsRef::as_ref).collect();
+        json!({ "type": "list", "id": id, "items": items, "selected": selected })
+    }
+
+    pub fn progress(value: f32) -> Value {
+        json!({ "type": "progress", "value": value })
+    }
+
+    pub fn separator() -> Value {
+        json!({ "type": "separator" })
+    }
+
+    pub fn space(size: f32) -> Value {
+        json!({ "type": "space", "size": size })
+    }
+}
+
 fn layout(len: usize) -> Layout {
     Layout::from_size_align(len.max(1), 1).unwrap_or(Layout::new::<u8>())
 }
@@ -236,7 +352,25 @@ fn dispatch<T: Plugin>(slot: &mut Option<T>, bytes: &[u8]) -> Result<(), String>
     let plugin = slot.as_mut().ok_or("плагин не инициализирован")?;
     match method {
         "command" => plugin.command(&string("id")),
-        "event" => plugin.event(&string("name"), &params),
+        "event" => match string("name").as_str() {
+            "answer" => plugin.answer(
+                &string("id"),
+                Answer {
+                    value: string("value"),
+                    index: params
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .map(|n| n as usize),
+                },
+            ),
+            "panel_open" => plugin.panel_open(&string("panel")),
+            "panel" => plugin.panel_event(
+                &string("panel"),
+                &string("id"),
+                params.get("value").unwrap_or(&Value::Null),
+            ),
+            name => plugin.event(name, &params),
+        },
         other => Err(format!("неизвестный метод «{other}»")),
     }
 }

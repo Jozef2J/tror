@@ -306,7 +306,12 @@ impl TrorApp {
             .toast
             .as_ref()
             .filter(|(_, at)| now - at < 4.0)
-            .map(|(text, _)| text.clone());
+            .map(|(text, _)| text.clone())
+            .or_else(|| {
+                self.plugins
+                    .busy()
+                    .map(|name| format!("Плагин «{name}» работает…"))
+            });
         if toast.is_some() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(500));

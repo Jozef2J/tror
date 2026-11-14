@@ -114,7 +114,7 @@ impl TrorApp {
 }
 
 impl TrorApp {
-    pub(super) fn plugin_command(&mut self, plugin: usize, command: usize, now: f64) {
+    pub(super) fn plugin_command(&mut self, plugin: usize, command: usize) {
         let Some(id) = self
             .plugins
             .wasm
@@ -124,16 +124,15 @@ impl TrorApp {
         else {
             return;
         };
-        let target = (!self.docs.is_empty()).then_some(self.active);
+        let target = self.active_target();
         self.plugin_send(
             plugin,
-            &json!({"method": "command", "params": {"id": id}}),
+            json!({"method": "command", "params": {"id": id}}),
             target,
-            now,
         );
     }
 
-    pub(super) fn plugin_event(&mut self, event: &str, index: usize, now: f64) {
+    pub(super) fn plugin_event(&mut self, event: &str, index: usize) {
         let Some(doc) = self.docs.get(index) else {
             return;
         };
@@ -141,80 +140,105 @@ impl TrorApp {
         for plugin in 0..self.plugins.wasm.len() {
             let wasm = &self.plugins.wasm[plugin];
             if wasm.broken.is_none() && wasm.wants(event) {
-                self.plugin_send(plugin, &message, Some(index), now);
+                self.plugin_send(plugin, message.clone(), Some(index));
             }
         }
     }
 
-    fn plugin_send(
+    pub(super) fn plugin_send(
         &mut self,
         plugin: usize,
-        message: &serde_json::Value,
+        message: serde_json::Value,
         target: Option<usize>,
-        now: f64,
     ) {
-        use crate::wasm::{Effect, Snapshot};
+        use crate::wasm::{Job, Snapshot};
         let root = self.project.root.clone();
-        let snap = target.and_then(|i| self.docs.get(i)).map(|doc| Snapshot {
-            rope: doc.rope.clone(),
-            sel: doc.sel,
-            path: doc.location(),
-            syntax: doc.syntax.clone(),
-            root: root.clone(),
-        });
-        let snap = snap.or_else(|| {
-            root.clone().map(|root| Snapshot {
+        let doc = target.and_then(|i| self.docs.get(i));
+        let snap = match doc {
+            Some(doc) => Some(Snapshot {
+                rope: doc.rope.clone(),
+                sel: doc.sel,
+                path: doc.location(),
+                syntax: doc.syntax.clone(),
+                root,
+            }),
+            None => root.map(|root| Snapshot {
                 rope: Default::default(),
                 sel: (0, 0),
                 path: None,
                 syntax: String::new(),
                 root: Some(root),
-            })
-        });
-        let has_doc = target.is_some_and(|i| i < self.docs.len());
-        let Some(loaded) = self.plugins.wasm.get_mut(plugin) else {
-            return;
+            }),
         };
-        let name = loaded.manifest.name.clone();
-        let started = std::time::Instant::now();
-        let outcome = loaded.send(message, snap);
-        if self.perf.is_some() {
-            eprintln!(
-                "плагин {name}: {:.1} мс",
-                started.elapsed().as_secs_f64() * 1000.0
-            );
+        let doc = doc.map(|d| (d.id, d.version));
+        let ctx = self.ctx.clone();
+        if let Some(worker) = self.plugins.wasm.get_mut(plugin) {
+            worker.run(Job {
+                message,
+                snap,
+                doc,
+                wake: Box::new(move || ctx.request_repaint()),
+            });
         }
-        let mut edits = Vec::new();
-        let mut moved = false;
-        for effect in outcome.effects {
-            match effect {
-                Effect::Edit(range, text) => edits.push((range, text)),
-                Effect::Select(..) => moved = true,
-                Effect::Notify(text) => self.notify(format!("{name}: {text}"), now),
-                Effect::Log(text, error) => {
-                    crate::trace::line(format!("[plugin {name}] {text}"), error)
-                }
-                Effect::OpenTab(title, text) => {
-                    self.new_doc();
-                    let syntax = self.syntaxes.detect(Some(Path::new(&title)), &text);
-                    if let Some(doc) = self.docs.last_mut() {
-                        doc.insert_text(&text);
-                        doc.move_to(0, false);
-                        doc.syntax = syntax;
+    }
+
+    pub(super) fn plugin_finished(&mut self, now: f64) {
+        use crate::wasm::Effect;
+        for done in self.plugins.finished() {
+            let Some(name) = self
+                .plugins
+                .wasm
+                .get(done.plugin)
+                .map(|w| w.manifest.name.clone())
+            else {
+                continue;
+            };
+            if self.perf.is_some() {
+                eprintln!("плагин {name}: {:.1} мс", done.took.as_secs_f64() * 1000.0);
+            }
+            let outcome = done.outcome;
+            let mut edits = Vec::new();
+            let mut moved = false;
+            for effect in outcome.effects {
+                match effect {
+                    Effect::Edit(range, text) => edits.push((range, text)),
+                    Effect::Select(..) => moved = true,
+                    Effect::Notify(text) => self.notify(format!("{name}: {text}"), now),
+                    Effect::Log(text, error) => {
+                        crate::trace::line(format!("[plugin {name}] {text}"), error)
+                    }
+                    Effect::Prompt(..)
+                    | Effect::Pick(..)
+                    | Effect::Panel(..)
+                    | Effect::ShowPanel(..) => self.plugin_effect_ui(done.plugin, effect),
+                    Effect::OpenTab(title, text) => {
+                        self.new_doc();
+                        let syntax = self.syntaxes.detect(Some(Path::new(&title)), &text);
+                        if let Some(doc) = self.docs.last_mut() {
+                            doc.insert_text(&text);
+                            doc.move_to(0, false);
+                            doc.syntax = syntax;
+                        }
                     }
                 }
             }
-        }
-        if has_doc
-            && (!edits.is_empty() || moved)
-            && let (Some(index), Some(sel)) = (target, outcome.sel)
-            && let Some(doc) = self.docs.get_mut(index)
-        {
-            doc.apply_edits(&edits, sel);
-        }
-        if let Some(error) = outcome.error {
-            crate::trace::line(format!("[plugin {name}] {error}"), true);
-            self.notify(format!("Плагин «{name}»: {error}"), now);
+            if (!edits.is_empty() || moved)
+                && let (Some((id, version)), Some(sel)) = (done.doc, outcome.sel)
+                && let Some(doc) = self.docs.iter_mut().find(|d| d.id == id)
+            {
+                if doc.version == version {
+                    doc.apply_edits(&edits, sel);
+                } else if !edits.is_empty() {
+                    self.notify(
+                        format!("Плагин «{name}»: файл изменился, правки не применены"),
+                        now,
+                    );
+                }
+            }
+            if let Some(error) = outcome.error {
+                crate::trace::line(format!("[plugin {name}] {error}"), true);
+                self.notify(format!("Плагин «{name}»: {error}"), now);
+            }
         }
     }
 }

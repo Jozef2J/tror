@@ -34,6 +34,7 @@ mod look;
 mod menu;
 mod modals;
 mod plugin_run;
+mod plugin_ui;
 mod tabs;
 
 static VIEW_REQUEST: std::sync::Mutex<(Option<bool>, Option<bool>)> =
@@ -116,6 +117,8 @@ enum Action {
     Goto(u64, usize),
     Plugin(usize),
     PluginCommand(usize, usize),
+    PluginPanel(usize, usize),
+    PluginSettings(usize),
     Detach(Pane),
     Attach(Pane),
     PluginsFolder,
@@ -323,6 +326,8 @@ pub struct TrorApp {
     ctx: egui::Context,
     checked: (u64, bool),
     goto: Option<String>,
+    plugin_dialog: Option<plugin_ui::PluginDialog>,
+    plugin_panels: std::collections::HashMap<u64, plugin_ui::PluginPanel>,
     find_files: crate::findfiles::FindFiles,
     update: Updater,
     macros: editor::Macro,
@@ -410,6 +415,8 @@ impl TrorApp {
             ctx: cc.egui_ctx.clone(),
             checked: (0, false),
             goto: None,
+            plugin_dialog: None,
+            plugin_panels: Default::default(),
             find_files: Default::default(),
             update: Default::default(),
             macros: Default::default(),
@@ -444,6 +451,7 @@ impl TrorApp {
             app.update.rx = Some(crate::update::check());
         }
         app.next_id = top;
+        app.sync_plugin_panels();
         if active < app.docs.len() {
             app.active = active;
         }
