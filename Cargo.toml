@@ -1,7 +1,7 @@
 [package]
-name = "tror"
-version = "0.19.0"
-description = "Быстрый компактный редактор кода"
+name = "trorpad"
+version = "0.20.0"
+description = "TrorPad — быстрый компактный редактор кода проекта Tror"
 edition = "2024"
 
 [dependencies]
@@ -16,6 +16,7 @@ encoding_rs = "0.8.44"
 flate2 = "1.1.11"
 log = "0.4.35"
 memchr = "2.8.3"
+png = "0.18"
 mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust", "native-tls"] }
 native-tls = "0.2.18"
 ocb3 = "0.2.0"
@@ -51,9 +52,13 @@ drag = "2.1.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = "1.1.0"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSString"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service-keyring-store = { version = "1", features = ["crypto-openssl", "vendored"] }

@@ -164,24 +164,8 @@ impl TrorApp {
                     complete: &mut self.complete,
                 },
             );
-            if self.search.open {
-                let width = (pane.width() - 44.0).clamp(250.0, 430.0);
-                egui::Area::new(egui::Id::unique("tror_find"))
-                    .order(egui::Order::Middle)
-                    .pivot(egui::Align2::RIGHT_TOP)
-                    .fixed_pos(pane.right_top() + egui::vec2(-22.0, 8.0))
-                    .show(ui.ctx(), |ui| {
-                        Frame::new()
-                            .fill(pal.mantle)
-                            .stroke(Stroke::new(1.0, pal.border))
-                            .corner_radius(self.settings.look.radius.saturating_add(2))
-                            .shadow(ui.style().visuals.popup_shadow)
-                            .inner_margin(Margin::same(8))
-                            .show(ui, |ui| {
-                                ui.set_width(width);
-                                self.search_bar(ui, pal, actions);
-                            });
-                    });
+            if ui.ctx().viewport_id() == egui::ViewportId::ROOT {
+                self.find.anchor = Some(pane.right_top() + egui::vec2(-22.0, 8.0));
             }
             return;
         }

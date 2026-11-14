@@ -36,7 +36,7 @@ fn ftp_line(text: &str) -> Option<String> {
 
 impl log::Log for Sink {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.target() == "tror" || metadata.target().starts_with("suppaftp")
+        metadata.target() == "trorpad" || metadata.target().starts_with("suppaftp")
     }
 
     fn log(&self, record: &log::Record) {
@@ -44,7 +44,7 @@ impl log::Log for Sink {
             return;
         }
         let text = record.args().to_string();
-        if record.target() == "tror" {
+        if record.target() == "trorpad" {
             line(text, record.level() <= log::Level::Warn);
         } else if text.starts_with("Code parsed from response") {
             REPEAT.store(true, Ordering::Relaxed);

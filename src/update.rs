@@ -80,7 +80,10 @@ pub fn kind() -> Kind {
     let writable = std::fs::write(&probe, b"").is_ok();
     let _ = std::fs::remove_file(&probe);
     let installed = cfg!(windows) && dir.join("unins000.exe").is_file();
-    match (installed, writable) {
+    let renamed = exe
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case("trorpad.exe"));
+    match (installed, writable && renamed) {
         (true, true) => Kind::Installed,
         (true, false) => Kind::Installer,
         (false, true) => Kind::Portable,
@@ -91,10 +94,10 @@ pub fn kind() -> Kind {
 fn asset_name(kind: Kind) -> Option<&'static str> {
     match kind {
         Kind::Page => None,
-        Kind::Installer => Some("tror-setup.exe"),
-        Kind::Installed => Some("tror.exe"),
-        Kind::Portable if cfg!(windows) => Some("tror.exe"),
-        Kind::Portable => Some("tror-linux-x86_64"),
+        Kind::Installer => Some("trorpad-setup.exe"),
+        Kind::Installed => Some("trorpad.exe"),
+        Kind::Portable if cfg!(windows) => Some("trorpad.exe"),
+        Kind::Portable => Some("trorpad-linux-x86_64"),
     }
 }
 
@@ -108,7 +111,7 @@ fn agent() -> ureq::Agent {
         )
         .timeout_global(Some(std::time::Duration::from_secs(600)))
         .timeout_connect(Some(std::time::Duration::from_secs(15)))
-        .user_agent(concat!("tror/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("trorpad/", env!("CARGO_PKG_VERSION")))
         .build()
         .into()
 }
@@ -162,7 +165,9 @@ fn expected_sum(sums: &str, name: &str) -> Option<String> {
 
 fn fetch(release: &Release, kind: Kind) -> Result<PathBuf, String> {
     let target = match kind {
-        Kind::Installer => std::env::temp_dir().join(format!("tror-setup-{}.exe", release.version)),
+        Kind::Installer => {
+            std::env::temp_dir().join(format!("trorpad-setup-{}.exe", release.version))
+        }
         _ => {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             exe.with_extension("new")
@@ -378,7 +383,7 @@ mod tests {
     #[test]
     fn only_assets_from_the_project_releases_are_accepted() {
         let json = r#"{"tag_name":"v9.0.0","body":"notes","assets":[
-            {"name":"tror-setup.exe","browser_download_url":"https://evil.example/tror-setup.exe"},
+            {"name":"trorpad-setup.exe","browser_download_url":"https://evil.example/trorpad-setup.exe"},
             {"name":"SHA256SUMS","browser_download_url":"https://github.com/Jozef2J/tror/releases/download/v9.0.0/SHA256SUMS"}]}"#;
         let release = release_of(json, Kind::Installer).unwrap();
         assert_eq!(release.version, "9.0.0");

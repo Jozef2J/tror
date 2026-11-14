@@ -221,6 +221,7 @@ pub fn forget_webview() {
         && let (Some(dir), Some(name)) = (exe.parent(), exe.file_name())
     {
         dirs.push(dir.join(format!("{}.WebView2", name.to_string_lossy())));
+        dirs.push(dir.join("tror.exe.WebView2"));
     }
     if cfg!(target_os = "macos")
         && let Some(home) = std::env::var_os("HOME")

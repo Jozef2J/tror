@@ -1175,7 +1175,7 @@ fn body(
                 .add(Button::new("Импорт из файла…").fill(pal.surface))
                 .clicked()
                 && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Оформление Tror", &["json"])
+                    .add_filter("Оформление TrorPad", &["json"])
                     .pick_file()
             {
                 let loaded = std::fs::read_to_string(&path)

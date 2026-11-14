@@ -70,7 +70,7 @@ impl TrorApp {
                                 .color(pal.accent),
                         );
                         ui.label(
-                            RichText::new(format!("Tror {}", release.version))
+                            RichText::new(format!("TrorPad {}", release.version))
                                 .size(17.0)
                                 .color(pal.text),
                         );

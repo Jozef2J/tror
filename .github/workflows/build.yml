@@ -22,9 +22,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: tror-linux-x86_64
+            artifact: trorpad-linux-x86_64
           - os: windows-latest
-            artifact: tror-windows-x86_64
+            artifact: trorpad-windows-x86_64
     runs-on: ${{ matrix.os }}
     env:
       HAS_CERT: ${{ secrets.WINDOWS_PFX_BASE64 != '' }}
@@ -35,13 +35,13 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --release --locked
       - if: runner.os == 'Linux'
-        run: tar -czf tror-linux-x86_64.tar.gz -C target/release tror
+        run: tar -czf trorpad-linux-x86_64.tar.gz -C target/release trorpad
       - if: runner.os == 'Linux'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           retention-days: 14
           name: ${{ matrix.artifact }}
-          path: tror-linux-x86_64.tar.gz
+          path: trorpad-linux-x86_64.tar.gz
       - if: runner.os == 'Windows' && env.HAS_CERT == 'true'
         shell: pwsh
         env:
@@ -51,7 +51,7 @@ jobs:
           [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\sign.pfx", [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
           $tool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
           "SIGNTOOL=$($tool.FullName)" >> $env:GITHUB_ENV
-          & $tool.FullName sign /f "$env:RUNNER_TEMP\sign.pfx" /p "$env:WINDOWS_PFX_PASSWORD" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 target\release\tror.exe
+          & $tool.FullName sign /f "$env:RUNNER_TEMP\sign.pfx" /p "$env:WINDOWS_PFX_PASSWORD" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 target\release\trorpad.exe
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -60,14 +60,14 @@ jobs:
           if (!(Test-Path $iscc)) { choco install innosetup -y --no-progress }
           & $iscc packaging\tror.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item target\release\tror.exe tror.exe
+          Copy-Item target\release\trorpad.exe trorpad.exe
       - if: runner.os == 'Windows' && env.HAS_CERT == 'true'
         shell: pwsh
         env:
           WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
           WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
         run: |
-          & $env:SIGNTOOL sign /f "$env:RUNNER_TEMP\sign.pfx" /p "$env:WINDOWS_PFX_PASSWORD" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 tror-setup.exe
+          & $env:SIGNTOOL sign /f "$env:RUNNER_TEMP\sign.pfx" /p "$env:WINDOWS_PFX_PASSWORD" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 trorpad-setup.exe
           Remove-Item "$env:RUNNER_TEMP\sign.pfx"
       - if: runner.os == 'Windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -75,8 +75,8 @@ jobs:
           retention-days: 14
           name: ${{ matrix.artifact }}
           path: |
-            tror.exe
-            tror-setup.exe
+            trorpad.exe
+            trorpad-setup.exe
 
   release:
     timeout-minutes: 10
@@ -98,19 +98,22 @@ jobs:
             echo "Выпуск v$VERSION уже есть"
             exit 0
           fi
-          if [ ! -f dist/tror-windows-x86_64/tror.exe ]; then
+          if [ ! -f dist/trorpad-windows-x86_64/trorpad.exe ]; then
             echo "Нет сборки Windows — выпуск не создаётся"
             exit 0
           fi
           mkdir out
-          cp dist/tror-windows-x86_64/tror.exe dist/tror-windows-x86_64/tror-setup.exe out/
-          if [ -f dist/tror-linux-x86_64/tror-linux-x86_64.tar.gz ]; then
-            tar -xzf dist/tror-linux-x86_64/tror-linux-x86_64.tar.gz -C out
-            mv out/tror out/tror-linux-x86_64
+          cp dist/trorpad-windows-x86_64/trorpad.exe dist/trorpad-windows-x86_64/trorpad-setup.exe out/
+          cp out/trorpad.exe out/tror.exe
+          cp out/trorpad-setup.exe out/tror-setup.exe
+          if [ -f dist/trorpad-linux-x86_64/trorpad-linux-x86_64.tar.gz ]; then
+            tar -xzf dist/trorpad-linux-x86_64/trorpad-linux-x86_64.tar.gz -C out
+            mv out/trorpad out/trorpad-linux-x86_64
+            cp out/trorpad-linux-x86_64 out/tror-linux-x86_64
           fi
           (cd out && sha256sum * > SHA256SUMS)
           git log -1 --pretty=%B > notes.txt
-          gh release create "v$VERSION" out/* --title "Tror $VERSION" --notes-file notes.txt --target "$GITHUB_SHA"
+          gh release create "v$VERSION" out/* --title "TrorPad $VERSION" --notes-file notes.txt --target "$GITHUB_SHA"
 
   macos:
     timeout-minutes: 60
@@ -128,9 +131,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           retention-days: 14
-          name: tror-macos-universal
-          path: Tror-macos.zip
+          name: trorpad-macos-universal
+          path: TrorPad-macos.zip
       - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          gh release upload "v$VERSION" Tror-macos.zip --clobber || echo "Выпуска v$VERSION ещё нет"
+          gh release upload "v$VERSION" TrorPad-macos.zip --clobber || echo "Выпуска v$VERSION ещё нет"

@@ -273,9 +273,9 @@ impl eframe::App for TrorApp {
                     .docs
                     .iter()
                     .find(|d| d.id == id)
-                    .map(|d| format!("{} — Tror", d.title()))
+                    .map(|d| format!("{} — TrorPad", d.title()))
                     .unwrap_or_default(),
-                _ => format!("{} — Tror", pane.title()),
+                _ => format!("{} — TrorPad", pane.title()),
             };
             let mut closed = false;
             let (min_w, min_h) = pane.min_size();
@@ -309,6 +309,7 @@ impl eframe::App for TrorApp {
                 actions.push(Action::Attach(pane));
             }
         }
+        self.find_window(&ctx, pal, &mut actions);
         self.focus_editor = false;
         if !self.console_shown {
             self.console.unfocus();
@@ -360,11 +361,11 @@ impl eframe::App for TrorApp {
 
         let title = match self.docs.get(self.active) {
             Some(doc) => format!(
-                "{}{} — Tror",
+                "{}{} — TrorPad",
                 if doc.dirty() { "● " } else { "" },
                 doc.title()
             ),
-            None => "Tror".to_owned(),
+            None => "TrorPad".to_owned(),
         };
         if title != self.title {
             ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
@@ -408,7 +409,7 @@ impl eframe::App for TrorApp {
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn drag_out(frame: &eframe::Frame, paths: Vec<PathBuf>) {
-    let icon = include_bytes!("../../assets/tror.png").to_vec();
+    let icon = drag_icon(paths.len());
     if let Err(e) = drag::start_drag(
         frame,
         drag::DragItem::Files(paths),
@@ -422,3 +423,80 @@ fn drag_out(frame: &eframe::Frame, paths: Vec<PathBuf>) {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn drag_out(_frame: &eframe::Frame, _paths: Vec<PathBuf>) {}
+
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+fn drag_icon(count: usize) -> Vec<u8> {
+    const W: usize = 52;
+    const H: usize = 60;
+    let mut pixels = vec![0u8; W * H * 4];
+    let mut put = |x: usize, y: usize, c: [u8; 4]| {
+        if x < W && y < H {
+            pixels[(y * W + x) * 4..(y * W + x) * 4 + 4].copy_from_slice(&c);
+        }
+    };
+    let border = [0x7a, 0x84, 0x99, 0xff];
+    let paper = [0xf4, 0xf6, 0xfa, 0xff];
+    let fold = [0xd5, 0xda, 0xe4, 0xff];
+    let ink = [0xb3, 0xba, 0xc8, 0xff];
+    let mut page = |ox: usize, oy: usize, lines: bool| {
+        let (w, h, corner) = (40usize, 48usize, 12usize);
+        for y in 0..h {
+            for x in 0..w {
+                let from_right = w - 1 - x;
+                if from_right + y < corner - 1 {
+                    continue;
+                }
+                let in_fold = from_right < corner && y < corner;
+                let edge = x == 0 || y == h - 1 || from_right == 0 || y == 0;
+                let color = if edge
+                    || from_right + y == corner - 1
+                    || (in_fold && (from_right == corner - 1 || y == corner - 1))
+                {
+                    border
+                } else if in_fold {
+                    fold
+                } else {
+                    paper
+                };
+                put(ox + x, oy + y, color);
+            }
+        }
+        if lines {
+            for (row, len) in [(18, 26), (24, 22), (30, 26), (36, 16)] {
+                for x in 7..7 + len {
+                    put(ox + x, oy + row, ink);
+                }
+            }
+        }
+    };
+    if count > 1 {
+        page(10, 10, false);
+        page(5, 5, false);
+    }
+    page(0, 0, true);
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, W as u32, H as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        if let Ok(mut writer) = encoder.write_header() {
+            let _ = writer.write_image_data(&pixels);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn drag_icon_is_small_png() {
+        for count in [1, 3] {
+            let bytes = super::drag_icon(count);
+            assert_eq!(&bytes[1..4], b"PNG");
+            let decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
+            let info = decoder.read_info().unwrap().info().clone();
+            assert_eq!((info.width, info.height), (52, 60));
+            std::fs::write(format!("/tmp/drag_icon_{count}.png"), &bytes).ok();
+        }
+    }
+}

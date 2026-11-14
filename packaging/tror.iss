@@ -2,17 +2,17 @@
 
 [Setup]
 AppId={{8F3B6C1E-5C0A-4E4B-9A55-7A6B1C0D2E11}
-AppName=Tror
+AppName=TrorPad
 AppVersion={#Version}
-AppVerName=Tror
+AppVerName=TrorPad
 AppPublisher=Jozef2J
 AppPublisherURL=https://github.com/Jozef2J/tror
-DefaultDirName={autopf}\Tror
-DefaultGroupName=Tror
+DefaultDirName={autopf}\TrorPad
+DefaultGroupName=TrorPad
 DisableProgramGroupPage=yes
-UninstallDisplayIcon={app}\tror.exe
+UninstallDisplayIcon={app}\trorpad.exe
 OutputDir=..
-OutputBaseFilename=tror-setup
+OutputBaseFilename=trorpad-setup
 SetupIconFile=..\assets\tror.ico
 Compression=lzma2
 SolidCompression=yes
@@ -30,23 +30,31 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; Flags: unchecked
-Name: "menu"; Description: "Пункт «Открыть в Tror» в меню файлов и папок"
+Name: "menu"; Description: "Пункт «Открыть в TrorPad» в меню файлов и папок"
+
+[InstallDelete]
+Type: files; Name: "{app}\tror.exe"
+Type: files; Name: "{app}\tror.old"
+Type: files; Name: "{autoprograms}\Tror.lnk"
+Type: files; Name: "{autodesktop}\Tror.lnk"
 
 [Files]
-Source: "..\target\release\tror.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\trorpad.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Tror"; Filename: "{app}\tror.exe"
-Name: "{autodesktop}\Tror"; Filename: "{app}\tror.exe"; Tasks: desktopicon
+Name: "{autoprograms}\TrorPad"; Filename: "{app}\trorpad.exe"
+Name: "{autodesktop}\TrorPad"; Filename: "{app}\trorpad.exe"; Tasks: desktopicon
 
 [Registry]
-Root: HKA; Subkey: "Software\Classes\*\shell\Tror"; ValueType: string; ValueData: "Открыть в Tror"; Flags: uninsdeletekey; Tasks: menu
-Root: HKA; Subkey: "Software\Classes\*\shell\Tror"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\tror.exe"; Tasks: menu
-Root: HKA; Subkey: "Software\Classes\*\shell\Tror\command"; ValueType: string; ValueData: """{app}\tror.exe"" ""%1"""; Tasks: menu
-Root: HKA; Subkey: "Software\Classes\Directory\shell\Tror"; ValueType: string; ValueData: "Открыть в Tror"; Flags: uninsdeletekey; Tasks: menu
-Root: HKA; Subkey: "Software\Classes\Directory\shell\Tror"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\tror.exe"; Tasks: menu
-Root: HKA; Subkey: "Software\Classes\Directory\shell\Tror\command"; ValueType: string; ValueData: """{app}\tror.exe"" ""%1"""; Tasks: menu
+Root: HKA; Subkey: "Software\Classes\*\shell\Tror"; Flags: deletekey dontcreatekey
+Root: HKA; Subkey: "Software\Classes\Directory\shell\Tror"; Flags: deletekey dontcreatekey
+Root: HKA; Subkey: "Software\Classes\*\shell\TrorPad"; ValueType: string; ValueData: "Открыть в TrorPad"; Flags: uninsdeletekey; Tasks: menu
+Root: HKA; Subkey: "Software\Classes\*\shell\TrorPad"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\trorpad.exe"; Tasks: menu
+Root: HKA; Subkey: "Software\Classes\*\shell\TrorPad\command"; ValueType: string; ValueData: """{app}\trorpad.exe"" ""%1"""; Tasks: menu
+Root: HKA; Subkey: "Software\Classes\Directory\shell\TrorPad"; ValueType: string; ValueData: "Открыть в TrorPad"; Flags: uninsdeletekey; Tasks: menu
+Root: HKA; Subkey: "Software\Classes\Directory\shell\TrorPad"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\trorpad.exe"; Tasks: menu
+Root: HKA; Subkey: "Software\Classes\Directory\shell\TrorPad\command"; ValueType: string; ValueData: """{app}\trorpad.exe"" ""%1"""; Tasks: menu
 
 [Run]
-Filename: "{app}\tror.exe"; Description: "{cm:LaunchProgram,Tror}"; Flags: nowait postinstall skipifsilent
-Filename: "{app}\tror.exe"; Flags: nowait runasoriginaluser; Check: WizardSilent
+Filename: "{app}\trorpad.exe"; Description: "{cm:LaunchProgram,TrorPad}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\trorpad.exe"; Flags: nowait runasoriginaluser; Check: WizardSilent

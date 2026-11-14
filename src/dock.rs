@@ -69,7 +69,7 @@ impl Pane {
 
     fn label(self) -> &'static str {
         match self {
-            Pane::Welcome => "Tror",
+            Pane::Welcome => "TrorPad",
             Pane::Doc(_) => "",
             Pane::Hosts => "Удалённые хосты",
             Pane::Hosts2 | Pane::HostsN(_) => "",

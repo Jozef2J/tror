@@ -4627,8 +4627,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "tror"
-version = "0.19.0"
+name = "trorpad"
+version = "0.20.0"
 dependencies = [
  "aes",
  "apple-native-keyring-store",
@@ -4646,7 +4646,11 @@ dependencies = [
  "memchr",
  "mysql",
  "native-tls",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "ocb3",
+ "png",
  "postgres",
  "postgres-native-tls",
  "regex",
@@ -4665,6 +4669,7 @@ dependencies = [
  "ureq",
  "vt100",
  "windows-native-keyring-store",
+ "windows-sys 0.61.2",
  "winresource",
 ]
 

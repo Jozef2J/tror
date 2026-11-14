@@ -8,10 +8,10 @@ use serde::Deserialize;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-const GUIDE: &str = r#"Плагины Tror
+const GUIDE: &str = r#"Плагины TrorPad
 
 Плагин — это файл .json в этой папке. Он описывает внешнюю программу:
-Tror передаёт ей текст через стандартный ввод и забирает результат
+TrorPad передаёт ей текст через стандартный ввод и забирает результат
 из стандартного вывода. Программа может быть на чём угодно: PHP, Python,
 Node, shell, готовая утилита.
 

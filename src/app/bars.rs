@@ -421,7 +421,7 @@ impl TrorApp {
                 ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(96.0, 96.0)));
                 ui.add_space(6.0);
             }
-            ui.label(RichText::new("Tror").size(34.0).color(pal.faint));
+            ui.label(RichText::new("TrorPad").size(34.0).color(pal.faint));
             ui.add_space(4.0);
             ui.label(
                 RichText::new("Перетащите файлы сюда или начните с пустой вкладки")

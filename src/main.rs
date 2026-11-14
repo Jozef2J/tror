@@ -39,7 +39,7 @@ fn main() -> eframe::Result {
     STARTED.get_or_init(std::time::Instant::now);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Tror")
+            .with_title("TrorPad")
             .with_app_id("tror")
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([480.0, 320.0])

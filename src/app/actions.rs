@@ -3,6 +3,7 @@ use super::*;
 impl TrorApp {
     pub(super) fn open_search(&mut self, replace: bool) {
         self.search.open = true;
+        self.find.focus = true;
         self.search.replace_mode = replace;
         self.search.focus_query = true;
         self.search.last_replaced = None;

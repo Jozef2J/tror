@@ -27,6 +27,7 @@ use crate::theme::{self, Palette};
 mod actions;
 mod bars;
 mod files;
+mod find;
 mod frame;
 mod hosts;
 mod look;
@@ -325,6 +326,7 @@ pub struct TrorApp {
     update: Updater,
     macros: editor::Macro,
     macro_dialog: Option<MacroDialog>,
+    find: find::FindWindow,
     recovery: crate::recover::Recovery,
     confirm: Option<Confirm>,
     allow_close: bool,
@@ -411,6 +413,7 @@ impl TrorApp {
             update: Default::default(),
             macros: Default::default(),
             macro_dialog: None,
+            find: Default::default(),
             recovery: Default::default(),
             confirm: None,
             allow_close: false,
