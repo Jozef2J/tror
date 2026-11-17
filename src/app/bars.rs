@@ -168,7 +168,7 @@ impl TrorApp {
         response.on_hover_text(hint).clicked()
     }
 
-    pub(super) fn search_bar(&mut self, ui: &mut Ui, pal: &Palette, actions: &mut Vec<Action>) {
+    pub(super) fn search_bar(&mut self, ui: &mut Ui, pal: &Palette, _actions: &mut Vec<Action>) {
         let selection = self.docs.get(self.active).map(|d| {
             let range = d.selection();
             (range.start, range.end)
@@ -180,25 +180,29 @@ impl TrorApp {
             } else {
                 pal.subtext
             });
-            let mut button = Button::new(text).min_size(egui::vec2(28.0, 24.0));
-            if *value {
-                button = button.fill(pal.surface);
-            }
+            let mut button = Button::new(text).min_size(egui::vec2(30.0, 28.0));
+            button = if *value {
+                button.fill(pal.surface)
+            } else {
+                button.frame(false)
+            };
             let clicked = ui.add(button).on_hover_text(hint).clicked();
             if clicked {
                 *value = !*value;
             }
             clicked
         };
-        let field_w = (ui.available_width() - 226.0).max(60.0);
+        fn field<'a>(text: &'a mut String, hint: &str, width: f32) -> TextEdit<'a> {
+            TextEdit::singleline(text)
+                .hint_text(hint.to_owned())
+                .desired_width(width)
+                .margin(Margin::symmetric(8, 6))
+        }
+        let tools_w = 4.0 * 32.0 + 2.0 * 30.0 + 12.0;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            let query = ui.add(
-                TextEdit::singleline(&mut s.query)
-                    .hint_text("Найти")
-                    .desired_width(field_w)
-                    .margin(Margin::symmetric(8, 5)),
-            );
+            let width = (ui.available_width() - tools_w).max(80.0);
+            let query = ui.add(field(&mut s.query, "Найти", width));
             if std::mem::take(&mut s.focus_query) {
                 query.request_focus();
             }
@@ -211,6 +215,7 @@ impl TrorApp {
                 });
                 query.request_focus();
             }
+            ui.add_space(6.0);
             changed |= toggle(ui, &mut s.case, "Aa", "Учитывать регистр");
             changed |= toggle(ui, &mut s.word, "ab", "Слово целиком");
             changed |= toggle(ui, &mut s.regex, ".*", "Регулярное выражение");
@@ -224,6 +229,7 @@ impl TrorApp {
                 s.pending = Some(Pending::FromAnchor);
                 s.last_replaced = None;
             }
+            ui.add_space(4.0);
             if icon_button(ui, pal, Icon::Up)
                 .on_hover_text("Найти ранее (Shift+F3)")
                 .clicked()
@@ -236,39 +242,71 @@ impl TrorApp {
             {
                 s.pending = Some(Pending::Next);
             }
-            if icon_button(ui, pal, Icon::Close)
-                .on_hover_text("Закрыть (Esc)")
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let width = (ui.available_width() - tools_w).max(80.0);
+            let hint = if s.regex {
+                "Заменить на ($1, ${name})"
+            } else {
+                "Заменить на"
+            };
+            let replace = ui.add(field(&mut s.replacement, hint, width));
+            if std::mem::take(&mut s.replace_mode) {
+                replace.request_focus();
+            }
+            ui.add_space(4.0);
+            let ready = !s.query.is_empty();
+            if ui
+                .add_enabled(
+                    ready,
+                    Button::new("Заменить")
+                        .fill(pal.surface)
+                        .min_size(egui::vec2(0.0, 28.0)),
+                )
                 .clicked()
             {
-                actions.push(Action::CloseSearch);
+                s.pending = Some(Pending::Replace);
+            }
+            if ui
+                .add_enabled(
+                    ready,
+                    Button::new("Заменить все")
+                        .fill(pal.surface)
+                        .min_size(egui::vec2(0.0, 28.0)),
+                )
+                .clicked()
+            {
+                s.pending = Some(Pending::ReplaceAll);
             }
         });
-        if s.replace_mode {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                ui.add(
-                    TextEdit::singleline(&mut s.replacement)
-                        .hint_text(if s.regex {
-                            "Заменить на ($1, ${name})"
-                        } else {
-                            "Заменить на"
-                        })
-                        .desired_width(field_w)
-                        .margin(Margin::symmetric(8, 5)),
-                );
-                if ui.button("Заменить").clicked() {
-                    s.pending = Some(Pending::Replace);
-                }
-                if ui.button("Все").on_hover_text("Заменить все").clicked() {
-                    s.pending = Some(Pending::ReplaceAll);
-                }
-            });
-        }
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
+            let ready = !s.query.is_empty() && !s.matches.is_empty();
+            if ui
+                .add_enabled(
+                    ready,
+                    Button::new("Удалить повторения")
+                        .fill(pal.surface)
+                        .min_size(egui::vec2(0.0, 28.0)),
+                )
+                .on_hover_text(
+                    "Удаляет все найденные совпадения. Если совпадение занимает строку целиком, \
+                     строка удаляется вместе с переводом строки.",
+                )
+                .clicked()
+            {
+                s.pending = Some(Pending::DeleteAll);
+            }
             let info = if let Some(error) = &s.error {
                 RichText::new(error).color(pal.warn)
             } else if let Some(n) = s.last_replaced {
-                let verb = if s.deleted { "удалено" } else { "заменено" };
+                let verb = if s.deleted {
+                    "удалено"
+                } else {
+                    "заменено"
+                };
                 RichText::new(format!("{verb}: {n}")).color(pal.subtext)
             } else if s.query.is_empty() {
                 RichText::new("введите текст").color(pal.faint)
@@ -289,31 +327,7 @@ impl TrorApp {
                 .color(pal.subtext)
             };
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let ready = !s.query.is_empty() && !s.matches.is_empty();
-                if ui
-                    .add_enabled(
-                        ready,
-                        Button::new(RichText::new("Удалить все").small().color(pal.subtext)).frame(false),
-                    )
-                    .on_hover_text("Удалить все найденные совпадения (целые строки — вместе с переводом строки)")
-                    .clicked()
-                {
-                    s.pending = Some(Pending::DeleteAll);
-                }
-                let label = if s.replace_mode {
-                    "Скрыть замену"
-                } else {
-                    "Замена"
-                };
-                if ui
-                    .add(Button::new(RichText::new(label).small().color(pal.subtext)).frame(false))
-                    .clicked()
-                {
-                    s.replace_mode = !s.replace_mode;
-                }
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.add(egui::Label::new(info.small()).truncate());
-                });
+                ui.add(egui::Label::new(info.small()).truncate());
             });
         });
     }

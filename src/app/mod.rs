@@ -120,7 +120,6 @@ enum Action {
     PluginCommand(usize, usize),
     PluginPanel(usize, usize),
     PluginSettings(usize),
-    Detach(Pane),
     Attach(Pane),
     PluginsFolder,
     PluginsReload,
@@ -216,6 +215,7 @@ pub(crate) enum Icon {
     Up,
     Down,
     Close,
+    Dock,
 }
 
 pub(crate) fn icon_button(ui: &mut Ui, pal: &Palette, icon: Icon) -> egui::Response {
@@ -231,6 +231,21 @@ pub(crate) fn icon_button(ui: &mut Ui, pal: &Palette, icon: Icon) -> egui::Respo
     let stroke = Stroke::new(1.5, color);
     let c = rect.center();
     let d = 4.0;
+    if matches!(icon, Icon::Dock) {
+        let frame = Rect::from_center_size(c, egui::vec2(11.0, 9.0));
+        ui.painter().rect_stroke(
+            frame,
+            1.5,
+            Stroke::new(1.2, color),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().rect_filled(
+            Rect::from_min_max(frame.min, egui::pos2(frame.min.x + 4.0, frame.max.y)),
+            1.5,
+            color,
+        );
+        return response;
+    }
     let lines = match icon {
         Icon::Up => [
             [c + egui::vec2(-d, 2.0), c + egui::vec2(0.0, -2.5)],
@@ -240,7 +255,7 @@ pub(crate) fn icon_button(ui: &mut Ui, pal: &Palette, icon: Icon) -> egui::Respo
             [c + egui::vec2(-d, -2.0), c + egui::vec2(0.0, 2.5)],
             [c + egui::vec2(0.0, 2.5), c + egui::vec2(d, -2.0)],
         ],
-        Icon::Close => [
+        Icon::Close | Icon::Dock => [
             [c + egui::vec2(-d, -d), c + egui::vec2(d, d)],
             [c + egui::vec2(d, -d), c + egui::vec2(-d, d)],
         ],
@@ -310,6 +325,7 @@ pub struct TrorApp {
     project: ProjectPanel,
     project2: ProjectPanel,
     sizes: dock::Sizes,
+    zoom_acc: f32,
     log: Vec<(String, crate::trace::Kind)>,
     console: ConsolePanel,
     term_fonts: Option<Vec<PathBuf>>,
@@ -396,6 +412,7 @@ impl TrorApp {
             project,
             project2,
             sizes: Default::default(),
+            zoom_acc: 0.0,
             log: Vec::new(),
             console: ConsolePanel::new(),
             term_fonts: None,

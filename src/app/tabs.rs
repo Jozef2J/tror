@@ -544,13 +544,6 @@ impl TabViewer for Viewer<'_> {
     fn context_menu(&mut self, ui: &mut Ui, tab: &mut Pane, _path: egui_stack::TabPath) {
         if let Pane::Doc(id) = *tab {
             self.tab_menu(ui, id);
-            ui.separator();
-        }
-        if !matches!(*tab, Pane::Welcome | Pane::Preview)
-            && ui.button("В отдельное окно системы").clicked()
-        {
-            self.actions.push(Action::Detach(*tab));
-            ui.close();
         }
     }
 

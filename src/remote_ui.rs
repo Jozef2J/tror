@@ -1396,9 +1396,11 @@ impl RemotePanel {
         } else {
             self.search_root.trim().to_owned()
         };
+        let tall = (self.hits.len() as f32 * row_h).min(300.0);
         ScrollArea::vertical()
             .id_salt(("tror_server_hits", self.id))
-            .max_height(300.0)
+            .min_scrolled_height(tall)
+            .max_height(tall)
             .auto_shrink([false, true])
             .show_rows(
             ui,

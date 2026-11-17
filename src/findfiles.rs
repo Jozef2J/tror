@@ -339,35 +339,41 @@ impl FindFiles {
             Some(chosen)
         };
         let mut go = false;
+        let label = |ui: &mut Ui, text: &str| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(86.0, 28.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| ui.label(RichText::new(text).color(pal.subtext)),
+            );
+        };
+        fn field(text: &mut String, hint: String) -> TextEdit<'_> {
+            TextEdit::singleline(text)
+                .hint_text(hint)
+                .margin(egui::Margin::symmetric(8, 6))
+        }
         egui::Grid::new("tror_find_files")
             .num_columns(2)
-            .spacing([10.0, 6.0])
+            .spacing([10.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Найти");
-                let field = ui.add(
-                    TextEdit::singleline(&mut self.query)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("текст или выражение"),
+                label(ui, "Найти");
+                let query = ui.add(
+                    field(&mut self.query, "текст или выражение".into()).desired_width(f32::INFINITY),
                 );
                 if std::mem::take(&mut self.focus) {
-                    field.request_focus();
+                    query.request_focus();
                 }
-                go |= field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                go |= query.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.end_row();
-                ui.label("Заменить на");
-                ui.add(TextEdit::singleline(&mut self.replace).desired_width(f32::INFINITY));
+                label(ui, "Заменить на");
+                ui.add(field(&mut self.replace, String::new()).desired_width(f32::INFINITY));
                 ui.end_row();
-                ui.label("Папка");
+                label(ui, "Папка");
                 ui.horizontal(|ui| {
                     let hint = project
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "выберите папку".into());
-                    ui.add(
-                        TextEdit::singleline(&mut self.dir)
-                            .hint_text(hint)
-                            .desired_width((ui.available_width() - 80.0).max(60.0)),
-                    );
-                    if ui.button("Выбрать…").clicked() {
+                    ui.add(field(&mut self.dir, hint).desired_width((ui.available_width() - 96.0).max(60.0)));
+                    if ui.add(Button::new("Выбрать…").min_size(egui::vec2(88.0, 28.0))).clicked() {
                         let mut dialog = rfd::FileDialog::new();
                         if let Some(start) = root.as_deref().or(project) {
                             dialog = dialog.set_directory(start);
@@ -378,19 +384,23 @@ impl FindFiles {
                     }
                 });
                 ui.end_row();
-                ui.label("Файлы");
+                label(ui, "Файлы");
                 ui.add(
-                    TextEdit::singleline(&mut self.mask)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("все; или маски через запятую: *.php, *.js"),
+                    field(&mut self.mask, "все; или маски через запятую: *.php, *.js".into())
+                        .desired_width(f32::INFINITY),
                 );
                 ui.end_row();
+                ui.label("");
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 16.0;
+                    ui.checkbox(&mut self.case, "Учитывать регистр");
+                    ui.checkbox(&mut self.regex, "Регулярное выражение");
+                });
+                ui.end_row();
             });
+        ui.add_space(10.0);
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.case, "Учитывать регистр");
-            ui.checkbox(&mut self.regex, "Регулярное выражение");
-        });
-        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
             let ready = !self.query.is_empty() && !busy && root.is_some();
             go |= ui
                 .add_enabled(ready, crate::widgets::primary("Найти", pal))
@@ -447,14 +457,18 @@ impl FindFiles {
             }
         }
         if !self.note.is_empty() {
+            ui.add_space(6.0);
             ui.label(RichText::new(&self.note).small().color(pal.subtext));
         }
+        ui.add_space(6.0);
         ui.separator();
         ui.spacing_mut().item_spacing.y = 0.0;
         let row_h = 22.0;
+        let tall = (self.hits.len() as f32 * row_h).min(300.0);
         ScrollArea::vertical()
             .id_salt("tror_find_files_hits")
-            .max_height(300.0)
+            .min_scrolled_height(tall)
+            .max_height(tall)
             .auto_shrink([false, true])
             .show_rows(ui, row_h, self.hits.len(), |ui, range| {
                 for hit in &self.hits[range] {

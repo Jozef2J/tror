@@ -1013,6 +1013,36 @@ fn body(
                     }
                 });
                 ui.end_row();
+                ui.label("Цвета по умолчанию");
+                let base = Look {
+                    dark: look.dark,
+                    ..Look::default()
+                };
+                let custom = look.accent != base.accent
+                    || look.colors_dark != base.colors_dark
+                    || look.colors_light != base.colors_light
+                    || look.syntax_dark != base.syntax_dark
+                    || look.syntax_light != base.syntax_light
+                    || look.code_dark != base.code_dark
+                    || look.code_light != base.code_light
+                    || look.log_dark != base.log_dark
+                    || look.log_light != base.log_light;
+                if ui
+                    .add_enabled(custom, Button::new("Сбросить цветовую схему").fill(pal.surface))
+                    .on_hover_text("Акцент, цвета интерфейса, подсветка кода и журнал — как после установки, для обеих тем")
+                    .clicked()
+                {
+                    look.accent = base.accent;
+                    look.colors_dark = base.colors_dark;
+                    look.colors_light = base.colors_light;
+                    look.syntax_dark = base.syntax_dark;
+                    look.syntax_light = base.syntax_light;
+                    look.code_dark = base.code_dark;
+                    look.code_light = base.code_light;
+                    look.log_dark = base.log_dark;
+                    look.log_light = base.log_light;
+                }
+                ui.end_row();
             });
 
         heading(

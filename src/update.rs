@@ -83,11 +83,11 @@ pub fn kind() -> Kind {
     let renamed = exe
         .file_name()
         .is_some_and(|n| n.eq_ignore_ascii_case("trorpad.exe"));
-    match (installed, writable && renamed) {
-        (true, true) => Kind::Installed,
-        (true, false) => Kind::Installer,
-        (false, true) => Kind::Portable,
-        (false, false) => Kind::Page,
+    match (installed, writable, renamed) {
+        (true, true, true) => Kind::Installed,
+        (true, _, _) => Kind::Installer,
+        (false, true, _) => Kind::Portable,
+        (false, false, _) => Kind::Page,
     }
 }
 

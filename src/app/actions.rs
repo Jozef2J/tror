@@ -121,6 +121,7 @@ impl TrorApp {
                 }
             }
             Action::Quit => ctx.send_viewport_cmd(ViewportCommand::Close),
+            Action::Find if self.search.open => self.run(Action::CloseSearch, ctx),
             Action::Find => self.open_search(false),
             Action::Replace => self.open_search(true),
             Action::FindNext => {
@@ -214,12 +215,6 @@ impl TrorApp {
                     self.settings.detached.retain(|p| *p != pane);
                 } else {
                     dock::toggle(&mut self.dock, pane, &self.settings.floats);
-                }
-            }
-            Action::Detach(pane) => {
-                dock::hide(&mut self.dock, pane);
-                if !self.settings.detached.contains(&pane) {
-                    self.settings.detached.push(pane);
                 }
             }
             Action::Attach(pane) => {

@@ -202,9 +202,7 @@ fn first_tab(tree: &egui_stack::Tree<Pane>, node: NodeIndex) -> Option<Pane> {
 
 fn side(tree: &egui_stack::Tree<Pane>, node: NodeIndex) -> bool {
     match &tree[node] {
-        egui_stack::Node::Leaf(leaf) => {
-            !leaf.tabs().is_empty() && leaf.tabs().iter().all(|t| t.zone() != Zone::Center)
-        }
+        egui_stack::Node::Leaf(leaf) => !leaf.tabs().is_empty() && leaf.tabs().iter().all(steady),
         egui_stack::Node::Empty => false,
         other => other.children().iter().all(|c| side(tree, *c)),
     }

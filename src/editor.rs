@@ -98,12 +98,27 @@ pub struct Pointer {
     adding: Option<usize>,
 }
 
-fn url_at(doc: &Document, pos: usize) -> Option<String> {
+fn url_re() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| {
+    RE.get_or_init(|| {
         regex::Regex::new(r#"(?:https?|ftp)://[^\s"'<>()\[\]{}`]+|www\.[^\s"'<>()\[\]{}`]+"#)
             .unwrap_or_else(|_| regex::Regex::new("$^").unwrap_or_else(|_| unreachable!()))
-    });
+    })
+}
+
+fn url_spans(text: &str) -> Vec<(usize, usize)> {
+    url_re()
+        .find_iter(text)
+        .map(|m| {
+            let url = m.as_str().trim_end_matches(['.', ',', ';', ':', '!', '?']);
+            let start = text[..m.start()].chars().count();
+            (start, start + url.chars().count())
+        })
+        .collect()
+}
+
+fn url_at(doc: &Document, pos: usize) -> Option<String> {
+    let re = url_re();
     if pos > doc.len() {
         return None;
     }
@@ -658,7 +673,23 @@ fn process_events(ui: &Ui, doc: &mut Document, m: &Metrics, events: Vec<Event>) 
             }
             Event::Paste(text) => {
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
-                if !text.is_empty() {
+                if !text.is_empty()
+                    && let Some(((l0, x0), (l1, x1))) = doc.block
+                {
+                    let col = (x0.min(x1) / m.char_w as f64).round().max(0.0) as usize;
+                    let top = l0.min(l1);
+                    let rows = l0.max(l1) - top + 1;
+                    let body = text.strip_suffix('\n').unwrap_or(&text);
+                    let mut lines: Vec<&str> = body.split('\n').collect();
+                    if lines.len() == 1 && rows > 1 {
+                        lines = vec![lines[0]; rows];
+                    }
+                    if doc.cursors().iter().any(|c| c.0 != c.1) {
+                        doc.insert_text("");
+                    }
+                    doc.block_paste_at(top, col, &lines);
+                    doc.block = None;
+                } else if !text.is_empty() {
                     if !doc.multi() && is_block_clip(&text) {
                         if doc.has_selection() {
                             doc.insert_text("");
@@ -1250,12 +1281,15 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         state.block = None;
         state.adding = None;
     }
-    if modifiers.command
-        && response.hovered()
+    if response.hovered()
+        && !response.dragged()
         && let Some(p) = pointer
         && url_at(doc, char_at(ui, doc, p)).is_some()
     {
         ctx.set_cursor_icon(CursorIcon::PointingHand);
+        response
+            .clone()
+            .on_hover_text_at_pointer("Ctrl+щелчок — открыть ссылку в браузере");
     }
     ui.data_mut(|d| d.insert_temp(id, state));
     if response.secondary_clicked()
@@ -1574,6 +1608,21 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 fill(a, past, char_w * 0.6, 0.0, pal.selection);
             }
         }
+        if let Some(((l0, x0), (l1, x1))) = doc.block
+            && line >= l0.min(l1)
+            && line <= l0.max(l1)
+        {
+            let (a, b) = (x0.min(x1), x0.max(x1));
+            let left = sx(a);
+            let right = sx(b).max(left + 2.0);
+            let top = row_top(0);
+            let color = if b - a < 1.0 { pal.accent } else { pal.selection };
+            painter.rect_filled(
+                Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, top + row_h)),
+                0.0,
+                color,
+            );
+        }
         if layout.grid > 0 {
             for r in row_from..row_to {
                 painter.galley(
@@ -1588,6 +1637,23 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 layout.galley.clone(),
                 doc.hl.default_color,
             );
+        }
+        if layout.len <= 4000 {
+            let text: String = doc.rope.line(line).chars().collect();
+            if text.contains("://") || text.contains("www.") {
+                let stroke = Stroke::new(1.0, doc.hl.default_color.gamma_multiply(0.7));
+                for (a, b) in url_spans(&text) {
+                    let (x0, r0) = layout.place(a, char_w);
+                    let (x1, r1) = layout.place(b, char_w);
+                    for r in r0..=r1.min(rows - 1) {
+                        let (start, end) = layout.row_range(r);
+                        let xa = if r == r0 { x0 } else { layout.x_in_row(r, start, char_w) };
+                        let xb = if r == r1 { x1 } else { layout.x_in_row(r, end, char_w) };
+                        let yb = row_top(r) + row_h - 3.0;
+                        painter.line_segment([egui::pos2(sx(xa), yb), egui::pos2(sx(xb), yb)], stroke);
+                    }
+                }
+            }
         }
         let folded = doc.is_folded(line);
         if folded {

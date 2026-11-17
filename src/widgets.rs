@@ -727,6 +727,18 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3], sort: &mut So
         if click.clicked() {
             sort.click(key);
         }
+        click.context_menu(|ui| {
+            if ui
+                .add_enabled(
+                    sort.key != SortKey::None,
+                    egui::Button::new("Сбросить сортировку"),
+                )
+                .clicked()
+            {
+                *sort = Sort::default();
+                ui.close();
+            }
+        });
         let active = sort.key == key;
         let color = if active || click.hovered() {
             pal.text

@@ -1,8 +1,8 @@
 use super::*;
 
 const TITLE: &str = "Поиск — TrorPad";
-const WIDTH: f32 = 450.0;
-const WIDE: f32 = 640.0;
+const WIDTH: f32 = 560.0;
+const WIDE: f32 = 660.0;
 const FADED: u8 = 115;
 
 #[derive(Default)]
@@ -97,7 +97,7 @@ impl TrorApp {
                     Frame::new()
                         .fill(pal.mantle)
                         .stroke(Stroke::new(1.0, pal.border))
-                        .inner_margin(Margin::same(8)),
+                        .inner_margin(Margin::symmetric(14, 12)),
                 )
                 .show(ui, |ui| {
                     if !focused && !NATIVE_ALPHA {
@@ -116,13 +116,13 @@ impl TrorApp {
                         self.find.moved = false;
                         self.find.placed = Some(egui::pos2(f32::MAX, f32::MAX));
                     }
-                    self.find_tabs(ui, &pal);
+                    self.find_tabs(ui, &pal, actions);
                     if self.search.files {
                         self.files_search(ui, &pal);
                     } else {
                         self.search_bar(ui, &pal, actions);
                     }
-                    let used = ui.min_rect().height() + 16.0;
+                    let used = ui.min_rect().height() + 24.0;
                     if (used - self.find.height).abs() > 1.0 || self.find.width != width {
                         self.find.height = used;
                         self.find.width = width;
@@ -140,33 +140,48 @@ impl TrorApp {
 }
 
 impl TrorApp {
-    fn find_tabs(&mut self, ui: &mut Ui, pal: &Palette) {
+    fn find_tabs(&mut self, ui: &mut Ui, pal: &Palette, actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            for (files, label) in [(false, "В документе"), (true, "В файлах")] {
-                let active = self.search.files == files;
-                let text =
-                    RichText::new(label)
-                        .small()
-                        .color(if active { pal.text } else { pal.subtext });
-                let mut button = Button::new(text);
-                if active {
-                    button = button.fill(pal.surface);
-                } else {
-                    button = button.frame(false);
-                }
-                if ui.add(button).clicked() && !active {
-                    self.search.files = files;
-                    self.find.focus = true;
-                    if files {
-                        self.find_files.show();
-                    } else {
-                        self.search.focus_query = true;
+            egui::Frame::new()
+                .fill(pal.crust)
+                .corner_radius(7)
+                .inner_margin(Margin::same(2))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for (files, label) in [(false, "В документе"), (true, "В файлах")]
+                    {
+                        let active = self.search.files == files;
+                        let text =
+                            RichText::new(label).color(if active { pal.text } else { pal.subtext });
+                        let button = Button::new(text)
+                            .min_size(egui::vec2(104.0, 24.0))
+                            .corner_radius(5)
+                            .fill(if active {
+                                pal.surface
+                            } else {
+                                Color32::TRANSPARENT
+                            });
+                        if ui.add(button).clicked() && !active {
+                            self.search.files = files;
+                            self.find.focus = true;
+                            if files {
+                                self.find_files.show();
+                            } else {
+                                self.search.focus_query = true;
+                            }
+                        }
                     }
+                });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if icon_button(ui, pal, Icon::Close)
+                    .on_hover_text("Закрыть (Esc, Ctrl+F)")
+                    .clicked()
+                {
+                    actions.push(Action::CloseSearch);
                 }
-            }
+            });
         });
-        ui.add_space(4.0);
+        ui.add_space(12.0);
     }
 
     fn files_search(&mut self, ui: &mut Ui, pal: &Palette) {
@@ -185,7 +200,12 @@ impl TrorApp {
             self.find.scope = 0;
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Где искать").color(pal.subtext));
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.allocate_ui_with_layout(
+                egui::vec2(86.0, 28.0),
+                Layout::left_to_right(Align::Center),
+                |ui| ui.label(RichText::new("Где искать").color(pal.subtext)),
+            );
             let current = scopes
                 .iter()
                 .find(|s| s.0 == self.find.scope)
@@ -193,14 +213,14 @@ impl TrorApp {
                 .unwrap_or_default();
             egui::ComboBox::from_id_salt("tror_find_scope")
                 .selected_text(current)
-                .width(260.0)
+                .width(ui.available_width())
                 .show_ui(ui, |ui| {
                     for (id, label) in &scopes {
                         ui.selectable_value(&mut self.find.scope, *id, label);
                     }
                 });
         });
-        ui.add_space(4.0);
+        ui.add_space(8.0);
         match self.find.scope {
             0 | 1 => {
                 let root = if self.find.scope == 0 {

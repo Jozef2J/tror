@@ -83,7 +83,7 @@ impl eframe::App for TrorApp {
             }
         }
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        let (zoom, reset) = ctx.input_mut(|i| {
+        let (zoom, reset, wheel) = ctx.input_mut(|i| {
             let reset = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0);
             let mut step = 0.0;
             if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Plus)
@@ -94,14 +94,20 @@ impl eframe::App for TrorApp {
             if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Minus) {
                 step -= 1.0;
             }
-            let wheel = i.zoom_delta();
-            if wheel > 1.0 {
-                step += 1.0;
-            } else if wheel < 1.0 {
-                step -= 1.0;
-            }
-            (step, reset)
+            (step, reset, i.zoom_delta())
         });
+        let (mut zoom, reset, wheel) = (zoom, reset, wheel);
+        if wheel != 1.0 && wheel > 0.0 {
+            self.zoom_acc += wheel.ln();
+        }
+        while self.zoom_acc >= 0.19 {
+            self.zoom_acc -= 0.2;
+            zoom += 1.0;
+        }
+        while self.zoom_acc <= -0.19 {
+            self.zoom_acc += 0.2;
+            zoom -= 1.0;
+        }
         if reset {
             self.settings.look.font_size = crate::prefs::Look::default().font_size;
             let now = ctx.input(|i| i.time);
@@ -348,11 +354,15 @@ impl eframe::App for TrorApp {
                 _ => format!("{} — TrorPad", pane.title()),
             };
             let mut closed = false;
+            let mut hidden = false;
             let (min_w, min_h) = pane.min_size();
             let mut builder = egui::ViewportBuilder::default()
                 .with_title(title)
+                .with_decorations(false)
+                .with_taskbar(false)
+                .with_resizable(true)
                 .with_inner_size([860.0, 580.0])
-                .with_min_inner_size([min_w + 16.0, min_h + 16.0]);
+                .with_min_inner_size([min_w + 16.0, min_h + 48.0]);
             if let Some((_, [x, y, w, h])) = self.settings.floats.iter().find(|(p, _)| *p == pane) {
                 builder = builder
                     .with_position([*x, *y])
@@ -372,9 +382,59 @@ impl eframe::App for TrorApp {
                     if !modal_open {
                         self.shortcuts(ui.ctx(), &mut actions);
                     }
+                    let ctx = ui.ctx().clone();
                     CentralPanel::default()
-                        .frame(Frame::new().fill(pal.mantle))
+                        .frame(
+                            Frame::new()
+                                .fill(pal.mantle)
+                                .stroke(Stroke::new(1.0, pal.border))
+                                .inner_margin(Margin::same(1)),
+                        )
                         .show(ui, |ui| {
+                            let full = ui.max_rect();
+                            let (bar, _) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), 30.0),
+                                Sense::hover(),
+                            );
+                            ui.painter().rect_filled(bar, 0.0, pal.crust);
+                            let drag = ui.interact(
+                                bar,
+                                ui.scope_id().with("tror_float_bar"),
+                                Sense::click_and_drag(),
+                            );
+                            if drag.drag_started() {
+                                ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+                            }
+                            if drag.double_clicked() {
+                                closed = true;
+                            }
+                            ui.painter().text(
+                                egui::pos2(bar.left() + 10.0, bar.center().y),
+                                egui::Align2::LEFT_CENTER,
+                                pane.title(),
+                                FontId::proportional(13.0),
+                                pal.text,
+                            );
+                            let mut buttons = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(bar.shrink2(egui::vec2(4.0, 3.0)))
+                                    .layout(Layout::right_to_left(Align::Center)),
+                            );
+                            if !matches!(pane, Pane::Doc(_))
+                                && icon_button(&mut buttons, &pal, Icon::Close)
+                                    .on_hover_text("Скрыть панель")
+                                    .clicked()
+                            {
+                                hidden = true;
+                            }
+                            if icon_button(&mut buttons, &pal, Icon::Dock)
+                                .on_hover_text(
+                                    "Вернуть в окно TrorPad (двойной щелчок по заголовку)",
+                                )
+                                .clicked()
+                            {
+                                closed = true;
+                            }
                             let mut viewer = Viewer {
                                 app: self,
                                 pal,
@@ -383,6 +443,70 @@ impl eframe::App for TrorApp {
                             };
                             let mut tab = pane;
                             viewer.ui(ui, &mut tab);
+                            for (edge, dir) in [
+                                (
+                                    Rect::from_min_max(
+                                        egui::pos2(full.right() - 6.0, full.top() + 30.0),
+                                        egui::pos2(full.right(), full.bottom() - 10.0),
+                                    ),
+                                    egui::viewport::ResizeDirection::East,
+                                ),
+                                (
+                                    Rect::from_min_max(
+                                        egui::pos2(full.left(), full.top() + 30.0),
+                                        egui::pos2(full.left() + 6.0, full.bottom() - 10.0),
+                                    ),
+                                    egui::viewport::ResizeDirection::West,
+                                ),
+                                (
+                                    Rect::from_min_max(
+                                        egui::pos2(full.left() + 10.0, full.bottom() - 6.0),
+                                        egui::pos2(full.right() - 10.0, full.bottom()),
+                                    ),
+                                    egui::viewport::ResizeDirection::South,
+                                ),
+                                (
+                                    Rect::from_min_max(
+                                        egui::pos2(full.right() - 10.0, full.bottom() - 10.0),
+                                        full.max,
+                                    ),
+                                    egui::viewport::ResizeDirection::SouthEast,
+                                ),
+                                (
+                                    Rect::from_min_max(
+                                        egui::pos2(full.left(), full.bottom() - 10.0),
+                                        egui::pos2(full.left() + 10.0, full.bottom()),
+                                    ),
+                                    egui::viewport::ResizeDirection::SouthWest,
+                                ),
+                            ] {
+                                let grip = ui.interact(
+                                    edge,
+                                    ui.scope_id().with((
+                                        "tror_float_edge",
+                                        edge.min.x as i32,
+                                        edge.min.y as i32,
+                                    )),
+                                    Sense::drag(),
+                                );
+                                let icon = match dir {
+                                    egui::viewport::ResizeDirection::East
+                                    | egui::viewport::ResizeDirection::West => {
+                                        egui::CursorIcon::ResizeHorizontal
+                                    }
+                                    egui::viewport::ResizeDirection::South => {
+                                        egui::CursorIcon::ResizeVertical
+                                    }
+                                    egui::viewport::ResizeDirection::SouthEast => {
+                                        egui::CursorIcon::ResizeNwSe
+                                    }
+                                    _ => egui::CursorIcon::ResizeNeSw,
+                                };
+                                let grip = grip.on_hover_cursor(icon);
+                                if grip.drag_started() {
+                                    ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+                                }
+                            }
                         });
                     self.pane_dialogs(pane, ui.ctx(), &pal);
                 },
@@ -395,6 +519,8 @@ impl eframe::App for TrorApp {
             }
             if closed {
                 actions.push(Action::Attach(pane));
+            } else if hidden {
+                actions.push(Action::Toggle(pane));
             }
         }
         self.find_window(&ctx, pal, &mut actions);

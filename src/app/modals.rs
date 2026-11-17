@@ -154,6 +154,16 @@ impl TrorApp {
                         close = ui.add(crate::widgets::secondary("Позже", pal)).clicked();
                     });
                 }
+                if !self.update.busy && !self.update.swapped && kind == Kind::Page {
+                    ui.label(
+                        RichText::new(
+                            "Установить отсюда нельзя: папка программы закрыта для записи. \
+                             Скачайте новую версию со страницы выпуска.",
+                        )
+                        .small()
+                        .color(pal.subtext),
+                    );
+                }
                 if !self.update.error.is_empty() {
                     ui.label(RichText::new(&self.update.error).color(pal.warn));
                 }

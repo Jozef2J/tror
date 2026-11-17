@@ -1111,11 +1111,15 @@ impl Document {
             .unwrap_or(text)
             .split('\n')
             .collect();
+        self.block_paste_at(line, col, &lines);
+    }
+
+    pub fn block_paste_at(&mut self, line: usize, col: usize, lines: &[&str]) {
         self.checkpoint(EditKind::Other);
         let mut carets = Vec::new();
         for (i, piece) in lines.iter().enumerate() {
             let target = line + i;
-            if target >= self.line_count() {
+            while target >= self.line_count() {
                 let end = self.len();
                 self.apply(end..end, "\n");
             }
@@ -1375,6 +1379,15 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_paste_pads_short_lines_and_adds_new_ones() {
+        let mut d = Document::from_text("a\nbbbb\ncc");
+        d.block_paste_at(1, 6, &["L1", "L2", "L3"]);
+        assert_eq!(d.rope.to_string(), "a\nbbbb  L1\ncc    L2\n      L3");
+        d.undo();
+        assert_eq!(d.rope.to_string(), "a\nbbbb\ncc");
+    }
     use encoding_rs::WINDOWS_1251;
 
     #[test]
