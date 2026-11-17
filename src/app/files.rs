@@ -49,7 +49,7 @@ impl TrorApp {
         crate::recover::clear(&dir);
         let _ = self.recovery.snapshot(&dir, &self.docs);
         self.toast = Some((
-            format!("Восстановлены несохранённые правки, вкладок: {count}"),
+            format!("Восстановлены несохранённые изменения, вкладок: {count}"),
             0.0,
         ));
     }

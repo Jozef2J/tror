@@ -848,12 +848,20 @@ impl ConsolePanel {
                 ui.label(RichText::new("Нет открытых сеансов").color(pal.subtext));
                 ui.add_space(6.0);
                 let mut open = None;
+                let mut action = None;
                 ui.horizontal_wrapped(|ui| {
-                    for profile in &self.store.terminals {
+                    for (index, profile) in self.store.terminals.iter().enumerate() {
                         let text = format!("{}  ·  {}", profile.name, profile.protocol.label());
-                        if ui.add(Button::new(text).fill(pal.surface)).clicked() {
+                        let chip = ui.add(Button::new(text).fill(pal.surface));
+                        if chip.clicked() {
                             open = Some(profile.clone());
                         }
+                        chip.context_menu(|ui| {
+                            let id = egui::Id::unique("tror_term_profiles");
+                            if let Some(a) = crate::widgets::profile_menu(ui, id, index, &profile.name) {
+                                action = Some(a);
+                            }
+                        });
                     }
                     for host in self
                         .store
@@ -869,10 +877,13 @@ impl ConsolePanel {
                 });
                 ui.add_space(6.0);
                 if ui
-                    .add(Button::new("Новое подключение (SSH, Telnet, Mosh)…").fill(pal.surface))
+                    .add(Button::new("Добавить подключение (SSH, Telnet, Mosh)…").fill(pal.surface))
                     .clicked()
                 {
                     self.open_editor(true);
+                }
+                if let Some(action) = action {
+                    self.profile_action(action, ctx);
                 }
                 if let Some(profile) = open {
                     self.open(profile, ctx);

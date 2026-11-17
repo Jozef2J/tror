@@ -181,16 +181,16 @@ pub struct Home {
     pub share: f32,
 }
 
-static HOMES: std::sync::Mutex<Vec<(Pane, Home)>> = std::sync::Mutex::new(Vec::new());
+thread_local! {
+    static HOMES: std::cell::RefCell<Vec<(Pane, Home)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 
 pub fn homes() -> Vec<(Pane, Home)> {
-    HOMES.lock().map(|h| h.clone()).unwrap_or_default()
+    HOMES.with_borrow(|h| h.clone())
 }
 
 pub fn set_homes(homes: Vec<(Pane, Home)>) {
-    if let Ok(mut list) = HOMES.lock() {
-        *list = homes;
-    }
+    HOMES.with_borrow_mut(|list| *list = homes);
 }
 
 fn first_tab(tree: &egui_stack::Tree<Pane>, node: NodeIndex) -> Option<Pane> {
@@ -280,12 +280,12 @@ pub fn remember_homes(dock: &DockState<Pane>) {
     if found.is_empty() {
         return;
     }
-    if let Ok(mut list) = HOMES.lock() {
+    HOMES.with_borrow_mut(|list| {
         for (pane, home) in found {
             list.retain(|(p, _)| *p != pane);
             list.push((pane, home));
         }
-    }
+    });
 }
 
 fn go_home(dock: &mut DockState<Pane>, pane: Pane) -> bool {
@@ -759,27 +759,29 @@ mod tests {
     }
 
     #[test]
-    fn hidden_floating_pane_returns_to_its_window() {
+    fn hidden_pane_returns_to_its_place() {
+        set_homes(Vec::new());
         let mut dock = new();
         sync(&mut dock, &[1]);
-        let mut floats = Floats::new();
-        show(&mut dock, Pane::Log, &floats);
-        let path = dock.find_tab(&Pane::Log).unwrap();
-        let rect = egui::Rect::from_min_size(egui::pos2(300.0, 200.0), egui::vec2(420.0, 260.0));
-        dock.detach_tab(path, rect);
-        let surface = dock.find_tab(&Pane::Log).unwrap().surface;
-        assert_ne!(surface, SurfaceIndex::main());
-        floats.push((Pane::Log, [300.0, 200.0, 420.0, 260.0]));
+        show(&mut dock, Pane::Hosts, &Vec::new());
+        show(&mut dock, Pane::Project, &Vec::new());
+        let project = dock.find_tab(&Pane::Project).unwrap();
+        let hosts = dock.find_tab(&Pane::Hosts).unwrap();
+        assert_eq!(project.node, hosts.node);
+        remember_homes(&dock);
+        hide(&mut dock, Pane::Project);
+        show(&mut dock, Pane::Log, &Vec::new());
+        show(&mut dock, Pane::Project, &Vec::new());
+        let back = dock.find_tab(&Pane::Project).unwrap();
+        assert_eq!(back.node, dock.find_tab(&Pane::Hosts).unwrap().node);
+        let log = dock.find_tab(&Pane::Log).unwrap();
+        remember_homes(&dock);
+        let before = dock.main_surface()[log.node].rect();
         hide(&mut dock, Pane::Log);
-        assert!(!has(&dock, Pane::Log));
-        show(&mut dock, Pane::Log, &floats);
-        let surface = dock.find_tab(&Pane::Log).unwrap().surface;
-        assert_ne!(surface, SurfaceIndex::main());
-        show(&mut dock, Pane::Hosts, &floats);
-        assert_eq!(
-            dock.find_tab(&Pane::Hosts).unwrap().surface,
-            SurfaceIndex::main()
-        );
+        show(&mut dock, Pane::Log, &Vec::new());
+        let again = dock.find_tab(&Pane::Log).unwrap();
+        assert_ne!(again.node, back.node);
+        assert_eq!(dock.main_surface()[again.node].rect().is_some(), before.is_some());
     }
 
     #[test]

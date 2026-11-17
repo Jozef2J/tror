@@ -133,6 +133,16 @@ impl Document {
         None
     }
 
+    pub fn has_blocks(&self) -> bool {
+        let mut cache = self.blocks.borrow_mut();
+        if cache.0 != self.version || cache.1.is_none() {
+            let lines = self.line_count().min(20_000);
+            let found = (0..lines).any(|l| self.foldable(l) && self.fold_end(l).is_some());
+            *cache = (self.version, Some(found));
+        }
+        cache.1.unwrap_or(false)
+    }
+
     pub fn is_folded(&self, line: usize) -> bool {
         self.folds.binary_search_by_key(&line, |f| f.0).is_ok()
     }

@@ -95,6 +95,44 @@ pub struct Pointer {
     clicks: u8,
     origin: Option<(usize, usize)>,
     block: Option<(usize, f64)>,
+    adding: Option<usize>,
+}
+
+fn url_at(doc: &Document, pos: usize) -> Option<String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r#"(?:https?|ftp)://[^\s"'<>()\[\]{}`]+|www\.[^\s"'<>()\[\]{}`]+"#)
+            .unwrap_or_else(|_| regex::Regex::new("$^").unwrap_or_else(|_| unreachable!()))
+    });
+    if pos > doc.len() {
+        return None;
+    }
+    let line = doc.rope.char_to_line(pos);
+    let start = doc.rope.line_to_char(line);
+    if doc.line_len(line) > 4000 {
+        return None;
+    }
+    let text: String = doc.rope.line(line).chars().collect();
+    let col = pos - start;
+    let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
+    let found = re.find_iter(&text).find(|m| m.start() <= byte && byte < m.end())?;
+    let url = found.as_str().trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    Some(if url.starts_with("www.") {
+        format!("https://{url}")
+    } else {
+        url.to_owned()
+    })
+}
+
+fn line_span(doc: &Document, a: usize, b: usize) -> (usize, usize) {
+    let (lo, hi) = (a.min(b), a.max(b));
+    let start = doc.rope.line_to_char(lo);
+    let end = if hi + 1 < doc.line_count() {
+        doc.rope.line_to_char(hi + 1)
+    } else {
+        doc.len()
+    };
+    if b < a { (end, start) } else { (start, end) }
 }
 
 static BLOCK_CLIP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -621,7 +659,10 @@ fn process_events(ui: &Ui, doc: &mut Document, m: &Metrics, events: Vec<Event>) 
             Event::Paste(text) => {
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
                 if !text.is_empty() {
-                    if !doc.multi() && !doc.has_selection() && is_block_clip(&text) {
+                    if !doc.multi() && is_block_clip(&text) {
+                        if doc.has_selection() {
+                            doc.insert_text("");
+                        }
                         doc.block_paste(&text);
                     } else {
                         doc.insert_text(&text);
@@ -1121,9 +1162,31 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         && let Some(p) = pointer
     {
         let pos = char_at(ui, doc, p);
-        doc.add_cursor(pos);
+        if let Some(url) = url_at(doc, pos) {
+            if let Err(e) = crate::preview::open_url(&url) {
+                crate::trace::popup(format!("Не удалось открыть ссылку: {e}"), false);
+            }
+        } else {
+            doc.add_cursor(pos);
+            state.adding = Some(pos);
+        }
         state.origin = None;
         state.block = None;
+    } else if response.is_pointer_button_down_on()
+        && response.dragged()
+        && let (Some(p), Some(start)) = (pointer, state.adding)
+    {
+        let clamped = egui::pos2(
+            p.x.clamp(text_rect.left(), text_rect.right()),
+            p.y.clamp(text_rect.top(), text_rect.bottom() - 1.0),
+        );
+        let head = char_at(ui, doc, clamped);
+        let mut cursors = doc.cursors();
+        if let Some(last) = cursors.iter().position(|c| c.0 == start) {
+            cursors[last] = (start, head);
+            doc.set_cursors(cursors, last);
+        }
+        doc.reveal = false;
     } else if response.is_pointer_button_down_on()
         && let (Some(p), Some(anchor)) = (pointer, state.block)
     {
@@ -1185,6 +1248,14 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     if !ui.input(|i| i.pointer.primary_down()) {
         state.origin = None;
         state.block = None;
+        state.adding = None;
+    }
+    if modifiers.command
+        && response.hovered()
+        && let Some(p) = pointer
+        && url_at(doc, char_at(ui, doc, p)).is_some()
+    {
+        ctx.set_cursor_icon(CursorIcon::PointingHand);
     }
     ui.data_mut(|d| d.insert_temp(id, state));
     if response.secondary_clicked()
@@ -1398,7 +1469,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         .then(|| doc.selected_text())
         .filter(|t| !t.contains('\n') && !t.trim().is_empty());
 
-    let gutter_click = ui.interact(gutter_rect, id.with("fold_gutter"), Sense::click());
+    let gutter_click = ui.interact(gutter_rect, id.with("fold_gutter"), Sense::click_and_drag());
     let mut fold_rows: Vec<(usize, f32, f32)> = Vec::new();
     let mut shown_rows: Vec<(usize, f32, f32)> = Vec::new();
     let mut fold_marks: Vec<(usize, Rect)> = Vec::new();
@@ -1710,8 +1781,52 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             doc.marks.insert(line);
         }
     }
+    let in_numbers = |p: Pos2| {
+        p.x < fold_x - 7.0 && (!edit.line_numbers || p.x >= gutter_rect.left() + 14.0)
+    };
+    let line_of = |p: Pos2| shown_rows.iter().rev().find(|r| p.y >= r.1).map(|r| r.0);
+    let mut lines_state = ui.data(|d| d.get_temp::<Option<usize>>(id.with("gutter_lines"))).flatten();
+    if ui.input(|i| i.pointer.primary_pressed())
+        && let Some(p) = pointer_at
+        && gutter_rect.contains(p)
+        && ui.rect_contains_pointer(gutter_rect)
+        && in_numbers(p)
+        && let Some(line) = line_of(p)
+    {
+        let modifiers = ui.input(|i| i.modifiers);
+        if modifiers.command {
+            let (a, b) = line_span(doc, line, line);
+            let mut cursors = doc.cursors();
+            cursors.push((a, b));
+            let primary = cursors.len() - 1;
+            doc.set_cursors(cursors, primary);
+            lines_state = None;
+        } else {
+            let anchor = if modifiers.shift {
+                doc.rope.char_to_line(doc.sel.0.min(doc.len()))
+            } else {
+                line
+            };
+            doc.clear_extra();
+            doc.sel = line_span(doc, anchor, line);
+            lines_state = Some(anchor);
+        }
+        doc.goal_x = None;
+        doc.reveal = false;
+        ui.memory_mut(|mem| mem.request_focus(id));
+    } else if gutter_click.dragged()
+        && let (Some(anchor), Some(p)) = (lines_state, pointer_at)
+        && let Some(line) = line_of(p)
+    {
+        doc.sel = line_span(doc, anchor, line);
+        doc.reveal = false;
+    }
+    if !ui.input(|i| i.pointer.primary_down()) {
+        lines_state = None;
+    }
+    ui.data_mut(|d| d.insert_temp(id.with("gutter_lines"), lines_state));
     let toggled = if gutter_click.clicked() && !mark_click {
-        pointer_at.and_then(|p| {
+        pointer_at.filter(|p| !in_numbers(*p)).and_then(|p| {
             fold_rows
                 .iter()
                 .find(|(_, top, bottom)| p.y >= *top && p.y < *bottom)
@@ -1915,5 +2030,21 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                     }
                 });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_links_and_line_spans() {
+        let doc = Document::from_text("см. https://example.com/a?b=1, и www.site.ru.\nвторая");
+        assert_eq!(url_at(&doc, 10).as_deref(), Some("https://example.com/a?b=1"));
+        assert_eq!(url_at(&doc, 36).as_deref(), Some("https://www.site.ru"));
+        assert_eq!(url_at(&doc, 1), None);
+        assert_eq!(url_at(&doc, 48), None);
+        assert_eq!(line_span(&doc, 0, 0), (0, 46));
+        assert_eq!(line_span(&doc, 1, 0), (doc.len(), 0));
     }
 }

@@ -25,6 +25,10 @@ pub struct Recovery {
     pub last: f64,
 }
 
+pub fn fits(doc: &Document) -> bool {
+    doc.rope.len_bytes() <= LIMIT
+}
+
 pub fn dir() -> Option<PathBuf> {
     eframe::storage_dir("Tror").map(|dir| dir.join("recover"))
 }

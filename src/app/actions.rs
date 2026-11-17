@@ -425,7 +425,7 @@ impl TrorApp {
                 && weight(next) > weight(shortcut)
             {
                 if let Some((next, action)) = extra.next()
-                    && ctx.input_mut(|i| i.consume_shortcut(&next))
+                    && ctx.input_mut(|i| crate::keys::consume(i, &next))
                 {
                     actions.push(action);
                 }
@@ -434,7 +434,7 @@ impl TrorApp {
             if self.console.focused() && editing {
                 continue;
             }
-            if !ctx.input_mut(|i| i.consume_shortcut(shortcut)) {
+            if !ctx.input_mut(|i| crate::keys::consume(i, shortcut)) {
                 continue;
             }
             if shortcut.modifiers.alt {
@@ -487,7 +487,7 @@ impl TrorApp {
             });
         }
         for (shortcut, action) in extra {
-            if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+            if ctx.input_mut(|i| crate::keys::consume(i, &shortcut)) {
                 actions.push(action);
             }
         }

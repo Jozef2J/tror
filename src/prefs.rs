@@ -172,6 +172,7 @@ pub struct Settings {
     pub edit: Edit,
     pub restore: bool,
     pub autosave: bool,
+    pub keep_session: bool,
     pub updates: bool,
     pub passwords_in_file: bool,
     pub macros: Vec<(String, Vec<egui::Event>)>,
@@ -214,6 +215,7 @@ impl Default for Settings {
             edit: Edit::default(),
             restore: true,
             autosave: true,
+            keep_session: true,
             updates: true,
             passwords_in_file: false,
             macros: Vec::new(),
@@ -566,6 +568,13 @@ fn tabs_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
         &mut settings.autosave,
         "Сохранять несохранённые правки для восстановления после сбоя",
         "Раз в 10 секунд, в служебную папку программы. Сами файлы при этом не перезаписываются.",
+    );
+    toggle_row(
+        ui,
+        pal,
+        &mut settings.keep_session,
+        "Не спрашивать о сохранении при выходе — запоминать правки",
+        "Несохранённые изменения всех вкладок сохраняются при закрытии программы и открываются при следующем запуске. Сами файлы не перезаписываются.",
     );
     toggle_row(
         ui,

@@ -101,8 +101,13 @@ pub fn unescape(text: &str) -> String {
             Some('\\') => out.push('\\'),
             Some(kind @ ('x' | 'u')) => {
                 let len = if kind == 'x' { 2 } else { 4 };
-                let digits: String = (0..len).filter_map(|_| chars.next_if(|c| c.is_ascii_hexdigit())).collect();
-                match u32::from_str_radix(&digits, 16).ok().and_then(char::from_u32) {
+                let digits: String = (0..len)
+                    .filter_map(|_| chars.next_if(|c| c.is_ascii_hexdigit()))
+                    .collect();
+                match u32::from_str_radix(&digits, 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                {
                     Some(ch) if digits.len() == len => out.push(ch),
                     _ => {
                         out.push('\\');

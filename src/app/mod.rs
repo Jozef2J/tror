@@ -363,7 +363,9 @@ impl TrorApp {
         dock::hide(&mut dock, Pane::Preview);
         dock::hide(&mut dock, Pane::ServerSearch);
         dock::set_homes(settings.homes.clone());
-        settings.detached.retain(|p| !matches!(p, Pane::Preview | Pane::ServerSearch));
+        settings
+            .detached
+            .retain(|p| !matches!(p, Pane::Preview | Pane::ServerSearch));
         crate::preview::forget_webview();
         crate::trace::install();
         let hosts = settings

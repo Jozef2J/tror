@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use eframe::egui::{Key, KeyboardShortcut, Modifiers};
+use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 
 pub const COMMANDS: [(&str, &str, &str, bool); 43] = [
     ("new", "Новый файл", "Ctrl+N", true),
@@ -88,6 +88,18 @@ pub fn usable(shortcut: &KeyboardShortcut) -> bool {
     let function =
         shortcut.logical_key.name().starts_with('F') && shortcut.logical_key.name().len() > 1;
     !plain || function
+}
+
+pub fn consume(input: &mut egui::InputState, shortcut: &KeyboardShortcut) -> bool {
+    let mut found = false;
+    input.events.retain(|event| {
+        let hit = !found
+            && matches!(event, egui::Event::Key { key, pressed: true, modifiers, .. }
+                if *key == shortcut.logical_key && modifiers.matches_exact(shortcut.modifiers));
+        found |= hit;
+        !hit
+    });
+    found
 }
 
 pub fn weight(s: &KeyboardShortcut) -> u8 {

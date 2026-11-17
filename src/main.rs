@@ -38,6 +38,10 @@ pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLoc
 
 fn main() -> eframe::Result {
     STARTED.get_or_init(std::time::Instant::now);
+    if std::env::args().nth(1).as_deref() == Some("--forget-passwords") {
+        vault::clear();
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("TrorPad")

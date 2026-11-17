@@ -49,13 +49,16 @@ impl TrorApp {
                     });
                 }
                 ui.separator();
-                if item(ui, "Сохранить", &key("save"), has_doc) {
+                let current = self.docs.get(self.active);
+                let savable =
+                    current.is_some_and(|d| d.dirty() || d.path.is_none() && d.remote.is_none());
+                if item(ui, "Сохранить", &key("save"), savable) {
                     actions.push(Action::Save);
                 }
                 if item(ui, "Сохранить как…", &key("save_as"), has_doc) {
                     actions.push(Action::SaveAs);
                 }
-                if item(ui, "Сохранить все", "", has_doc) {
+                if item(ui, "Сохранить все", "", self.docs.iter().any(|d| d.dirty())) {
                     actions.push(Action::SaveAll);
                 }
                 ui.separator();
@@ -74,10 +77,6 @@ impl TrorApp {
                     actions.push(Action::Reopen);
                 }
                 ui.separator();
-                if item(ui, "Настройки", &key("settings"), true) {
-                    actions.push(Action::Show(Pane::Settings));
-                }
-                ui.separator();
                 if item(ui, "Выход", "", true) {
                     actions.push(Action::Quit);
                 }
@@ -86,6 +85,10 @@ impl TrorApp {
                 ui.set_min_width(280.0);
                 let doc = self.docs.get(self.active);
                 let selected = doc.is_some_and(|d| d.has_selection());
+                let filled = doc.is_some_and(|d| d.len() > 0);
+                let line = doc.map_or(0, |d| d.rope.char_to_line(d.sel.1.min(d.len())));
+                let last = doc.map_or(0, |d| d.line_count().saturating_sub(1));
+                let marked = doc.is_some_and(|d| !d.marks.is_empty());
                 let cmd = if cfg!(target_os = "macos") {
                     "⌘"
                 } else {
@@ -116,35 +119,35 @@ impl TrorApp {
                 edit(ui, "Вырезать", &fixed("X"), selected, "cut");
                 edit(ui, "Копировать", &fixed("C"), selected, "copy");
                 edit(ui, "Вставить", &fixed("V"), true, "paste");
-                edit(ui, "Удалить", "Delete", true, "delete");
-                edit(ui, "Выделить всё", &fixed("A"), true, "select_all");
+                edit(ui, "Удалить", "Delete", filled, "delete");
+                edit(ui, "Выделить всё", &fixed("A"), filled, "select_all");
                 ui.separator();
                 edit(
                     ui,
                     "Дублировать строку",
                     &key("duplicate_line"),
-                    true,
+                    filled,
                     "duplicate_line",
                 );
                 edit(
                     ui,
                     "Удалить строку",
                     &key("delete_line"),
-                    true,
+                    filled,
                     "delete_line",
                 );
                 edit(
                     ui,
                     "Переместить строку вверх",
                     &key("line_up"),
-                    true,
+                    line > 0,
                     "line_up",
                 );
                 edit(
                     ui,
                     "Переместить строку вниз",
                     &key("line_down"),
-                    true,
+                    line < last,
                     "line_down",
                 );
                 ui.separator();
@@ -152,22 +155,22 @@ impl TrorApp {
                     ui,
                     "Закомментировать / раскомментировать",
                     &fixed("/"),
-                    true,
+                    filled,
                     "comment",
                 );
                 edit(ui, "Увеличить отступ", "Tab", true, "indent");
-                edit(ui, "Уменьшить отступ", "Shift+Tab", true, "outdent");
+                edit(ui, "Уменьшить отступ", "Shift+Tab", filled, "outdent");
                 edit(
                     ui,
                     "Удалить пробелы в конце строк",
                     &key("trim"),
-                    true,
+                    filled,
                     "trim",
                 );
                 ui.menu_button("Регистр", |ui| {
                     ui.set_min_width(220.0);
-                    edit(ui, "ПРОПИСНЫЕ", &key("upper"), true, "upper");
-                    edit(ui, "строчные", &key("lower"), true, "lower");
+                    edit(ui, "ПРОПИСНЫЕ", &key("upper"), filled, "upper");
+                    edit(ui, "строчные", &key("lower"), filled, "lower");
                 });
                 ui.menu_button("Закладки", |ui| {
                     ui.set_min_width(240.0);
@@ -182,14 +185,14 @@ impl TrorApp {
                         ui,
                         "Следующая",
                         &key("bookmark_next"),
-                        true,
+                        marked,
                         "bookmark_next",
                     );
                     edit(
                         ui,
                         "Предыдущая",
                         &key("bookmark_prev"),
-                        true,
+                        marked,
                         "bookmark_prev",
                     );
                     edit(
@@ -209,10 +212,11 @@ impl TrorApp {
                 if item(ui, "Заменить…", &key("replace"), has_doc) {
                     actions.push(Action::Replace);
                 }
-                if item(ui, "Найти далее", "F3", has_doc) {
+                let queried = has_doc && !self.search.query.is_empty();
+                if item(ui, "Найти далее", "F3", queried) {
                     actions.push(Action::FindNext);
                 }
-                if item(ui, "Найти ранее", "Shift+F3", has_doc) {
+                if item(ui, "Найти ранее", "Shift+F3", queried) {
                     actions.push(Action::FindPrev);
                 }
                 ui.separator();
@@ -220,13 +224,21 @@ impl TrorApp {
                     actions.push(Action::GotoLine);
                 }
                 ui.separator();
-                for (kind, label, id) in [
-                    (0, "Свернуть блок", "fold"),
-                    (1, "Развернуть блок", "unfold"),
-                    (2, "Свернуть всё", "fold_all"),
-                    (3, "Развернуть всё", "unfold_all"),
+                let doc = self.docs.get(self.active);
+                let line = doc.map_or(0, |d| d.rope.char_to_line(d.sel.1.min(d.len())));
+                let foldable =
+                    doc.is_some_and(|d| d.block_around(line).is_some_and(|(h, _)| !d.is_folded(h)));
+                let unfoldable =
+                    doc.is_some_and(|d| d.folds.iter().any(|f| f.0 <= line && f.1 >= line));
+                let any_folds = doc.is_some_and(|d| !d.folds.is_empty());
+                let blocks = doc.is_some_and(|d| d.has_blocks());
+                for (kind, label, id, enabled) in [
+                    (0, "Свернуть блок", "fold", foldable),
+                    (1, "Развернуть блок", "unfold", unfoldable),
+                    (2, "Свернуть всё", "fold_all", blocks),
+                    (3, "Развернуть всё", "unfold_all", any_folds),
                 ] {
-                    if item(ui, label, &key(id), has_doc) {
+                    if item(ui, label, &key(id), enabled) {
                         actions.push(Action::Fold(kind));
                     }
                 }
@@ -295,7 +307,12 @@ impl TrorApp {
                         "Скрыть папку проекта",
                         "project",
                     ),
-                    (Pane::Project2, "Вторая папка проекта", "Скрыть вторую папку", ""),
+                    (
+                        Pane::Project2,
+                        "Вторая папка проекта",
+                        "Скрыть вторую папку",
+                        "",
+                    ),
                     (
                         Pane::Hosts,
                         "Удалённые хосты (SFTP/FTP)",
@@ -316,7 +333,6 @@ impl TrorApp {
                         "Скрыть сравнение файлов",
                         "",
                     ),
-                    (Pane::Settings, "Настройки", "Скрыть настройки", ""),
                 ];
                 for (pane, show, hide, shortcut) in panes {
                     let label =
@@ -334,7 +350,7 @@ impl TrorApp {
                     actions.push(Action::ResetLayout);
                 }
                 ui.separator();
-                ui.weak("Масштаб: Ctrl + / Ctrl − / Ctrl 0");
+                ui.weak("Шрифт редактора: Ctrl + / Ctrl − / Ctrl 0, Ctrl + колесо");
             });
             ui.menu_button("Инструменты", |ui| {
                 ui.set_min_width(260.0);
@@ -396,6 +412,9 @@ impl TrorApp {
                     actions.push(Action::FindFiles);
                 }
             });
+            if ui.button("Настройки").clicked() {
+                actions.push(Action::Show(Pane::Settings));
+            }
             ui.menu_button("Плагины", |ui| {
                 ui.set_min_width(260.0);
                 for (index, plugin) in self.plugins.list.iter().enumerate() {

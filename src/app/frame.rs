@@ -17,6 +17,23 @@ impl eframe::App for TrorApp {
         let mut actions = Vec::new();
 
         if ctx.input(|i| i.viewport().close_requested())
+            && self.settings.keep_session
+            && !self.allow_close
+            && self
+                .docs
+                .iter()
+                .all(|d| !d.dirty() || crate::recover::fits(d))
+            && let Some(dir) = crate::recover::dir()
+        {
+            let kept = self.recovery.snapshot(&dir, &self.docs);
+            if let Err(e) = kept {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                self.settings.keep_session = false;
+                let now = ctx.input(|i| i.time);
+                self.notify(format!("Не удалось сохранить правки сеанса: {e}"), now);
+            }
+            self.recovery.last = f64::INFINITY;
+        } else if ctx.input(|i| i.viewport().close_requested())
             && !self.allow_close
             && self.docs.iter().any(|d| d.dirty())
         {
@@ -65,9 +82,37 @@ impl eframe::App for TrorApp {
                 }
             }
         }
-        let zoom = ctx.input(|i| i.zoom_delta());
-        if zoom != 1.0 {
-            ctx.set_zoom_factor((ctx.zoom_factor() * zoom).clamp(0.5, 3.0));
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        let (zoom, reset) = ctx.input_mut(|i| {
+            let reset = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0);
+            let mut step = 0.0;
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Plus)
+                || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Equals)
+            {
+                step += 1.0;
+            }
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Minus) {
+                step -= 1.0;
+            }
+            let wheel = i.zoom_delta();
+            if wheel > 1.0 {
+                step += 1.0;
+            } else if wheel < 1.0 {
+                step -= 1.0;
+            }
+            (step, reset)
+        });
+        if reset {
+            self.settings.look.font_size = crate::prefs::Look::default().font_size;
+            let now = ctx.input(|i| i.time);
+            self.notify("Размер шрифта редактора по умолчанию".to_owned(), now);
+        }
+        if zoom != 0.0 {
+            let size = &mut self.settings.look.font_size;
+            *size = (*size + zoom).clamp(7.0, 48.0);
+            let text = format!("Размер шрифта редактора: {}", *size as i32);
+            let now = ctx.input(|i| i.time);
+            self.notify(text, now);
         }
         self.check_missing(&ctx);
         let modal_open = self.goto.is_some()
@@ -452,7 +497,13 @@ impl eframe::App for TrorApp {
 }
 
 impl TrorApp {
-    fn project_event(&mut self, event: ProjectEvent, second: bool, now: f64, actions: &mut Vec<Action>) {
+    fn project_event(
+        &mut self,
+        event: ProjectEvent,
+        second: bool,
+        now: f64,
+        actions: &mut Vec<Action>,
+    ) {
         match event {
             ProjectEvent::Open(paths) => {
                 for path in paths {
@@ -476,19 +527,35 @@ impl TrorApp {
                 }
             }
             ProjectEvent::View(tree) => self.settings.project_tree = tree,
-            ProjectEvent::Transfer(paths, keep) => self.move_between_projects(paths, second, keep, now),
+            ProjectEvent::Transfer(paths, keep) => {
+                self.move_between_projects(paths, second, keep, now)
+            }
             ProjectEvent::Dropped(paths, pos) => {
-                let other = if second { &self.project } else { &self.project2 };
+                let other = if second {
+                    &self.project
+                } else {
+                    &self.project2
+                };
                 if other.root.is_some() && other.area.contains(pos) {
                     self.move_between_projects(paths, second, true, now);
-                } else if let Some(panel) = self.remotes.iter_mut().find(|r| r.connected() && r.area().contains(pos)) {
+                } else if let Some(panel) = self
+                    .remotes
+                    .iter_mut()
+                    .find(|r| r.connected() && r.area().contains(pos))
+                {
                     panel.upload_local(paths);
                 }
             }
         }
     }
 
-    fn move_between_projects(&mut self, paths: Vec<PathBuf>, from_second: bool, keep: bool, now: f64) {
+    fn move_between_projects(
+        &mut self,
+        paths: Vec<PathBuf>,
+        from_second: bool,
+        keep: bool,
+        now: f64,
+    ) {
         let target = if from_second {
             self.project.target_dir()
         } else {
@@ -499,7 +566,15 @@ impl TrorApp {
         };
         match crate::files::transfer(&paths, &dir, keep) {
             Ok(n) => self.notify(
-                format!("{} {n} в {}", if keep { "Скопировано:" } else { "Перемещено:" }, dir.display()),
+                format!(
+                    "{} {n} в {}",
+                    if keep {
+                        "Скопировано:"
+                    } else {
+                        "Перемещено:"
+                    },
+                    dir.display()
+                ),
                 now,
             ),
             Err(e) => self.notify(format!("Не удалось: {e}"), now),

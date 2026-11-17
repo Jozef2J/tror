@@ -364,17 +364,28 @@ mod tests {
 
     #[test]
     fn sort_keeps_folders_first_and_cycles() {
-        let mut items = vec![("b", false, 5u64), ("A", true, 1), ("c", false, 1), ("z", true, 9)];
+        let mut items = vec![
+            ("b", false, 5u64),
+            ("A", true, 1),
+            ("c", false, 1),
+            ("z", true, 9),
+        ];
         fn fields<'a>(i: &'a (&'static str, bool, u64)) -> (bool, &'a str, u64, u32, u64) {
             (i.1, i.0, i.2, 0, i.2)
         }
         let mut sort = Sort::default();
         sort.click(SortKey::Size);
         sort.apply(&mut items, fields);
-        assert_eq!(items.iter().map(|i| i.0).collect::<Vec<_>>(), ["A", "z", "c", "b"]);
+        assert_eq!(
+            items.iter().map(|i| i.0).collect::<Vec<_>>(),
+            ["A", "z", "c", "b"]
+        );
         sort.click(SortKey::Size);
         sort.apply(&mut items, fields);
-        assert_eq!(items.iter().map(|i| i.0).collect::<Vec<_>>(), ["z", "A", "b", "c"]);
+        assert_eq!(
+            items.iter().map(|i| i.0).collect::<Vec<_>>(),
+            ["z", "A", "b", "c"]
+        );
         sort.click(SortKey::Size);
         assert_eq!(sort, Sort::default());
     }
@@ -672,10 +683,14 @@ fn sort_arrow(painter: &egui::Painter, at: Pos2, desc: bool, color: Color32) {
 
 pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3], sort: &mut Sort) -> [f32; 3] {
     let mut stored = columns();
-    let (rect, header) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::hover());
+    let (rect, header) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::hover());
     header.context_menu(|ui| {
         if ui
-            .add_enabled(sort.key != SortKey::None, egui::Button::new("Сбросить сортировку"))
+            .add_enabled(
+                sort.key != SortKey::None,
+                egui::Button::new("Сбросить сортировку"),
+            )
             .clicked()
         {
             *sort = Sort::default();
@@ -698,15 +713,26 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3], sort: &mut So
             continue;
         }
         let left = right - width;
-        let cell = Rect::from_min_max(egui::pos2(left, rect.top()), egui::pos2(right, rect.bottom()));
+        let cell = Rect::from_min_max(
+            egui::pos2(left, rect.top()),
+            egui::pos2(right, rect.bottom()),
+        );
         let click = ui
-            .interact(cell, ui.scope_id().with(("tror_sort", index)), Sense::click())
+            .interact(
+                cell,
+                ui.scope_id().with(("tror_sort", index)),
+                Sense::click(),
+            )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         if click.clicked() {
             sort.click(key);
         }
         let active = sort.key == key;
-        let color = if active || click.hovered() { pal.text } else { pal.faint };
+        let color = if active || click.hovered() {
+            pal.text
+        } else {
+            pal.faint
+        };
         let galley = painter.layout_no_wrap(label.to_owned(), font.clone(), color);
         let text_left = right - galley.size().x;
         painter.with_clip_rect(cell).galley(
@@ -715,7 +741,12 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3], sort: &mut So
             color,
         );
         if active {
-            sort_arrow(&painter, egui::pos2(text_left - 7.0, rect.center().y), sort.desc, pal.accent);
+            sort_arrow(
+                &painter,
+                egui::pos2(text_left - 7.0, rect.center().y),
+                sort.desc,
+                pal.accent,
+            );
         }
         let grip = Rect::from_min_max(
             egui::pos2(left - COLUMN_GAP, rect.top()),
@@ -759,13 +790,21 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3], sort: &mut So
     }
     let name_cell = Rect::from_min_max(rect.min, egui::pos2(name_right, rect.bottom()));
     let click = ui
-        .interact(name_cell, ui.scope_id().with("tror_sort_name"), Sense::click())
+        .interact(
+            name_cell,
+            ui.scope_id().with("tror_sort_name"),
+            Sense::click(),
+        )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     if click.clicked() {
         sort.click(SortKey::Name);
     }
     let active = sort.key == SortKey::Name;
-    let color = if active || click.hovered() { pal.text } else { pal.faint };
+    let color = if active || click.hovered() {
+        pal.text
+    } else {
+        pal.faint
+    };
     let galley = painter.layout_no_wrap("Имя".to_owned(), font, color);
     let width = galley.size().x;
     painter.galley(
@@ -774,11 +813,19 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3], sort: &mut So
         color,
     );
     if active {
-        sort_arrow(&painter, egui::pos2(rect.left() + 13.0 + width, rect.center().y), sort.desc, pal.accent);
+        sort_arrow(
+            &painter,
+            egui::pos2(rect.left() + 13.0 + width, rect.center().y),
+            sort.desc,
+            pal.accent,
+        );
     }
     click.context_menu(|ui| {
         if ui
-            .add_enabled(sort.key != SortKey::None, egui::Button::new("Сбросить сортировку"))
+            .add_enabled(
+                sort.key != SortKey::None,
+                egui::Button::new("Сбросить сортировку"),
+            )
             .clicked()
         {
             *sort = Sort::default();
@@ -839,7 +886,10 @@ pub fn profile_list(
             .hint_text("Поиск…")
             .desired_width(f32::INFINITY),
     );
-    if ui.data(|d| d.get_temp::<bool>(id.with("focused"))).is_none() {
+    if ui
+        .data(|d| d.get_temp::<bool>(id.with("focused")))
+        .is_none()
+    {
         field.request_focus();
         ui.data_mut(|d| {
             d.insert_temp(id.with("focused"), true);
@@ -854,10 +904,11 @@ pub fn profile_list(
                 || names[*i].1.to_lowercase().contains(&needle)
         })
         .collect();
-    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-        if let Some(first) = shown.first() {
-            action = Some(ProfileAction::Select(*first));
-        }
+    if field.lost_focus()
+        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+        && let Some(first) = shown.first()
+    {
+        action = Some(ProfileAction::Select(*first));
     }
     ui.data_mut(|d| d.insert_temp(filter_id, filter));
     ui.add_space(2.0);
@@ -883,7 +934,9 @@ pub fn profile_list(
                     action = Some(ProfileAction::Select(index));
                 }
                 if response.secondary_clicked() {
-                    let pos = ui.input(|i| i.pointer.interact_pos()).unwrap_or(response.rect.center());
+                    let pos = ui
+                        .input(|i| i.pointer.interact_pos())
+                        .unwrap_or(response.rect.center());
                     ui.data_mut(|d| d.insert_temp(id.with("menu"), (index, pos)));
                 }
             }
@@ -896,15 +949,8 @@ pub fn profile_list(
             .show(ui.ctx(), |ui| {
                 egui::Frame::menu(ui.style()).show(ui, |ui| {
                     ui.set_min_width(170.0);
-                    if ui.button("Редактировать…").clicked() {
-                        action = Some(ProfileAction::Edit(index));
-                    }
-                    if ui.button("Переименовать…").clicked() {
-                        let ask = ProfileAsk::Rename(index, name.clone());
-                        ui.data_mut(|d| d.insert_temp(id.with("ask"), ask));
-                    }
-                    if ui.button("Удалить…").clicked() {
-                        ui.data_mut(|d| d.insert_temp(id.with("ask"), ProfileAsk::Delete(index)));
+                    if let Some(a) = profile_menu(ui, id, index, &name) {
+                        action = Some(a);
                     }
                 });
             });
@@ -920,12 +966,34 @@ pub fn profile_list(
     if ui.button(add).clicked() {
         action = Some(ProfileAction::Add);
     }
-    if action.is_some() || ui.data(|d| d.get_temp::<ProfileAsk>(id.with("ask"))).is_some() {
+    if action.is_some()
+        || ui
+            .data(|d| d.get_temp::<ProfileAsk>(id.with("ask")))
+            .is_some()
+    {
         ui.data_mut(|d| {
             d.remove::<String>(filter_id);
             d.remove::<bool>(id.with("focused"));
             d.remove::<(usize, egui::Pos2)>(id.with("menu"));
         });
+        ui.close();
+    }
+    action
+}
+
+pub fn profile_menu(ui: &mut Ui, id: egui::Id, index: usize, name: &str) -> Option<ProfileAction> {
+    let mut action = None;
+    if ui.button("Редактировать…").clicked() {
+        action = Some(ProfileAction::Edit(index));
+        ui.close();
+    }
+    if ui.button("Переименовать…").clicked() {
+        let ask = ProfileAsk::Rename(index, name.to_owned());
+        ui.data_mut(|d| d.insert_temp(id.with("ask"), ask));
+        ui.close();
+    }
+    if ui.button("Удалить…").clicked() {
+        ui.data_mut(|d| d.insert_temp(id.with("ask"), ProfileAsk::Delete(index)));
         ui.close();
     }
     action
@@ -946,7 +1014,11 @@ pub fn profile_dialogs(
             ui.set_width(340.0);
             match &mut ask {
                 ProfileAsk::Rename(index, name) => {
-                    ui.label(RichText::new("Переименовать профиль").size(15.5).color(pal.text));
+                    ui.label(
+                        RichText::new("Переименовать профиль")
+                            .size(15.5)
+                            .color(pal.text),
+                    );
                     ui.add_space(8.0);
                     let field = ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY));
                     field.request_focus();
@@ -966,11 +1038,17 @@ pub fn profile_dialogs(
                     let title = names.get(*index).map(|n| n.0.clone()).unwrap_or_default();
                     ui.label(RichText::new("Удалить профиль?").size(15.5).color(pal.text));
                     ui.add_space(6.0);
-                    ui.label(RichText::new(format!("«{title}» будет удалён вместе с паролем.")).color(pal.subtext));
+                    ui.label(
+                        RichText::new(format!("«{title}» будет удалён вместе с паролем."))
+                            .color(pal.subtext),
+                    );
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui
-                            .add(egui::Button::new(RichText::new("Удалить").color(pal.base)).fill(pal.warn))
+                            .add(
+                                egui::Button::new(RichText::new("Удалить").color(pal.base))
+                                    .fill(pal.warn),
+                            )
                             .clicked()
                         {
                             action = Some(ProfileAction::Delete(*index));

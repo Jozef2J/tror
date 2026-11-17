@@ -145,7 +145,10 @@ impl TrorApp {
             ui.spacing_mut().item_spacing.x = 2.0;
             for (files, label) in [(false, "В документе"), (true, "В файлах")] {
                 let active = self.search.files == files;
-                let text = RichText::new(label).small().color(if active { pal.text } else { pal.subtext });
+                let text =
+                    RichText::new(label)
+                        .small()
+                        .color(if active { pal.text } else { pal.subtext });
                 let mut button = Button::new(text);
                 if active {
                     button = button.fill(pal.surface);
