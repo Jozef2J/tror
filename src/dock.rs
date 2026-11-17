@@ -20,6 +20,7 @@ pub enum Pane {
     Project,
     HostsN(u8),
     Plugin(u64),
+    Project2,
 }
 
 static PLUGIN_PANES: std::sync::Mutex<Vec<(u64, String, String)>> = std::sync::Mutex::new(Vec::new());
@@ -73,7 +74,7 @@ impl Pane {
     pub fn min_size(self) -> (f32, f32) {
         match self {
             Pane::Welcome | Pane::Doc(_) => (120.0, 60.0),
-            Pane::Hosts | Pane::Hosts2 | Pane::HostsN(_) | Pane::Project => (170.0, 120.0),
+            Pane::Hosts | Pane::Hosts2 | Pane::HostsN(_) | Pane::Project | Pane::Project2 => (170.0, 120.0),
             Pane::Log => (200.0, 80.0),
             Pane::Console => (240.0, 100.0),
             Pane::ServerSearch => (240.0, 100.0),
@@ -100,6 +101,7 @@ impl Pane {
             Pane::Hosts => "Удалённые хосты",
             Pane::Hosts2 | Pane::HostsN(_) | Pane::Plugin(_) => "",
             Pane::Project => "Проект",
+            Pane::Project2 => "Проект 2",
             Pane::Console => "Консоль",
             Pane::Log => "Журнал",
             Pane::ServerSearch => "Поиск на сервере",
@@ -112,7 +114,7 @@ impl Pane {
 
     fn zone(self) -> Zone {
         match self {
-            Pane::Hosts | Pane::Hosts2 | Pane::HostsN(_) | Pane::Project => Zone::Left,
+            Pane::Hosts | Pane::Hosts2 | Pane::HostsN(_) | Pane::Project | Pane::Project2 => Zone::Left,
             Pane::Console | Pane::Log | Pane::ServerSearch => Zone::Bottom,
             Pane::Plugin(key) => match plugin_pane(key).map(|p| p.1).as_deref() {
                 Some("bottom") => Zone::Bottom,
@@ -171,21 +173,228 @@ fn zone_leaf(dock: &DockState<Pane>, zone: Zone) -> Option<NodePath> {
 
 pub type Floats = Vec<(Pane, [f32; 4])>;
 
-pub fn remember(dock: &DockState<Pane>, floats: &mut Floats) {
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Home {
+    pub anchor: Pane,
+    pub how: u8,
+    pub depth: u8,
+    pub share: f32,
+}
+
+static HOMES: std::sync::Mutex<Vec<(Pane, Home)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn homes() -> Vec<(Pane, Home)> {
+    HOMES.lock().map(|h| h.clone()).unwrap_or_default()
+}
+
+pub fn set_homes(homes: Vec<(Pane, Home)>) {
+    if let Ok(mut list) = HOMES.lock() {
+        *list = homes;
+    }
+}
+
+fn first_tab(tree: &egui_stack::Tree<Pane>, node: NodeIndex) -> Option<Pane> {
+    match &tree[node] {
+        egui_stack::Node::Leaf(leaf) => leaf.tabs().first().copied(),
+        other => other.children().iter().find_map(|c| first_tab(tree, *c)),
+    }
+}
+
+fn side(tree: &egui_stack::Tree<Pane>, node: NodeIndex) -> bool {
+    match &tree[node] {
+        egui_stack::Node::Leaf(leaf) => {
+            !leaf.tabs().is_empty() && leaf.tabs().iter().all(|t| t.zone() != Zone::Center)
+        }
+        egui_stack::Node::Empty => false,
+        other => other.children().iter().all(|c| side(tree, *c)),
+    }
+}
+
+fn steady(tab: &Pane) -> bool {
+    !matches!(tab, Pane::Doc(_) | Pane::Welcome)
+}
+
+pub fn remember_homes(dock: &DockState<Pane>) {
+    let tree = dock.main_surface();
+    let mut found = Vec::new();
     for (path, tab) in dock.iter_all_tabs() {
-        if matches!(tab, Pane::Doc(_) | Pane::Welcome) {
+        if path.surface != SurfaceIndex::main() || !steady(tab) {
             continue;
         }
-        floats.retain(|(pane, _)| pane != tab);
-        if path.surface == SurfaceIndex::main() {
+        let Some(leaf) = tree[path.node].get_leaf() else {
+            continue;
+        };
+        if leaf.tabs().len() > 1 {
+            let others = leaf.tabs().iter().filter(|t| *t != tab);
+            let anchor = others.clone().find(|t| steady(t)).or_else(|| others.clone().next());
+            if let Some(anchor) = anchor {
+                found.push((*tab, Home { anchor: *anchor, how: 0, depth: 0, share: 0.5 }));
+            }
             continue;
         }
-        if let Some(rect) = dock.get_window_state(path.surface).map(|w| w.rect())
-            && rect.is_finite()
-            && rect.width() > 40.0
-            && rect.height() > 40.0
-        {
-            floats.push((*tab, [rect.min.x, rect.min.y, rect.width(), rect.height()]));
+        let Some(parent) = tree.parent(path.node) else {
+            continue;
+        };
+        let Some(linear) = tree[parent].get_linear() else {
+            continue;
+        };
+        let Some(index) = linear.position(path.node) else {
+            continue;
+        };
+        let (other, before) = if index + 1 < linear.len() {
+            (index + 1, true)
+        } else if index > 0 {
+            (index - 1, false)
+        } else {
+            continue;
+        };
+        let neighbour = linear.children()[other];
+        let Some(anchor) = first_tab(tree, neighbour) else {
+            continue;
+        };
+        let Some(anchor_path) = dock.find_tab(&anchor) else {
+            continue;
+        };
+        let mut depth = 0u8;
+        let mut node = anchor_path.node;
+        while node != neighbour {
+            match tree.parent(node) {
+                Some(up) => {
+                    node = up;
+                    depth += 1;
+                }
+                None => break,
+            }
+        }
+        let horizontal = matches!(linear.dir, egui_stack::LinearDir::Horizontal);
+        let how = match (horizontal, before) {
+            (true, true) => 1,
+            (true, false) => 2,
+            (false, true) => 3,
+            (false, false) => 4,
+        };
+        let shares = linear.shares();
+        let share = shares[index] / (shares[index] + shares[other]).max(f32::EPSILON);
+        found.push((*tab, Home { anchor, how, depth, share }));
+    }
+    if found.is_empty() {
+        return;
+    }
+    if let Ok(mut list) = HOMES.lock() {
+        for (pane, home) in found {
+            list.retain(|(p, _)| *p != pane);
+            list.push((pane, home));
+        }
+    }
+}
+
+fn go_home(dock: &mut DockState<Pane>, pane: Pane) -> bool {
+    let Some(home) = homes().into_iter().find(|(p, _)| *p == pane).map(|(_, h)| h) else {
+        return false;
+    };
+    let Some(path) = dock.find_tab(&home.anchor) else {
+        return false;
+    };
+    if path.surface != SurfaceIndex::main() {
+        return false;
+    }
+    let tree = dock.main_surface_mut();
+    if home.how == 0 {
+        if let Some(leaf) = tree[path.node].get_leaf_mut() {
+            leaf.append_tab(pane);
+            return true;
+        }
+        return false;
+    }
+    let mut node = path.node;
+    for _ in 0..home.depth {
+        match tree.parent(node) {
+            Some(up) => node = up,
+            None => break,
+        }
+    }
+    let keep = (1.0 - home.share).clamp(0.05, 0.95);
+    match home.how {
+        1 => tree.split_left(node, keep, vec![pane]),
+        2 => tree.split_right(node, keep, vec![pane]),
+        3 => tree.split_above(node, keep, vec![pane]),
+        _ => tree.split_below(node, keep, vec![pane]),
+    };
+    true
+}
+
+#[derive(Default)]
+pub struct Sizes {
+    known: Vec<(Pane, f32)>,
+    area: egui::Vec2,
+}
+
+pub fn keep_sizes(dock: &mut DockState<Pane>, sizes: &mut Sizes, area: egui::Vec2, dragging: bool) {
+    let resized = (area - sizes.area).length() > 0.5;
+    sizes.area = area;
+    let tree = dock.main_surface_mut();
+    let linears: Vec<NodeIndex> = (0..tree.len())
+        .map(NodeIndex)
+        .filter(|i| tree[*i].get_linear().is_some())
+        .collect();
+    for index in linears {
+        let Some(linear) = tree[index].get_linear() else {
+            continue;
+        };
+        let horizontal = matches!(linear.dir, egui_stack::LinearDir::Horizontal);
+        let rect = linear.rect();
+        let span = if horizontal { rect.width() } else { rect.height() };
+        if !span.is_finite() || span < 50.0 {
+            continue;
+        }
+        let children = linear.children().to_vec();
+        let shares = linear.shares().to_vec();
+        let total: f32 = shares.iter().sum();
+        let sides: Vec<(usize, Pane)> = children
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| side(tree, **c))
+            .filter_map(|(i, c)| Some((i, first_tab(tree, *c)?)))
+            .collect();
+        if sides.is_empty() || sides.len() == children.len() {
+            continue;
+        }
+        if !resized {
+            for (i, pane) in &sides {
+                let known = sizes.known.iter().any(|(p, _)| p == pane);
+                if dragging || !known {
+                    sizes.known.retain(|(p, _)| p != pane);
+                    sizes.known.push((*pane, shares[*i] / total * span));
+                }
+            }
+            continue;
+        }
+        let mut updated = shares.clone();
+        let mut fixed = 0.0;
+        for (i, pane) in &sides {
+            if let Some((_, px)) = sizes.known.iter().find(|(p, _)| p == pane) {
+                updated[*i] = px / span * total;
+            }
+            fixed += updated[*i];
+        }
+        if fixed > total * 0.8 {
+            let scale = total * 0.8 / fixed;
+            for (i, _) in &sides {
+                updated[*i] *= scale;
+            }
+            fixed = total * 0.8;
+        }
+        let flex: f32 = (0..children.len())
+            .filter(|i| !sides.iter().any(|(s, _)| s == i))
+            .map(|i| shares[i])
+            .sum();
+        for i in 0..children.len() {
+            if !sides.iter().any(|(s, _)| *s == i) {
+                updated[i] = if flex > 0.0 { shares[i] / flex * (total - fixed) } else { total - fixed };
+            }
+        }
+        if let Some(linear) = tree[index].get_linear_mut() {
+            linear.set_shares(updated);
         }
     }
 }
@@ -195,12 +404,8 @@ pub fn show(dock: &mut DockState<Pane>, pane: Pane, floats: &Floats) {
         let _ = dock.focus_tab(path);
         return;
     }
-    if let Some((_, [x, y, w, h])) = floats.iter().find(|(p, _)| *p == pane) {
-        let surface = dock.add_window(vec![pane]);
-        if let Some(window) = dock.get_window_state_mut(surface) {
-            window.set_position(egui::pos2(*x, *y));
-            window.set_size(egui::vec2(*w, *h));
-        }
+    let _ = floats;
+    if steady(&pane) && go_home(dock, pane) {
         if let Some(path) = dock.find_tab(&pane) {
             let _ = dock.focus_tab(path);
         }

@@ -2,6 +2,7 @@ use super::*;
 
 const TITLE: &str = "Поиск — TrorPad";
 const WIDTH: f32 = 450.0;
+const WIDE: f32 = 640.0;
 const FADED: u8 = 115;
 
 #[derive(Default)]
@@ -14,6 +15,9 @@ pub(super) struct FindWindow {
     faded: Option<bool>,
     focused: bool,
     on_top: Option<bool>,
+    pub scope: usize,
+    width: f32,
+    tries: u8,
 }
 
 impl TrorApp {
@@ -40,11 +44,12 @@ impl TrorApp {
             };
             ctx.send_viewport_cmd_to(id, ViewportCommand::WindowLevel(level));
         }
+        let width = if self.search.files { WIDE } else { WIDTH };
         let root = ctx.input(|i| i.viewport().inner_rect);
         if !self.find.moved
             && let (Some(anchor), Some(root)) = (self.find.anchor, root)
         {
-            let pos = root.min + anchor.to_vec2() - egui::vec2(WIDTH, 0.0);
+            let pos = root.min + anchor.to_vec2() - egui::vec2(width, 0.0);
             if self.find.placed.is_none_or(|p| (p - pos).length() > 1.0) {
                 if self.find.placed.is_some() {
                     ctx.send_viewport_cmd_to(id, ViewportCommand::OuterPosition(pos));
@@ -62,7 +67,7 @@ impl TrorApp {
             .with_decorations(false)
             .with_resizable(false)
             .with_taskbar(false)
-            .with_inner_size([WIDTH, height])
+            .with_inner_size([width, height])
             .with_window_level(egui::WindowLevel::AlwaysOnTop);
         if let Some(pos) = self.find.placed {
             builder = builder.with_position(pos);
@@ -72,7 +77,16 @@ impl TrorApp {
             let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
             self.find.focused = focused;
             if std::mem::take(&mut self.find.focus) {
-                ctx.send_viewport_cmd(ViewportCommand::Focus);
+                self.find.tries = 30;
+            }
+            if self.find.tries > 0 {
+                if focused {
+                    self.find.tries = 0;
+                } else {
+                    self.find.tries -= 1;
+                    ctx.send_viewport_cmd(ViewportCommand::Focus);
+                    ctx.request_repaint_after(std::time::Duration::from_millis(30));
+                }
             }
             if self.find.faded != Some(!focused) && set_alpha(if focused { 255 } else { FADED }) {
                 self.find.faded = Some(!focused);
@@ -102,11 +116,17 @@ impl TrorApp {
                         self.find.moved = false;
                         self.find.placed = Some(egui::pos2(f32::MAX, f32::MAX));
                     }
-                    self.search_bar(ui, &pal, actions);
+                    self.find_tabs(ui, &pal);
+                    if self.search.files {
+                        self.files_search(ui, &pal);
+                    } else {
+                        self.search_bar(ui, &pal, actions);
+                    }
                     let used = ui.min_rect().height() + 16.0;
-                    if (used - self.find.height).abs() > 1.0 {
+                    if (used - self.find.height).abs() > 1.0 || self.find.width != width {
                         self.find.height = used;
-                        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(WIDTH, used)));
+                        self.find.width = width;
+                        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(width, used)));
                     }
                 });
             if ctx.input(|i| i.viewport().close_requested()) {
@@ -116,6 +136,85 @@ impl TrorApp {
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
         });
+    }
+}
+
+impl TrorApp {
+    fn find_tabs(&mut self, ui: &mut Ui, pal: &Palette) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (files, label) in [(false, "В документе"), (true, "В файлах")] {
+                let active = self.search.files == files;
+                let text = RichText::new(label).small().color(if active { pal.text } else { pal.subtext });
+                let mut button = Button::new(text);
+                if active {
+                    button = button.fill(pal.surface);
+                } else {
+                    button = button.frame(false);
+                }
+                if ui.add(button).clicked() && !active {
+                    self.search.files = files;
+                    self.find.focus = true;
+                    if files {
+                        self.find_files.show();
+                    } else {
+                        self.search.focus_query = true;
+                    }
+                }
+            }
+        });
+        ui.add_space(4.0);
+    }
+
+    fn files_search(&mut self, ui: &mut Ui, pal: &Palette) {
+        let mut scopes: Vec<(usize, String)> = vec![(0, "Проект".to_owned())];
+        if self.project2.root.is_some() {
+            scopes.push((1, "Проект 2".to_owned()));
+        }
+        for (index, remote) in self.remotes.iter().enumerate() {
+            if let Some((profile, _)) = remote.selected_profile()
+                && remote.connected()
+            {
+                scopes.push((2 + index, format!("Сервер: {}", profile.name)));
+            }
+        }
+        if !scopes.iter().any(|s| s.0 == self.find.scope) {
+            self.find.scope = 0;
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Где искать").color(pal.subtext));
+            let current = scopes
+                .iter()
+                .find(|s| s.0 == self.find.scope)
+                .map(|s| s.1.clone())
+                .unwrap_or_default();
+            egui::ComboBox::from_id_salt("tror_find_scope")
+                .selected_text(current)
+                .width(260.0)
+                .show_ui(ui, |ui| {
+                    for (id, label) in &scopes {
+                        ui.selectable_value(&mut self.find.scope, *id, label);
+                    }
+                });
+        });
+        ui.add_space(4.0);
+        match self.find.scope {
+            0 | 1 => {
+                let root = if self.find.scope == 0 {
+                    self.project.root.clone()
+                } else {
+                    self.project2.root.clone()
+                };
+                if let Some(out) = self.find_files.body(ui, pal, root.as_deref()) {
+                    self.find_out = Some(out);
+                }
+            }
+            n => {
+                if let Some(remote) = self.remotes.get_mut(n - 2) {
+                    remote.search_ui(ui, pal);
+                }
+            }
+        }
     }
 }
 

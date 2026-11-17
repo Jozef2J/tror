@@ -18,6 +18,7 @@ pub enum Pending {
     Prev,
     Replace,
     ReplaceAll,
+    DeleteAll,
 }
 
 #[derive(Clone, PartialEq)]
@@ -28,6 +29,7 @@ struct Key {
     case: bool,
     word: bool,
     regex: bool,
+    extended: bool,
 }
 
 struct Found {
@@ -49,12 +51,15 @@ pub struct SearchState {
     pub case: bool,
     pub word: bool,
     pub regex: bool,
+    pub extended: bool,
+    pub files: bool,
     pub focus_query: bool,
     pub pending: Option<Pending>,
     pub matches: Vec<(usize, usize)>,
     pub truncated: bool,
     pub error: Option<String>,
     pub last_replaced: Option<usize>,
+    pub deleted: bool,
     re: Option<Regex>,
     key: Option<Key>,
     job: Option<Job>,
@@ -80,7 +85,65 @@ fn find_all(rope: &Rope, re: &Regex, cancel: &AtomicBool) -> Option<Found> {
     Some(Found { matches, truncated })
 }
 
+pub fn unescape(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('0') => out.push('\0'),
+            Some('\\') => out.push('\\'),
+            Some(kind @ ('x' | 'u')) => {
+                let len = if kind == 'x' { 2 } else { 4 };
+                let digits: String = (0..len).filter_map(|_| chars.next_if(|c| c.is_ascii_hexdigit())).collect();
+                match u32::from_str_radix(&digits, 16).ok().and_then(char::from_u32) {
+                    Some(ch) if digits.len() == len => out.push(ch),
+                    _ => {
+                        out.push('\\');
+                        out.push(kind);
+                        out.push_str(&digits);
+                    }
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+pub fn escape(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\\' => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 impl SearchState {
+    fn replacement_text(&self) -> String {
+        if self.extended && !self.regex {
+            unescape(&self.replacement)
+        } else {
+            self.replacement.clone()
+        }
+    }
+
     pub fn searching(&self) -> bool {
         self.job.is_some()
     }
@@ -88,6 +151,8 @@ impl SearchState {
     fn build(&self) -> Result<Regex, String> {
         let mut pattern = if self.regex {
             self.query.clone()
+        } else if self.extended {
+            regex::escape(&unescape(&self.query))
         } else {
             regex::escape(&self.query)
         };
@@ -116,6 +181,7 @@ impl SearchState {
             case: self.case,
             word: self.word,
             regex: self.regex,
+            extended: self.extended,
         };
         if self.key.as_ref() == Some(&key) {
             return;
@@ -189,19 +255,51 @@ impl SearchState {
                             re.replace(&selected, self.replacement.as_str())
                                 .into_owned()
                         } else {
-                            self.replacement.clone()
+                            self.replacement_text()
                         };
                         doc.replace(range, &replaced, EditKind::Other);
                     }
                 }
                 self.apply_pending(doc, ctx);
             }
+            Pending::DeleteAll => {
+                self.pending = None;
+                if let Some(re) = &self.re {
+                    let text = String::from(&doc.rope);
+                    let mut out = String::with_capacity(text.len());
+                    let mut last = 0;
+                    let mut count = 0;
+                    for m in re.find_iter(&text) {
+                        if m.is_empty() || m.start() < last {
+                            continue;
+                        }
+                        let mut end = m.end();
+                        let line_start = m.start() == 0 || text.as_bytes()[m.start() - 1] == b'\n';
+                        if line_start && text[end..].starts_with("\r\n") {
+                            end += 2;
+                        } else if line_start && text[end..].starts_with('\n') {
+                            end += 1;
+                        }
+                        out.push_str(&text[last..m.start()]);
+                        last = end;
+                        count += 1;
+                    }
+                    out.push_str(&text[last..]);
+                    if count > 0 {
+                        doc.set_text(&out);
+                    }
+                    self.last_replaced = Some(count);
+                    self.deleted = true;
+                    self.update(doc, ctx);
+                }
+            }
             Pending::ReplaceAll => {
                 self.pending = None;
                 if let Some(re) = &self.re {
                     let text = String::from(&doc.rope);
                     let mut count = 0;
-                    let replacement = self.replacement.as_str();
+                    let replacement_text = self.replacement_text();
+                    let replacement = replacement_text.as_str();
                     let regex_mode = self.regex;
                     let replaced = re.replace_all(&text, |caps: &Captures<'_>| {
                         count += 1;
@@ -217,6 +315,7 @@ impl SearchState {
                         doc.set_text(&replaced);
                     }
                     self.last_replaced = Some(count);
+                    self.deleted = false;
                     self.update(doc, ctx);
                 }
             }
@@ -288,6 +387,29 @@ mod tests {
         assert_eq!(d.sel, (0, 4));
         step(&mut s, &mut d, Pending::Prev);
         assert_eq!(d.sel, (10, 14));
+    }
+
+    #[test]
+    fn extended_mode_and_delete_all() {
+        assert_eq!(unescape(r"a\tb\nc\x41\u0416\\\q"), "a\tb\ncAЖ\\\\q");
+        assert_eq!(escape("a\n\tb\\"), r"a\n\tb\\");
+        let mut d = Document::from_text("x\r\nfoo\r\ny foo\r\nfoo");
+        let mut s = SearchState {
+            query: r"foo\r\n".into(),
+            extended: true,
+            ..Default::default()
+        };
+        s.update(&d, None);
+        assert_eq!(s.matches.len(), 2);
+        s.query = "foo".into();
+        step(&mut s, &mut d, Pending::DeleteAll);
+        assert_eq!(d.rope.to_string(), "x\r\ny \r\n");
+        assert_eq!(s.last_replaced, Some(3));
+        let mut d = Document::from_text("a,b");
+        s.query = ",".into();
+        s.replacement = r"\n".into();
+        step(&mut s, &mut d, Pending::ReplaceAll);
+        assert_eq!(d.rope.to_string(), "a\nb");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use super::tabs::Viewer;
 use super::*;
+use crate::files::ProjectEvent;
 
 impl eframe::App for TrorApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -78,12 +79,13 @@ impl eframe::App for TrorApp {
             || self.console.modal_open()
             || self.project.modal_open()
             || self.db.modal_open();
-        if self
+        if let Some(index) = self
             .remotes
             .iter_mut()
-            .any(|r| std::mem::take(&mut r.want_search))
+            .position(|r| std::mem::take(&mut r.want_search))
         {
-            dock::show(&mut self.dock, Pane::ServerSearch, &self.settings.floats);
+            self.run(Action::FindFiles, &ctx);
+            self.find.scope = 2 + index;
         }
         self.log.extend(crate::trace::take());
         if self.log.len() > 5000 {
@@ -114,30 +116,21 @@ impl eframe::App for TrorApp {
         for note in self.console.poll() {
             self.notify(note, now);
         }
-        for event in self.project.take_events() {
-            match event {
-                ProjectEvent::Open(paths) => {
-                    for path in paths {
-                        actions.push(Action::OpenPath(path));
-                    }
-                }
-                ProjectEvent::Upload(paths) => {
-                    if let Some(panel) = self.remotes.iter_mut().find(|r| r.connected()) {
-                        panel.upload_local(paths);
-                    }
-                }
-                ProjectEvent::Toast(text) => self.notify(text, now),
-                ProjectEvent::Opened(path) => {
-                    self.settings.recent_projects.retain(|p| *p != path);
-                    self.settings.recent_projects.insert(0, path.clone());
-                    self.settings.recent_projects.truncate(MAX_RECENT);
-                    self.settings.project = Some(path);
-                }
-                ProjectEvent::View(tree) => self.settings.project_tree = tree,
+        for second in [false, true] {
+            let events = if second {
+                self.project2.take_events()
+            } else {
+                self.project.take_events()
+            };
+            for event in events {
+                self.project_event(event, second, now, &mut actions);
             }
         }
         if self.project.root.is_none() {
             self.settings.project = None;
+        }
+        if self.project2.root.is_none() {
+            self.settings.project2 = None;
         }
         self.project.show_size = self.settings.project_size;
         self.project.show_date = self.settings.project_date;
@@ -161,10 +154,9 @@ impl eframe::App for TrorApp {
             .filter(|d| d.dirty())
             .filter_map(|d| d.path.clone())
             .collect();
-        match self
-            .find_files
-            .ui(&ctx, &pal, self.project.root.as_deref(), &unsaved)
-        {
+        self.find_files.dirty = unsaved.clone();
+        let found = self.find_files.poll().or(self.find_out.take());
+        match found {
             Some(crate::findfiles::Out::Open(path, line)) => {
                 self.open_path(&path, now);
                 if let Some(doc) = self.docs.get_mut(self.active)
@@ -264,10 +256,41 @@ impl eframe::App for TrorApp {
             .map(|d| d.id)
             .collect();
         dock::pins_first(&mut dock, &pinned);
-        if !ctx.input(|i| i.pointer.any_down()) {
-            dock::enforce_min(&mut dock);
+        let pressed = ctx.input(|i| i.pointer.any_down());
+        if let Some(area) = dock.main_surface().root_node().and_then(|n| n.rect())
+            && area.is_finite()
+        {
+            dock::keep_sizes(&mut dock, &mut self.sizes, area.size(), pressed);
         }
-        dock::remember(&dock, &mut self.settings.floats);
+        if !pressed {
+            dock::enforce_min(&mut dock);
+            let origin = ctx
+                .input(|i| i.viewport().inner_rect)
+                .map_or(egui::Pos2::ZERO, |r| r.min);
+            let floating: Vec<(Pane, egui::Rect)> = dock
+                .iter_all_tabs()
+                .filter(|(path, _)| path.surface != egui_stack::SurfaceIndex::main())
+                .filter_map(|(path, tab)| {
+                    let rect = dock.get_window_state(path.surface)?.rect();
+                    Some((*tab, rect))
+                })
+                .collect();
+            for (pane, rect) in floating {
+                dock::hide(&mut dock, pane);
+                if !self.settings.detached.contains(&pane) {
+                    self.settings.detached.push(pane);
+                }
+                if rect.is_finite() && rect.width() > 40.0 {
+                    let min = origin + rect.min.to_vec2();
+                    self.settings.floats.retain(|(p, _)| *p != pane);
+                    self.settings
+                        .floats
+                        .push((pane, [min.x, min.y, rect.width(), rect.height()]));
+                }
+            }
+        }
+        dock::remember_homes(&dock);
+        self.settings.homes = dock::homes();
         self.dock = dock;
         for pane in self.settings.detached.clone() {
             let title = match pane {
@@ -281,14 +304,26 @@ impl eframe::App for TrorApp {
             };
             let mut closed = false;
             let (min_w, min_h) = pane.min_size();
+            let mut builder = egui::ViewportBuilder::default()
+                .with_title(title)
+                .with_inner_size([860.0, 580.0])
+                .with_min_inner_size([min_w + 16.0, min_h + 16.0]);
+            if let Some((_, [x, y, w, h])) = self.settings.floats.iter().find(|(p, _)| *p == pane) {
+                builder = builder
+                    .with_position([*x, *y])
+                    .with_inner_size([w.max(min_w + 16.0), h.max(min_h + 16.0)]);
+            }
+            let mut placed = None;
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of(("tror_window", pane)),
-                egui::ViewportBuilder::default()
-                    .with_title(title)
-                    .with_inner_size([860.0, 580.0])
-                    .with_min_inner_size([min_w + 16.0, min_h + 16.0]),
+                builder,
                 |ui, _class| {
                     closed = ui.input(|i| i.viewport().close_requested());
+                    placed = ui.input(|i| {
+                        let outer = i.viewport().outer_rect?;
+                        let inner = i.viewport().inner_rect?;
+                        Some([outer.min.x, outer.min.y, inner.width(), inner.height()])
+                    });
                     if !modal_open {
                         self.shortcuts(ui.ctx(), &mut actions);
                     }
@@ -307,6 +342,12 @@ impl eframe::App for TrorApp {
                     self.pane_dialogs(pane, ui.ctx(), &pal);
                 },
             );
+            if let Some(rect) = placed
+                && rect.iter().all(|v| v.is_finite())
+            {
+                self.settings.floats.retain(|(p, _)| *p != pane);
+                self.settings.floats.push((pane, rect));
+            }
             if closed {
                 actions.push(Action::Attach(pane));
             }
@@ -407,6 +448,64 @@ impl eframe::App for TrorApp {
             c.b() as f32 / 255.0,
             1.0,
         ]
+    }
+}
+
+impl TrorApp {
+    fn project_event(&mut self, event: ProjectEvent, second: bool, now: f64, actions: &mut Vec<Action>) {
+        match event {
+            ProjectEvent::Open(paths) => {
+                for path in paths {
+                    actions.push(Action::OpenPath(path));
+                }
+            }
+            ProjectEvent::Upload(paths) => {
+                if let Some(panel) = self.remotes.iter_mut().find(|r| r.connected()) {
+                    panel.upload_local(paths);
+                }
+            }
+            ProjectEvent::Toast(text) => self.notify(text, now),
+            ProjectEvent::Opened(path) => {
+                self.settings.recent_projects.retain(|p| *p != path);
+                self.settings.recent_projects.insert(0, path.clone());
+                self.settings.recent_projects.truncate(MAX_RECENT);
+                if second {
+                    self.settings.project2 = Some(path);
+                } else {
+                    self.settings.project = Some(path);
+                }
+            }
+            ProjectEvent::View(tree) => self.settings.project_tree = tree,
+            ProjectEvent::Transfer(paths, keep) => self.move_between_projects(paths, second, keep, now),
+            ProjectEvent::Dropped(paths, pos) => {
+                let other = if second { &self.project } else { &self.project2 };
+                if other.root.is_some() && other.area.contains(pos) {
+                    self.move_between_projects(paths, second, true, now);
+                } else if let Some(panel) = self.remotes.iter_mut().find(|r| r.connected() && r.area().contains(pos)) {
+                    panel.upload_local(paths);
+                }
+            }
+        }
+    }
+
+    fn move_between_projects(&mut self, paths: Vec<PathBuf>, from_second: bool, keep: bool, now: f64) {
+        let target = if from_second {
+            self.project.target_dir()
+        } else {
+            self.project2.target_dir()
+        };
+        let Some(dir) = target else {
+            return;
+        };
+        match crate::files::transfer(&paths, &dir, keep) {
+            Ok(n) => self.notify(
+                format!("{} {n} в {}", if keep { "Скопировано:" } else { "Перемещено:" }, dir.display()),
+                now,
+            ),
+            Err(e) => self.notify(format!("Не удалось: {e}"), now),
+        }
+        self.project.reload();
+        self.project2.reload();
     }
 }
 

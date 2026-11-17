@@ -190,7 +190,7 @@ impl TrorApp {
             }
             clicked
         };
-        let field_w = (ui.available_width() - 196.0).max(60.0);
+        let field_w = (ui.available_width() - 226.0).max(60.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             let query = ui.add(
@@ -214,6 +214,12 @@ impl TrorApp {
             changed |= toggle(ui, &mut s.case, "Aa", "Учитывать регистр");
             changed |= toggle(ui, &mut s.word, "ab", "Слово целиком");
             changed |= toggle(ui, &mut s.regex, ".*", "Регулярное выражение");
+            changed |= toggle(
+                ui,
+                &mut s.extended,
+                "\\n",
+                "Расширенный режим: \\n, \\r, \\t, \\0, \\xFF, \\uFFFF",
+            );
             if changed {
                 s.pending = Some(Pending::FromAnchor);
                 s.last_replaced = None;
@@ -262,7 +268,8 @@ impl TrorApp {
             let info = if let Some(error) = &s.error {
                 RichText::new(error).color(pal.warn)
             } else if let Some(n) = s.last_replaced {
-                RichText::new(format!("заменено: {n}")).color(pal.subtext)
+                let verb = if s.deleted { "удалено" } else { "заменено" };
+                RichText::new(format!("{verb}: {n}")).color(pal.subtext)
             } else if s.query.is_empty() {
                 RichText::new("введите текст").color(pal.faint)
             } else if s.searching() {
@@ -282,6 +289,17 @@ impl TrorApp {
                 .color(pal.subtext)
             };
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let ready = !s.query.is_empty() && !s.matches.is_empty();
+                if ui
+                    .add_enabled(
+                        ready,
+                        Button::new(RichText::new("Удалить все").small().color(pal.subtext)).frame(false),
+                    )
+                    .on_hover_text("Удалить все найденные совпадения (целые строки — вместе с переводом строки)")
+                    .clicked()
+                {
+                    s.pending = Some(Pending::DeleteAll);
+                }
                 let label = if s.replace_mode {
                     "Скрыть замену"
                 } else {

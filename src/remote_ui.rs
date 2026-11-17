@@ -113,6 +113,8 @@ pub struct RemotePanel {
     pub outgoing: Option<(u8, Vec<(String, bool)>)>,
     pub incoming: Option<Dragged>,
     relay: HashMap<String, (u8, String)>,
+    sort: crate::widgets::Sort,
+    area: Rect,
     walks: HashMap<String, Walk>,
     sync: Option<crate::sync::Dialog>,
     sync_times: HashMap<PathBuf, u64>,
@@ -146,6 +148,7 @@ pub struct RemotePanel {
     dropped: Option<Vec<PathBuf>>,
     pub want_search: bool,
     search_query: String,
+    search_root: String,
     search_content: bool,
     search_excludes: String,
     search_job: Option<remote::SearchJob>,
@@ -168,6 +171,8 @@ impl RemotePanel {
             outgoing: None,
             incoming: None,
             relay: HashMap::new(),
+            sort: Default::default(),
+            area: Rect::NOTHING,
             walks: HashMap::new(),
             sync: None,
             sync_times: HashMap::new(),
@@ -176,6 +181,7 @@ impl RemotePanel {
             store_seen: Store::generation(),
             want_search: false,
             search_query: String::new(),
+            search_root: String::new(),
             search_content: true,
             search_excludes: store
                 .search_excludes
@@ -551,6 +557,10 @@ impl RemotePanel {
     pub fn peer_label(&self) -> Option<String> {
         let conn = self.conn.as_ref().filter(|_| self.connected)?;
         Some(format!("{}: {}", conn.profile, self.cwd))
+    }
+
+    pub fn area(&self) -> Rect {
+        self.area
     }
 
     pub fn cwd(&self) -> &str {
@@ -983,6 +993,7 @@ impl RemotePanel {
 
     pub fn ui(&mut self, ui: &mut Ui, pal: &Palette) {
         let ctx = ui.ctx().clone();
+        self.area = ui.max_rect();
         ui.take_available_width();
         ui.add_space(8.0);
         if self.store.profiles.is_empty() {
@@ -998,67 +1009,85 @@ impl RemotePanel {
         }
         self.selected = self.selected.min(self.store.profiles.len() - 1);
         let active = self.conn.is_some();
-        let mut edit = false;
         let label = if active { "Отключить" } else { "Подключить" };
-        let button_w = ui.fonts_mut(|f| {
-            f.layout_no_wrap(
-                label.to_owned(),
-                egui::TextStyle::Button.resolve(ui.style()),
-                pal.text,
-            )
-            .size()
-            .x
-        }) + 22.0;
-        let stacked = ui.available_width() < button_w + 110.0;
-        let mut toggle = false;
-        let mut combo = |ui: &mut Ui, width: f32| {
+        let names: Vec<(String, String)> = self
+            .store
+            .profiles
+            .iter()
+            .map(|p| (p.name.clone(), p.protocol.label().to_owned()))
+            .collect();
+        let list_id = egui::Id::unique(("tror_profile", self.id));
+        let mut action = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let width = (ui.available_width() - 32.0).max(40.0);
             ui.add_enabled_ui(!active, |ui| {
-                ComboBox::from_id_salt(("tror_profile", self.id))
+                ComboBox::from_id_salt(list_id)
                     .width(width)
                     .truncate()
-                    .selected_text(self.store.profiles[self.selected].name.clone())
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .selected_text(names[self.selected].0.clone())
                     .show_ui(ui, |ui| {
-                        for (i, profile) in self.store.profiles.iter().enumerate() {
-                            let text = format!("{}  ·  {}", profile.name, profile.protocol.label());
-                            ui.selectable_value(&mut self.selected, i, text);
-                        }
-                        ui.separator();
-                        if ui.button("Настроить профили…").clicked() {
-                            edit = true;
-                        }
+                        action = crate::widgets::profile_list(
+                            ui,
+                            list_id,
+                            &names,
+                            Some(self.selected),
+                            "Добавить профиль…",
+                        );
                     });
             });
-        };
-        if stacked {
-            let width = (ui.available_width() - 4.0).max(20.0);
-            combo(ui, width);
-            if ui
-                .add_sized([width, 24.0], Button::new(label).fill(pal.surface).truncate())
+            if crate::widgets::plus_button(ui, pal, egui::vec2(26.0, 24.0))
+                .on_hover_text("Добавить профиль")
                 .clicked()
             {
-                toggle = true;
+                action = Some(crate::widgets::ProfileAction::Add);
             }
-        } else {
-            ui.horizontal(|ui| {
-                let width = (ui.available_width() - button_w - 10.0).max(40.0);
-                combo(ui, width);
-                if ui
-                    .add_sized([button_w, 24.0], Button::new(label).fill(pal.surface))
-                    .clicked()
-                {
-                    toggle = true;
-                }
-            });
+        });
+        if let Some(a) = crate::widgets::profile_dialogs(&ctx, pal, list_id, &names) {
+            action = Some(a);
         }
-        if toggle {
+        let width = (ui.available_width() - 4.0).max(20.0);
+        if ui
+            .add_sized([width, 24.0], Button::new(label).fill(pal.surface).truncate())
+            .clicked()
+        {
             if active {
                 self.disconnect();
             } else {
                 self.connect(&ctx);
             }
         }
-        if edit {
-            self.open_editor();
+        match action {
+            Some(crate::widgets::ProfileAction::Select(i)) => self.selected = i,
+            Some(crate::widgets::ProfileAction::Edit(i)) => {
+                self.selected = i;
+                self.open_editor();
+            }
+            Some(crate::widgets::ProfileAction::Rename(i, name)) => {
+                if let Some(profile) = self.store.profiles.get_mut(i) {
+                    profile.name = name;
+                    let _ = self.store.save();
+                }
+            }
+            Some(crate::widgets::ProfileAction::Delete(i)) => {
+                if i < self.store.profiles.len() && !active {
+                    self.store.profiles.remove(i);
+                    let _ = self.store.save();
+                    self.selected = self.selected.min(self.store.profiles.len().saturating_sub(1));
+                    if self.store.profiles.is_empty() {
+                        return;
+                    }
+                }
+            }
+            Some(crate::widgets::ProfileAction::Add) => {
+                self.open_editor();
+                if let Some(editor) = &mut self.editor {
+                    editor.drafts.push(Profile::new(format!("Сервер {}", editor.drafts.len() + 1)));
+                    editor.index = editor.drafts.len() - 1;
+                }
+            }
+            None => {}
         }
 
         if self.connected {
@@ -1249,8 +1278,13 @@ impl RemotePanel {
         let Some((profile, known)) = self.selected_profile() else {
             return;
         };
+        let root = if self.search_root.trim().is_empty() {
+            self.cwd.clone()
+        } else {
+            self.search_root.trim().to_owned()
+        };
         let params = remote::SearchParams {
-            root: self.cwd.clone(),
+            root: root.clone(),
             query: query.clone(),
             content: self.search_content,
             excludes: self
@@ -1263,7 +1297,7 @@ impl RemotePanel {
         let job = remote::search(profile, known, params, move || ctx.request_repaint());
         self.hits.clear();
         self.search_status = "поиск…".into();
-        self.push_log(format!("Поиск «{query}» в {}", self.cwd), false);
+        self.push_log(format!("Поиск «{query}» в {root}"), false);
         self.search_job = Some(job);
         if self.store.search_excludes.as_deref() != Some(self.search_excludes.as_str()) {
             self.store.search_excludes = Some(self.search_excludes.clone());
@@ -1273,13 +1307,11 @@ impl RemotePanel {
 
     pub fn search_ui(&mut self, ui: &mut Ui, pal: &Palette) {
         let ctx = ui.ctx().clone();
-        let rect = ui.available_rect_before_wrap();
-        ui.painter().rect_filled(rect, 0.0, pal.base);
-        ui.add_space(6.0);
+        ui.add_space(4.0);
         if !self.connected {
             ui.add(
                 egui::Label::new(
-                    RichText::new("  Подключитесь к серверу в панели файлов (F8) — поиск идёт в открытой там папке.")
+                    RichText::new("Подключитесь к серверу в панели «Удалённые хосты».")
                         .color(pal.faint)
                         .small(),
                 )
@@ -1292,7 +1324,7 @@ impl RemotePanel {
             let field_w = (ui.available_width() - 20.0).clamp(80.0, 280.0);
             let field = ui.add(
                 TextEdit::singleline(&mut self.search_query)
-                    .hint_text(format!("Искать в {}", self.cwd))
+                    .hint_text("Найти")
                     .desired_width(field_w),
             );
             if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -1326,6 +1358,22 @@ impl RemotePanel {
             );
         });
         crate::widgets::wrapped_row(ui, 6.0, |ui| {
+            ui.label(RichText::new("Папка:").color(pal.subtext).small());
+            ui.add(
+                TextEdit::singleline(&mut self.search_root)
+                    .hint_text(self.cwd.clone())
+                    .desired_width((ui.available_width() - 90.0).max(80.0))
+                    .font(egui::TextStyle::Small),
+            );
+            if ui
+                .button(RichText::new("Текущая").small())
+                .on_hover_text("Папка, открытая в панели хоста")
+                .clicked()
+            {
+                self.search_root = self.cwd.clone();
+            }
+        });
+        crate::widgets::wrapped_row(ui, 6.0, |ui| {
             ui.label(
                 RichText::new("Не искать в папках:")
                     .color(pal.subtext)
@@ -1343,7 +1391,16 @@ impl RemotePanel {
         let mut open = None;
         let row_h = 20.0;
         ui.spacing_mut().item_spacing.y = 0.0;
-        ScrollArea::vertical().auto_shrink(false).show_rows(
+        let base = if self.search_root.trim().is_empty() {
+            self.cwd.clone()
+        } else {
+            self.search_root.trim().to_owned()
+        };
+        ScrollArea::vertical()
+            .id_salt(("tror_server_hits", self.id))
+            .max_height(300.0)
+            .auto_shrink([false, true])
+            .show_rows(
             ui,
             row_h,
             self.hits.len(),
@@ -1360,7 +1417,7 @@ impl RemotePanel {
                         painter.rect_filled(rect, 4.0, pal.crust);
                     }
                     let shown = path
-                        .strip_prefix(self.cwd.trim_end_matches('/'))
+                        .strip_prefix(base.trim_end_matches('/'))
                         .map_or(path.as_str(), |p| p.trim_start_matches('/'));
                     let label = match line {
                         Some(n) => format!("{shown}:{n}"),
@@ -1380,7 +1437,7 @@ impl RemotePanel {
                         egui::FontId::monospace(12.0),
                         pal.subtext,
                     );
-                    if response.double_clicked() {
+                    if response.clicked() {
                         open = Some((path.clone(), *line));
                     }
                 }
@@ -1405,8 +1462,15 @@ impl RemotePanel {
                 entry: None,
             });
         }
+        let sorted = |entries: &[Entry]| {
+            let mut list = entries.to_vec();
+            self.sort.apply(&mut list, |e| {
+                (e.is_dir, e.name.as_str(), e.size, e.perm.unwrap_or(0), e.mtime.unwrap_or(0))
+            });
+            list
+        };
         if !self.tree {
-            for entry in &self.entries {
+            for entry in sorted(&self.entries) {
                 rows.push(Row {
                     path: remote::join(&self.cwd, &entry.name),
                     name: entry.name.clone(),
@@ -1420,7 +1484,11 @@ impl RemotePanel {
             let Some(entries) = panel.children.get(dir) else {
                 return;
             };
-            for entry in entries {
+            let mut entries = entries.clone();
+            panel.sort.apply(&mut entries, |e| {
+                (e.is_dir, e.name.as_str(), e.size, e.perm.unwrap_or(0), e.mtime.unwrap_or(0))
+            });
+            for entry in &entries {
                 let path = remote::join(dir, &entry.name);
                 let open = entry.is_dir && panel.expanded.contains(&path);
                 rows.push(Row {
@@ -1437,7 +1505,7 @@ impl RemotePanel {
         if self.children.contains_key(&self.cwd) {
             walk(self, &self.cwd, 0, &mut rows);
         } else {
-            for entry in &self.entries {
+            for entry in sorted(&self.entries) {
                 rows.push(Row {
                     path: remote::join(&self.cwd, &entry.name),
                     name: entry.name.clone(),
@@ -1489,7 +1557,7 @@ impl RemotePanel {
             + if waiting { 34.0 } else { 0.0 }
             + errors;
         let tree = self.tree;
-        let widths = crate::widgets::column_header(ui, pal, [show_size, show_perm, show_date]);
+        let widths = crate::widgets::column_header(ui, pal, [show_size, show_perm, show_date], &mut self.sort);
         ui.spacing_mut().item_spacing.y = 0.0;
         let outer = ui.available_rect_before_wrap();
         let height = (ui.available_height() - reserve).max(40.0);

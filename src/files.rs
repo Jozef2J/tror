@@ -24,6 +24,69 @@ pub enum ProjectEvent {
     Toast(String),
     Opened(PathBuf),
     View(bool),
+    Transfer(Vec<PathBuf>, bool),
+    Dropped(Vec<PathBuf>, egui::Pos2),
+}
+
+fn free_name(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let path = Path::new(name);
+    let stem = path.file_stem().unwrap_or(name).to_string_lossy().into_owned();
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    (2..)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|p| !p.exists())
+        .unwrap_or(first)
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
+    }
+}
+
+pub fn transfer(paths: &[PathBuf], dir: &Path, keep: bool) -> Result<usize, String> {
+    let mut done = 0;
+    for path in paths {
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        if dir.starts_with(path) {
+            return Err(format!("нельзя переместить «{}» внутрь себя", path.display()));
+        }
+        if path.parent() == Some(dir) && !keep {
+            continue;
+        }
+        let target = free_name(dir, name);
+        let result = if keep {
+            copy_tree(path, &target)
+        } else {
+            std::fs::rename(path, &target).or_else(|_| {
+                copy_tree(path, &target)?;
+                if path.is_dir() {
+                    std::fs::remove_dir_all(path)
+                } else {
+                    std::fs::remove_file(path)
+                }
+            })
+        };
+        result.map_err(|e| format!("{}: {e}", path.display()))?;
+        done += 1;
+    }
+    Ok(done)
 }
 
 enum Prompt {
@@ -50,12 +113,16 @@ pub struct ProjectPanel {
     pub upload_target: Option<String>,
     pub show_size: bool,
     pub show_date: bool,
+    sort: crate::widgets::Sort,
     cwd: PathBuf,
     cache: HashMap<PathBuf, Vec<LocalEntry>>,
     scanned: HashMap<PathBuf, Instant>,
     expanded: BTreeSet<PathBuf>,
     marked: BTreeSet<PathBuf>,
     pub drag_out: Option<Vec<PathBuf>>,
+    pub peer: Option<String>,
+    pub area: egui::Rect,
+    dragging: Option<Vec<PathBuf>>,
     dragged_out: bool,
     anchor: Option<PathBuf>,
     prompt: Option<Prompt>,
@@ -150,11 +217,15 @@ impl ProjectPanel {
             upload_target: None,
             show_size: false,
             show_date: false,
+            sort: Default::default(),
             cache: HashMap::new(),
             scanned: HashMap::new(),
             expanded: BTreeSet::new(),
             marked: BTreeSet::new(),
             drag_out: None,
+            peer: None,
+            area: egui::Rect::NOTHING,
+            dragging: None,
             dragged_out: false,
             anchor: None,
             prompt: None,
@@ -182,6 +253,14 @@ impl ProjectPanel {
         self.cache.clear();
         self.expanded.clear();
         self.marked.clear();
+    }
+
+    pub fn target_dir(&self) -> Option<PathBuf> {
+        if self.tree { self.root.clone() } else { Some(self.cwd.clone()) }
+    }
+
+    pub fn reload(&mut self) {
+        self.scanned.clear();
     }
 
     pub fn take_events(&mut self) -> Vec<ProjectEvent> {
@@ -222,7 +301,9 @@ impl ProjectPanel {
                 });
             }
             let cwd = self.cwd.clone();
-            for entry in self.entries(&cwd) {
+            let mut entries = self.entries(&cwd);
+            self.sort.apply(&mut entries, |e| (e.is_dir, e.name.as_str(), e.size, 0, e.mtime.unwrap_or(0)));
+            for entry in entries {
                 rows.push(Row {
                     path: cwd.join(&entry.name),
                     name: entry.name.clone(),
@@ -235,7 +316,8 @@ impl ProjectPanel {
         let mut stack = vec![(root, 0usize)];
         let mut order: Vec<Row> = Vec::new();
         while let Some((dir, depth)) = stack.pop() {
-            let entries = self.entries(&dir);
+            let mut entries = self.entries(&dir);
+            self.sort.apply(&mut entries, |e| (e.is_dir, e.name.as_str(), e.size, 0, e.mtime.unwrap_or(0)));
             let mut local = Vec::new();
             for entry in entries {
                 local.push(Row {
@@ -423,9 +505,28 @@ impl ProjectPanel {
         let mut go = None;
         let mut open = Vec::new();
         let widths =
-            crate::widgets::column_header(ui, pal, [self.show_size, false, self.show_date]);
+            crate::widgets::column_header(ui, pal, [self.show_size, false, self.show_date], &mut self.sort);
         ui.spacing_mut().item_spacing.y = 0.0;
         let outer = ui.available_rect_before_wrap();
+        self.area = outer;
+        if let (Some(paths), Some(pos)) = (&self.dragging, ui.ctx().pointer_latest_pos())
+            && !self.dragged_out
+            && !outer.contains(pos)
+        {
+            let text = match paths.len() {
+                1 => paths[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                n => format!("файлов: {n}"),
+            };
+            egui::Area::new(ui.scope_id().with("tror_project_drag"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(pos + egui::vec2(14.0, 10.0))
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(RichText::new(text).small());
+                    });
+                });
+        }
         let blank = ui.interact(outer, ui.scope_id().with("tror_project_blank"), Sense::click());
         let wide = crate::widgets::rows_width(
             ui,
@@ -460,7 +561,21 @@ impl ProjectPanel {
                             vec![row.path.clone()]
                         });
                     }
+                    if response.drag_started() && row.entry.is_some() {
+                        self.dragging = Some(if self.marked.contains(&row.path) {
+                            self.marked.iter().cloned().collect()
+                        } else {
+                            vec![row.path.clone()]
+                        });
+                    }
                     if response.drag_stopped() {
+                        if !self.dragged_out
+                            && let Some(paths) = self.dragging.take()
+                            && let Some(pos) = ui.ctx().pointer_latest_pos()
+                        {
+                            self.out.push(ProjectEvent::Dropped(paths, pos));
+                        }
+                        self.dragging = None;
                         self.dragged_out = false;
                     }
                     let is_dir = row.entry.as_ref().is_none_or(|e| e.is_dir);
@@ -586,6 +701,15 @@ impl ProjectPanel {
                                 && let Some(dir) = path.parent()
                             {
                                 self.create_items(ui, &dir.to_path_buf());
+                            }
+                            if let Some(peer) = self.peer.clone() {
+                                let paths: Vec<PathBuf> = chosen.iter().map(|(p, _)| p.clone()).collect();
+                                if ui.button(format!("Копировать в «{peer}»")).clicked() {
+                                    self.out.push(ProjectEvent::Transfer(paths.clone(), true));
+                                }
+                                if ui.button(format!("Переместить в «{peer}»")).clicked() {
+                                    self.out.push(ProjectEvent::Transfer(paths, false));
+                                }
                             }
                             if let Some(target) = &self.upload_target
                                 && ui.button(format!("Загрузить на сервер ({target})")).clicked()

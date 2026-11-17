@@ -1083,28 +1083,69 @@ impl DbPanel {
         }
         self.selected = self.selected.min(store.databases.len() - 1);
         let active = self.conn.is_some();
+        let names: Vec<(String, String)> = store
+            .databases
+            .iter()
+            .map(|p| (p.name.clone(), p.kind.label().to_owned()))
+            .collect();
+        let list_id = egui::Id::unique("tror_db_profile");
+        let mut action = crate::widgets::profile_dialogs(&ctx, pal, list_id, &names);
         crate::widgets::wrapped_row(ui, 8.0, |ui| {
-            let mut edit = false;
-            let combo_w = (ui.available_width() - 150.0).clamp(120.0, 240.0);
-            ui.add_enabled_ui(!active, |ui| {
-                ComboBox::from_id_salt("tror_db_profile")
-                    .width(combo_w)
-                    .truncate()
-                    .selected_text(store.databases[self.selected].name.clone())
-                    .show_ui(ui, |ui| {
-                        for (i, profile) in store.databases.iter().enumerate() {
-                            let text = format!("{}  ·  {}", profile.name, profile.kind.label());
-                            ui.selectable_value(&mut self.selected, i, text);
-                        }
-                        ui.separator();
-                        if ui.button("Настроить подключения…").clicked() {
-                            edit = true;
-                        }
-                    });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let width = (ui.available_width() - 32.0).max(40.0);
+                ui.add_enabled_ui(!active, |ui| {
+                    ComboBox::from_id_salt(list_id)
+                        .width(width)
+                        .truncate()
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .selected_text(names[self.selected].0.clone())
+                        .show_ui(ui, |ui| {
+                            if let Some(a) = crate::widgets::profile_list(
+                                ui,
+                                list_id,
+                                &names,
+                                Some(self.selected),
+                                "Добавить подключение…",
+                            ) {
+                                action = Some(a);
+                            }
+                        });
+                });
+                if crate::widgets::plus_button(ui, pal, egui::vec2(26.0, 24.0))
+                    .on_hover_text("Добавить подключение")
+                    .clicked()
+                {
+                    action = Some(crate::widgets::ProfileAction::Add);
+                }
             });
-            if edit {
+        });
+        match action {
+            Some(crate::widgets::ProfileAction::Select(i)) => self.selected = i,
+            Some(crate::widgets::ProfileAction::Edit(i)) => {
+                self.selected = i;
                 self.open_editor(store, false);
             }
+            Some(crate::widgets::ProfileAction::Rename(i, name)) => {
+                if let Some(profile) = store.databases.get_mut(i) {
+                    profile.name = name;
+                    let _ = store.save();
+                }
+            }
+            Some(crate::widgets::ProfileAction::Delete(i)) => {
+                if i < store.databases.len() && !active {
+                    store.databases.remove(i);
+                    let _ = store.save();
+                    self.selected = self.selected.min(store.databases.len().saturating_sub(1));
+                    if store.databases.is_empty() {
+                        return;
+                    }
+                }
+            }
+            Some(crate::widgets::ProfileAction::Add) => self.open_editor(store, true),
+            None => {}
+        }
+        crate::widgets::wrapped_row(ui, 8.0, |ui| {
             let label = if active { "Отключить" } else { "Подключить" };
             if ui.add(Button::new(label).fill(pal.surface)).clicked() {
                 if active {

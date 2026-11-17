@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use eframe::egui::{self, Button, Color32, RichText, ScrollArea, Sense, TextEdit};
+use eframe::egui::{self, Button, Color32, RichText, ScrollArea, Sense, TextEdit, Ui};
 use regex::{Regex, RegexBuilder};
 
 use crate::{document::Document, theme::Palette};
@@ -42,8 +42,9 @@ pub enum Out {
 
 #[derive(Default)]
 pub struct FindFiles {
-    pub open: bool,
     pub focus: bool,
+    pub dirty: Vec<PathBuf>,
+    dir: String,
     query: String,
     replace: String,
     case: bool,
@@ -174,7 +175,6 @@ pub fn replace_file(path: &Path, re: &Regex, with: &str, literal: bool) -> Resul
 
 impl FindFiles {
     pub fn show(&mut self) {
-        self.open = true;
         self.focus = true;
     }
 
@@ -325,176 +325,175 @@ impl FindFiles {
         changed
     }
 
-    pub fn ui(
-        &mut self,
-        ctx: &egui::Context,
-        pal: &Palette,
-        root: Option<&Path>,
-        dirty: &[PathBuf],
-    ) -> Option<Out> {
-        let mut out = self.pump().then_some(Out::Changed);
-        if !self.open {
-            return out;
-        }
-        let mut open = true;
+    pub fn poll(&mut self) -> Option<Out> {
+        self.pump().then_some(Out::Changed)
+    }
+
+    pub fn body(&mut self, ui: &mut Ui, pal: &Palette, project: Option<&Path>) -> Option<Out> {
+        let mut out = None;
         let busy = self.rx.is_some();
-        egui::Window::new("Поиск в файлах проекта")
-            .frame(crate::widgets::window_frame(pal))
-            .title_bar(false)
-            .default_size([720.0, 460.0])
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .min_width(420.0)
-            .min_height(240.0)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                if crate::app::window_header(ui, pal, "Поиск в файлах проекта", true) {
-                    open = false;
-                }
-                let Some(root) = root else {
-                    ui.label(
-                        RichText::new("Сначала откройте папку проекта: Файл → Открыть папку.")
-                            .color(pal.subtext),
-                    );
-                    return;
-                };
-                let mut go = false;
-                egui::Grid::new("tror_find_files")
-                    .num_columns(2)
-                    .spacing([10.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label("Найти");
-                        let field = ui.add(
-                            TextEdit::singleline(&mut self.query)
-                                .desired_width(f32::INFINITY)
-                                .hint_text("текст или выражение"),
-                        );
-                        if std::mem::take(&mut self.focus) {
-                            field.request_focus();
-                        }
-                        go |= field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        ui.end_row();
-                        ui.label("Заменить на");
-                        ui.add(
-                            TextEdit::singleline(&mut self.replace).desired_width(f32::INFINITY),
-                        );
-                        ui.end_row();
-                        ui.label("Файлы");
-                        ui.add(
-                            TextEdit::singleline(&mut self.mask)
-                                .desired_width(f32::INFINITY)
-                                .hint_text("все; или маски через запятую: *.php, *.js"),
-                        );
-                        ui.end_row();
-                    });
-                ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(&mut self.case, "Учитывать регистр");
-                    ui.checkbox(&mut self.regex, "Регулярное выражение");
-                });
-                ui.horizontal_wrapped(|ui| {
-                    let ready = !self.query.is_empty() && !busy;
-                    go |= ui
-                        .add_enabled(
-                            ready,
-                            crate::widgets::primary("Найти", pal),
-                        )
-                        .clicked();
-                    if busy
-                        && ui
-                            .add(Button::new("Остановить").fill(pal.surface))
-                            .clicked()
-                    {
-                        self.cancel();
-                        self.note = "Остановлено".to_owned();
-                    }
-                    let fresh = !self.hits.is_empty() && self.searched == self.query && !busy;
-                    if self.confirm {
-                        let paths: std::collections::BTreeSet<&PathBuf> =
-                            self.hits.iter().map(|h| &h.path).collect();
-                        let label = format!("Да, заменить в {} файлах", paths.len());
-                        if ui
-                            .add(
-                                Button::new(RichText::new(label).color(Color32::WHITE))
-                                    .fill(Color32::from_rgb(0xc8, 0x3c, 0x3c)),
-                            )
-                            .clicked()
-                        {
-                            self.confirm = false;
-                            self.start_replace(dirty.to_vec(), ui.ctx());
-                        }
-                        if ui.add(Button::new("Отмена").fill(pal.surface)).clicked() {
-                            self.confirm = false;
-                        }
-                    } else if ui
-                        .add_enabled(
-                            fresh,
-                            Button::new("Заменить во всех найденных…").fill(pal.surface),
-                        )
-                        .on_disabled_hover_text("Сначала выполните поиск")
-                        .clicked()
-                    {
-                        self.confirm = true;
-                    }
-                });
-                if self.confirm {
-                    ui.label(
-                        RichText::new("Файлы будут перезаписаны на диске. Отменить замену нельзя.")
-                            .color(pal.warn),
-                    );
-                }
-                if go && !self.query.is_empty() {
-                    self.start(root, ui.ctx());
-                }
-                if !self.note.is_empty() {
-                    ui.label(RichText::new(&self.note).small().color(pal.subtext));
-                }
-                ui.separator();
-                ui.spacing_mut().item_spacing.y = 0.0;
-                let row_h = 22.0;
-                ScrollArea::vertical().auto_shrink(false).show_rows(
-                    ui,
-                    row_h,
-                    self.hits.len(),
-                    |ui, range| {
-                        for hit in &self.hits[range] {
-                            let (rect, response) = ui.allocate_exact_size(
-                                egui::vec2(ui.available_width(), row_h),
-                                Sense::click(),
-                            );
-                            if response.hovered() {
-                                ui.painter().rect_filled(rect, 4.0, pal.surface_hover);
-                            }
-                            let rel = hit.path.strip_prefix(root).unwrap_or(&hit.path);
-                            let place = format!("{}:{}", rel.display(), hit.line);
-                            let painter = ui.painter_at(rect);
-                            let end = painter
-                                .text(
-                                    egui::pos2(rect.left() + 6.0, rect.center().y),
-                                    egui::Align2::LEFT_CENTER,
-                                    place,
-                                    egui::FontId::proportional(12.5),
-                                    pal.accent,
-                                )
-                                .right();
-                            painter.text(
-                                egui::pos2(end + 12.0, rect.center().y),
-                                egui::Align2::LEFT_CENTER,
-                                &hit.text,
-                                egui::FontId::monospace(12.5),
-                                pal.text,
-                            );
-                            if response.clicked() {
-                                out = Some(Out::Open(hit.path.clone(), hit.line));
-                            }
-                        }
-                    },
+        let chosen = PathBuf::from(self.dir.trim());
+        let root: Option<PathBuf> = if self.dir.trim().is_empty() {
+            project.map(Path::to_path_buf)
+        } else {
+            Some(chosen)
+        };
+        let mut go = false;
+        egui::Grid::new("tror_find_files")
+            .num_columns(2)
+            .spacing([10.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Найти");
+                let field = ui.add(
+                    TextEdit::singleline(&mut self.query)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("текст или выражение"),
                 );
+                if std::mem::take(&mut self.focus) {
+                    field.request_focus();
+                }
+                go |= field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.end_row();
+                ui.label("Заменить на");
+                ui.add(TextEdit::singleline(&mut self.replace).desired_width(f32::INFINITY));
+                ui.end_row();
+                ui.label("Папка");
+                ui.horizontal(|ui| {
+                    let hint = project
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "выберите папку".into());
+                    ui.add(
+                        TextEdit::singleline(&mut self.dir)
+                            .hint_text(hint)
+                            .desired_width((ui.available_width() - 80.0).max(60.0)),
+                    );
+                    if ui.button("Выбрать…").clicked() {
+                        let mut dialog = rfd::FileDialog::new();
+                        if let Some(start) = root.as_deref().or(project) {
+                            dialog = dialog.set_directory(start);
+                        }
+                        if let Some(dir) = dialog.pick_folder() {
+                            self.dir = dir.display().to_string();
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label("Файлы");
+                ui.add(
+                    TextEdit::singleline(&mut self.mask)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("все; или маски через запятую: *.php, *.js"),
+                );
+                ui.end_row();
             });
-        if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.open = false;
-            self.cancel();
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.case, "Учитывать регистр");
+            ui.checkbox(&mut self.regex, "Регулярное выражение");
+        });
+        ui.horizontal_wrapped(|ui| {
+            let ready = !self.query.is_empty() && !busy && root.is_some();
+            go |= ui
+                .add_enabled(ready, crate::widgets::primary("Найти", pal))
+                .clicked();
+            if busy && ui.add(Button::new("Остановить").fill(pal.surface)).clicked() {
+                self.cancel();
+                self.note = "Остановлено".to_owned();
+            }
+            let fresh = !self.hits.is_empty() && self.searched == self.query && !busy;
+            if self.confirm {
+                let paths: std::collections::BTreeSet<&PathBuf> =
+                    self.hits.iter().map(|h| &h.path).collect();
+                let label = format!("Да, заменить в {} файлах", paths.len());
+                if ui
+                    .add(
+                        Button::new(RichText::new(label).color(Color32::WHITE))
+                            .fill(Color32::from_rgb(0xc8, 0x3c, 0x3c)),
+                    )
+                    .clicked()
+                {
+                    self.confirm = false;
+                    let dirty = self.dirty.clone();
+                    self.start_replace(dirty, ui.ctx());
+                }
+                if ui.add(Button::new("Отмена").fill(pal.surface)).clicked() {
+                    self.confirm = false;
+                }
+            } else if ui
+                .add_enabled(fresh, Button::new("Заменить во всех найденных…").fill(pal.surface))
+                .on_disabled_hover_text("Сначала выполните поиск")
+                .clicked()
+            {
+                self.confirm = true;
+            }
+        });
+        if self.confirm {
+            ui.label(
+                RichText::new("Файлы будут перезаписаны на диске. Отменить замену нельзя.")
+                    .color(pal.warn),
+            );
         }
+        let Some(root) = root else {
+            ui.label(
+                RichText::new("Откройте папку проекта или выберите папку для поиска.")
+                    .color(pal.subtext),
+            );
+            return out;
+        };
+        if go && !self.query.is_empty() {
+            if root.is_dir() {
+                self.start(&root, ui.ctx());
+            } else {
+                self.note = "Папка не найдена".to_owned();
+            }
+        }
+        if !self.note.is_empty() {
+            ui.label(RichText::new(&self.note).small().color(pal.subtext));
+        }
+        ui.separator();
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let row_h = 22.0;
+        ScrollArea::vertical()
+            .id_salt("tror_find_files_hits")
+            .max_height(300.0)
+            .auto_shrink([false, true])
+            .show_rows(ui, row_h, self.hits.len(), |ui, range| {
+                for hit in &self.hits[range] {
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_h),
+                        Sense::click(),
+                    );
+                    if response.hovered() {
+                        ui.painter().rect_filled(rect, 4.0, pal.surface_hover);
+                    }
+                    let rel = hit.path.strip_prefix(&root).unwrap_or(&hit.path);
+                    let place = format!("{}:{}", rel.display(), hit.line);
+                    let painter = ui.painter_at(rect);
+                    let end = painter
+                        .text(
+                            egui::pos2(rect.left() + 6.0, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            place,
+                            egui::FontId::proportional(12.5),
+                            pal.accent,
+                        )
+                        .right();
+                    painter.text(
+                        egui::pos2(end + 12.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        &hit.text,
+                        egui::FontId::monospace(12.5),
+                        pal.text,
+                    );
+                    if response.clicked() {
+                        out = Some(Out::Open(hit.path.clone(), hit.line));
+                    }
+                }
+            });
         out
+    }
+
+    pub fn close(&mut self) {
+        self.cancel();
     }
 }
 

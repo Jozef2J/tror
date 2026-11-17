@@ -3,6 +3,7 @@ use super::*;
 impl TrorApp {
     pub(super) fn open_search(&mut self, replace: bool) {
         self.search.open = true;
+        self.search.files = false;
         self.find.focus = true;
         self.search.replace_mode = replace;
         self.search.focus_query = true;
@@ -11,8 +12,11 @@ impl TrorApp {
             let range = doc.selection();
             if !range.is_empty() && range.len() < 200 {
                 let selected = doc.selected_text();
-                if !selected.contains('\n') {
+                if !selected.contains(['\n', '\r', '\t']) {
                     self.search.query = selected;
+                } else if !self.search.regex {
+                    self.search.query = crate::search::escape(&selected);
+                    self.search.extended = true;
                 }
             }
         }
@@ -30,6 +34,12 @@ impl TrorApp {
                     if !self.settings.detached.contains(&Pane::Project) {
                         dock::show(&mut self.dock, Pane::Project, &self.settings.floats);
                     }
+                }
+            }
+            Action::OpenSecondFolder => {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    self.project2.set_root(dir);
+                    dock::show(&mut self.dock, Pane::Project2, &self.settings.floats);
                 }
             }
             Action::AddHosts => {
@@ -129,6 +139,7 @@ impl TrorApp {
             }
             Action::CloseSearch => {
                 self.search.open = false;
+                self.find_files.close();
                 self.focus_editor = true;
             }
             Action::GotoLine => {
@@ -251,7 +262,11 @@ impl TrorApp {
                 self.update.rx = Some(crate::update::check());
                 self.notify("Проверяю обновления…", now);
             }
-            Action::FindFiles => self.find_files.show(),
+            Action::FindFiles => {
+                self.open_search(false);
+                self.search.files = true;
+                self.find_files.show();
+            }
             Action::MacroRecord => {
                 if self.macros.recording {
                     self.macros.recording = false;
@@ -462,7 +477,7 @@ impl TrorApp {
                 "hosts" => Action::Toggle(Pane::Hosts),
                 "console" => Action::Toggle(Pane::Console),
                 "log" => Action::Toggle(Pane::Log),
-                "server_search" => Action::Toggle(Pane::ServerSearch),
+                "server_search" => Action::FindFiles,
                 "db" => Action::Toggle(Pane::Db),
                 "compare" => Action::Compare,
                 "find_files" => Action::FindFiles,

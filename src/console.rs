@@ -338,15 +338,12 @@ impl ConsolePanel {
     fn quick_menu(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         ui.set_min_width(240.0);
         let mut open = None;
-        if self.store.terminals.is_empty() {
-            ui.weak("Своих подключений консоли пока нет");
-        }
-        for profile in &self.store.terminals {
-            let label = format!("{}  ·  {}", profile.name, profile.protocol.label());
-            if ui.button(label).clicked() {
-                open = Some(profile.clone());
-            }
-        }
+        let names: Vec<(String, String)> = self
+            .store
+            .terminals
+            .iter()
+            .map(|p| (p.name.clone(), p.protocol.label().to_owned()))
+            .collect();
         let hosts: Vec<_> = self
             .store
             .profiles
@@ -355,7 +352,6 @@ impl ConsolePanel {
             .cloned()
             .collect();
         if !hosts.is_empty() {
-            ui.separator();
             ui.menu_button("По профилю SFTP", |ui| {
                 for host in &hosts {
                     if ui.button(&host.name).clicked() {
@@ -363,17 +359,51 @@ impl ConsolePanel {
                     }
                 }
             });
+            ui.separator();
         }
-        ui.separator();
-        if ui.button("Новое подключение…").clicked() {
-            self.open_editor(true);
-        }
-        if ui.button("Настроить подключения…").clicked() {
-            self.open_editor(false);
+        let action = crate::widgets::profile_list(
+            ui,
+            egui::Id::unique("tror_term_profiles"),
+            &names,
+            None,
+            "Добавить подключение…",
+        );
+        if let Some(action) = action {
+            self.profile_action(action, ctx);
         }
         if let Some(profile) = open {
             self.open(profile, ctx);
             ui.close();
+        }
+    }
+
+    fn profile_action(&mut self, action: crate::widgets::ProfileAction, ctx: &egui::Context) {
+        use crate::widgets::ProfileAction;
+        match action {
+            ProfileAction::Select(i) => {
+                if let Some(profile) = self.store.terminals.get(i).cloned() {
+                    self.open(profile, ctx);
+                }
+            }
+            ProfileAction::Edit(i) => {
+                self.open_editor(false);
+                if let Some(editor) = &mut self.editor {
+                    editor.index = i.min(editor.drafts.len().saturating_sub(1));
+                }
+            }
+            ProfileAction::Rename(i, name) => {
+                if let Some(profile) = self.store.terminals.get_mut(i) {
+                    profile.name = name;
+                    let _ = self.store.save();
+                }
+            }
+            ProfileAction::Delete(i) => {
+                if i < self.store.terminals.len() {
+                    self.store.terminals.remove(i);
+                    let _ = self.store.save();
+                }
+            }
+            ProfileAction::Add => self.open_editor(true),
         }
     }
 
@@ -404,6 +434,17 @@ impl ConsolePanel {
 
     pub fn ui(&mut self, ui: &mut Ui, pal: &Palette, dark: bool, font_size: f32) {
         let ctx = ui.ctx().clone();
+        let names: Vec<(String, String)> = self
+            .store
+            .terminals
+            .iter()
+            .map(|p| (p.name.clone(), p.protocol.label().to_owned()))
+            .collect();
+        if let Some(action) =
+            crate::widgets::profile_dialogs(&ctx, pal, egui::Id::unique("tror_term_profiles"), &names)
+        {
+            self.profile_action(action, &ctx);
+        }
         ui.add_space(4.0);
         let mut close = None;
         let mut toggle_split = false;
@@ -610,7 +651,9 @@ impl ConsolePanel {
                 }
                 let plus = crate::widgets::plus_button(ui, pal, egui::vec2(24.0, 22.0))
                     .on_hover_text("Новый сеанс");
-                egui::Popup::menu(&plus).show(|ui| self.quick_menu(ui, &ctx));
+                egui::Popup::menu(&plus)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| self.quick_menu(ui, &ctx));
             });
         });
         if toggle_split {

@@ -474,13 +474,24 @@ impl TabViewer for Viewer<'_> {
                     side.show(ui, |ui| panel.ui(ui, &pal));
                 }
             }
-            Pane::Project => {
+            Pane::Project | Pane::Project2 => {
                 let recent = app.settings.recent_projects.clone();
-                app.project.show_size = app.settings.project_size;
-                app.project.show_date = app.settings.project_date;
-                side.show(ui, |ui| app.project.ui(ui, &pal, &recent));
-                app.settings.project_size = app.project.show_size;
-                app.settings.project_date = app.project.show_date;
+                let second = pane == Pane::Project2;
+                let (panel, other) = if second {
+                    (&mut app.project2, &app.project)
+                } else {
+                    (&mut app.project, &app.project2)
+                };
+                panel.peer = other
+                    .root
+                    .as_ref()
+                    .and_then(|r| r.file_name())
+                    .map(|n| n.to_string_lossy().into_owned());
+                panel.show_size = app.settings.project_size;
+                panel.show_date = app.settings.project_date;
+                side.show(ui, |ui| panel.ui(ui, &pal, &recent));
+                app.settings.project_size = panel.show_size;
+                app.settings.project_date = panel.show_date;
             }
             Pane::Console => {
                 app.console_shown = true;

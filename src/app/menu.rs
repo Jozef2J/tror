@@ -25,6 +25,9 @@ impl TrorApp {
                 if item(ui, "Открыть папку…", &key("open_folder"), true) {
                     actions.push(Action::OpenFolder);
                 }
+                if item(ui, "Открыть вторую папку…", "", true) {
+                    actions.push(Action::OpenSecondFolder);
+                }
                 ui.menu_button("Недавние", |ui| {
                     if self.settings.recent.is_empty() {
                         ui.weak("пусто");
@@ -292,6 +295,7 @@ impl TrorApp {
                         "Скрыть папку проекта",
                         "project",
                     ),
+                    (Pane::Project2, "Вторая папка проекта", "Скрыть вторую папку", ""),
                     (
                         Pane::Hosts,
                         "Удалённые хосты (SFTP/FTP)",
@@ -305,12 +309,6 @@ impl TrorApp {
                         "console",
                     ),
                     (Pane::Log, "Журнал", "Скрыть журнал", "log"),
-                    (
-                        Pane::ServerSearch,
-                        "Поиск на сервере",
-                        "Скрыть поиск на сервере",
-                        "server_search",
-                    ),
                     (Pane::Db, "База данных", "Скрыть базу данных", "db"),
                     (
                         Pane::Diff,
@@ -395,7 +393,7 @@ impl TrorApp {
                     actions.push(Action::Show(Pane::Db));
                 }
                 if item(ui, "Поиск на сервере", "", true) {
-                    actions.push(Action::Show(Pane::ServerSearch));
+                    actions.push(Action::FindFiles);
                 }
             });
             ui.menu_button("Плагины", |ui| {

@@ -16,7 +16,7 @@ use crate::diff::DiffPanel;
 use crate::dock::{self, Pane};
 use crate::document::{Document, Eol};
 use crate::editor;
-use crate::files::{ProjectEvent, ProjectPanel};
+use crate::files::ProjectPanel;
 use crate::highlight::Syntaxes;
 use crate::prefs::{self, Look, Settings};
 use crate::preview::{self, Preview};
@@ -81,6 +81,7 @@ enum Action {
     New,
     Open,
     OpenFolder,
+    OpenSecondFolder,
     AddHosts,
     OpenPath(PathBuf),
     Save,
@@ -307,6 +308,8 @@ pub struct TrorApp {
     complete: Completion,
     remotes: Vec<RemotePanel>,
     project: ProjectPanel,
+    project2: ProjectPanel,
+    sizes: dock::Sizes,
     log: Vec<(String, crate::trace::Kind)>,
     console: ConsolePanel,
     term_fonts: Option<Vec<PathBuf>>,
@@ -329,6 +332,7 @@ pub struct TrorApp {
     plugin_dialog: Option<plugin_ui::PluginDialog>,
     plugin_panels: std::collections::HashMap<u64, plugin_ui::PluginPanel>,
     find_files: crate::findfiles::FindFiles,
+    find_out: Option<crate::findfiles::Out>,
     update: Updater,
     macros: editor::Macro,
     macro_dialog: Option<MacroDialog>,
@@ -357,7 +361,9 @@ impl TrorApp {
             .unwrap_or_else(dock::new);
         dock::translate(&mut dock);
         dock::hide(&mut dock, Pane::Preview);
-        settings.detached.retain(|p| *p != Pane::Preview);
+        dock::hide(&mut dock, Pane::ServerSearch);
+        dock::set_homes(settings.homes.clone());
+        settings.detached.retain(|p| !matches!(p, Pane::Preview | Pane::ServerSearch));
         crate::preview::forget_webview();
         crate::trace::install();
         let hosts = settings
@@ -373,6 +379,7 @@ impl TrorApp {
             )
             .min(16);
         let project = ProjectPanel::new(settings.project.clone());
+        let project2 = ProjectPanel::new(settings.project2.clone());
         let mut app = Self {
             perf: std::env::var_os("TROR_PERF").map(|_| Perf::default()),
             title: String::new(),
@@ -385,6 +392,8 @@ impl TrorApp {
             complete: Completion::default(),
             remotes: (0..hosts).map(|i| RemotePanel::new(i as u8)).collect(),
             project,
+            project2,
+            sizes: Default::default(),
             log: Vec::new(),
             console: ConsolePanel::new(),
             term_fonts: None,
@@ -418,6 +427,7 @@ impl TrorApp {
             plugin_dialog: None,
             plugin_panels: Default::default(),
             find_files: Default::default(),
+            find_out: None,
             update: Default::default(),
             macros: Default::default(),
             macro_dialog: None,

@@ -363,6 +363,23 @@ mod tests {
     }
 
     #[test]
+    fn sort_keeps_folders_first_and_cycles() {
+        let mut items = vec![("b", false, 5u64), ("A", true, 1), ("c", false, 1), ("z", true, 9)];
+        fn fields<'a>(i: &'a (&'static str, bool, u64)) -> (bool, &'a str, u64, u32, u64) {
+            (i.1, i.0, i.2, 0, i.2)
+        }
+        let mut sort = Sort::default();
+        sort.click(SortKey::Size);
+        sort.apply(&mut items, fields);
+        assert_eq!(items.iter().map(|i| i.0).collect::<Vec<_>>(), ["A", "z", "c", "b"]);
+        sort.click(SortKey::Size);
+        sort.apply(&mut items, fields);
+        assert_eq!(items.iter().map(|i| i.0).collect::<Vec<_>>(), ["z", "A", "b", "c"]);
+        sort.click(SortKey::Size);
+        assert_eq!(sort, Sort::default());
+    }
+
+    #[test]
     fn columns_shrink_to_fit_and_never_overlap() {
         set_columns([260.0, 34.0, 260.0]);
         for width in [200.0, 260.0, 320.0, 480.0, 900.0] {
@@ -594,35 +611,112 @@ pub fn column_cell(
     *right -= width + COLUMN_GAP;
 }
 
-pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3]) -> [f32; 3] {
-    if !shown.contains(&true) {
-        return [0.0; 3];
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum SortKey {
+    #[default]
+    None,
+    Name,
+    Size,
+    Perm,
+    Date,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Sort {
+    pub key: SortKey,
+    pub desc: bool,
+}
+
+impl Sort {
+    pub fn apply<T>(&self, items: &mut [T], fields: impl Fn(&T) -> (bool, &str, u64, u32, u64)) {
+        if self.key == SortKey::None {
+            return;
+        }
+        items.sort_by(|a, b| {
+            let (a, b) = (fields(a), fields(b));
+            let by_name = || a.1.to_lowercase().cmp(&b.1.to_lowercase());
+            let main = match self.key {
+                SortKey::Size => a.2.cmp(&b.2).then_with(by_name),
+                SortKey::Perm => a.3.cmp(&b.3).then_with(by_name),
+                SortKey::Date => a.4.cmp(&b.4).then_with(by_name),
+                _ => by_name(),
+            };
+            let main = if self.desc { main.reverse() } else { main };
+            (!a.0).cmp(&!b.0).then(main)
+        });
     }
+
+    fn click(&mut self, key: SortKey) {
+        *self = if self.key != key {
+            Sort { key, desc: false }
+        } else if !self.desc {
+            Sort { key, desc: true }
+        } else {
+            Sort::default()
+        };
+    }
+}
+
+fn sort_arrow(painter: &egui::Painter, at: Pos2, desc: bool, color: Color32) {
+    let (tip, base) = if desc { (3.0, -2.0) } else { (-3.0, 2.0) };
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            at + egui::vec2(0.0, tip),
+            at + egui::vec2(-3.5, base),
+            at + egui::vec2(3.5, base),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3], sort: &mut Sort) -> [f32; 3] {
     let mut stored = columns();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::hover());
+    let (rect, header) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::hover());
+    header.context_menu(|ui| {
+        if ui
+            .add_enabled(sort.key != SortKey::None, egui::Button::new("Сбросить сортировку"))
+            .clicked()
+        {
+            *sort = Sort::default();
+            ui.close();
+        }
+    });
     let fit = fit_columns(rect.width(), shown);
     let painter = ui.painter_at(rect);
     let font = egui::FontId::proportional(11.0);
     let room = rect.width() - 6.0 - NAME_MIN;
     let mut right = rect.right() - 6.0;
-    for (index, label) in [(2, "Изменён"), (1, "Права"), (0, "Размер")] {
+    let mut name_right = rect.right();
+    for (index, label, key) in [
+        (2, "Изменён", SortKey::Date),
+        (1, "Права", SortKey::Perm),
+        (0, "Размер", SortKey::Size),
+    ] {
         let width = fit[index];
         if width <= 0.0 {
             continue;
         }
         let left = right - width;
-        painter
-            .with_clip_rect(Rect::from_min_max(
-                egui::pos2(left, rect.top()),
-                egui::pos2(right, rect.bottom()),
-            ))
-            .text(
-                egui::pos2(right, rect.center().y),
-                egui::Align2::RIGHT_CENTER,
-                label,
-                font.clone(),
-                pal.faint,
-            );
+        let cell = Rect::from_min_max(egui::pos2(left, rect.top()), egui::pos2(right, rect.bottom()));
+        let click = ui
+            .interact(cell, ui.scope_id().with(("tror_sort", index)), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if click.clicked() {
+            sort.click(key);
+        }
+        let active = sort.key == key;
+        let color = if active || click.hovered() { pal.text } else { pal.faint };
+        let galley = painter.layout_no_wrap(label.to_owned(), font.clone(), color);
+        let text_left = right - galley.size().x;
+        painter.with_clip_rect(cell).galley(
+            egui::pos2(text_left, rect.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+        if active {
+            sort_arrow(&painter, egui::pos2(text_left - 7.0, rect.center().y), sort.desc, pal.accent);
+        }
         let grip = Rect::from_min_max(
             egui::pos2(left - COLUMN_GAP, rect.top()),
             egui::pos2(left, rect.bottom()),
@@ -661,14 +755,36 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3]) -> [f32; 3] {
             stored[index] = COLUMN_DEFAULTS[index];
         }
         right = left - COLUMN_GAP;
+        name_right = left - COLUMN_GAP;
     }
-    painter.text(
-        egui::pos2(rect.left() + 6.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "Имя",
-        font,
-        pal.faint,
+    let name_cell = Rect::from_min_max(rect.min, egui::pos2(name_right, rect.bottom()));
+    let click = ui
+        .interact(name_cell, ui.scope_id().with("tror_sort_name"), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if click.clicked() {
+        sort.click(SortKey::Name);
+    }
+    let active = sort.key == SortKey::Name;
+    let color = if active || click.hovered() { pal.text } else { pal.faint };
+    let galley = painter.layout_no_wrap("Имя".to_owned(), font, color);
+    let width = galley.size().x;
+    painter.galley(
+        egui::pos2(rect.left() + 6.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        color,
     );
+    if active {
+        sort_arrow(&painter, egui::pos2(rect.left() + 13.0 + width, rect.center().y), sort.desc, pal.accent);
+    }
+    click.context_menu(|ui| {
+        if ui
+            .add_enabled(sort.key != SortKey::None, egui::Button::new("Сбросить сортировку"))
+            .clicked()
+        {
+            *sort = Sort::default();
+            ui.close();
+        }
+    });
     set_columns(stored);
     fit
 }
@@ -691,4 +807,185 @@ pub fn paint_pin(painter: &egui::Painter, center: Pos2, color: Color32) {
         [center + egui::vec2(0.0, 0.5), center + egui::vec2(0.0, 5.5)],
         stroke,
     );
+}
+
+pub enum ProfileAction {
+    Select(usize),
+    Edit(usize),
+    Rename(usize, String),
+    Delete(usize),
+    Add,
+}
+
+#[derive(Clone)]
+enum ProfileAsk {
+    Rename(usize, String),
+    Delete(usize),
+}
+
+pub fn profile_list(
+    ui: &mut Ui,
+    id: egui::Id,
+    names: &[(String, String)],
+    selected: Option<usize>,
+    add: &str,
+) -> Option<ProfileAction> {
+    let mut action = None;
+    ui.set_min_width(240.0);
+    let filter_id = id.with("filter");
+    let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+    let field = ui.add(
+        TextEdit::singleline(&mut filter)
+            .hint_text("Поиск…")
+            .desired_width(f32::INFINITY),
+    );
+    if ui.data(|d| d.get_temp::<bool>(id.with("focused"))).is_none() {
+        field.request_focus();
+        ui.data_mut(|d| {
+            d.insert_temp(id.with("focused"), true);
+            d.remove::<(usize, egui::Pos2)>(id.with("menu"));
+        });
+    }
+    let needle = filter.to_lowercase();
+    let shown: Vec<usize> = (0..names.len())
+        .filter(|i| {
+            needle.is_empty()
+                || names[*i].0.to_lowercase().contains(&needle)
+                || names[*i].1.to_lowercase().contains(&needle)
+        })
+        .collect();
+    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        if let Some(first) = shown.first() {
+            action = Some(ProfileAction::Select(*first));
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(filter_id, filter));
+    ui.add_space(2.0);
+    egui::ScrollArea::vertical()
+        .max_height(320.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            if shown.is_empty() {
+                ui.weak("Ничего не найдено");
+            }
+            for index in shown {
+                let (name, kind) = &names[index];
+                let text = if kind.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name}  ·  {kind}")
+                };
+                let response = ui.add(
+                    egui::Button::selectable(selected == Some(index), text)
+                        .min_size(egui::vec2(ui.available_width(), 0.0)),
+                );
+                if response.clicked() {
+                    action = Some(ProfileAction::Select(index));
+                }
+                if response.secondary_clicked() {
+                    let pos = ui.input(|i| i.pointer.interact_pos()).unwrap_or(response.rect.center());
+                    ui.data_mut(|d| d.insert_temp(id.with("menu"), (index, pos)));
+                }
+            }
+        });
+    if let Some((index, pos)) = ui.data(|d| d.get_temp::<(usize, egui::Pos2)>(id.with("menu"))) {
+        let name = names.get(index).map(|n| n.0.clone()).unwrap_or_default();
+        let area = egui::Area::new(id.with("menu_area"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(pos)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::menu(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(170.0);
+                    if ui.button("Редактировать…").clicked() {
+                        action = Some(ProfileAction::Edit(index));
+                    }
+                    if ui.button("Переименовать…").clicked() {
+                        let ask = ProfileAsk::Rename(index, name.clone());
+                        ui.data_mut(|d| d.insert_temp(id.with("ask"), ask));
+                    }
+                    if ui.button("Удалить…").clicked() {
+                        ui.data_mut(|d| d.insert_temp(id.with("ask"), ProfileAsk::Delete(index)));
+                    }
+                });
+            });
+        let clicked_outside = ui.input(|i| i.pointer.any_pressed())
+            && ui
+                .input(|i| i.pointer.interact_pos())
+                .is_some_and(|p| !area.response.rect.contains(p));
+        if clicked_outside && !ui.input(|i| i.pointer.secondary_pressed()) {
+            ui.data_mut(|d| d.remove::<(usize, egui::Pos2)>(id.with("menu")));
+        }
+    }
+    ui.separator();
+    if ui.button(add).clicked() {
+        action = Some(ProfileAction::Add);
+    }
+    if action.is_some() || ui.data(|d| d.get_temp::<ProfileAsk>(id.with("ask"))).is_some() {
+        ui.data_mut(|d| {
+            d.remove::<String>(filter_id);
+            d.remove::<bool>(id.with("focused"));
+            d.remove::<(usize, egui::Pos2)>(id.with("menu"));
+        });
+        ui.close();
+    }
+    action
+}
+
+pub fn profile_dialogs(
+    ctx: &egui::Context,
+    pal: &Palette,
+    id: egui::Id,
+    names: &[(String, String)],
+) -> Option<ProfileAction> {
+    let mut ask: ProfileAsk = ctx.data(|d| d.get_temp(id.with("ask")))?;
+    let mut action = None;
+    let mut done = false;
+    let modal = egui::Modal::new(id.with("modal"))
+        .frame(window_frame(pal))
+        .show(ctx, |ui| {
+            ui.set_width(340.0);
+            match &mut ask {
+                ProfileAsk::Rename(index, name) => {
+                    ui.label(RichText::new("Переименовать профиль").size(15.5).color(pal.text));
+                    ui.add_space(8.0);
+                    let field = ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY));
+                    field.request_focus();
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let ok = ui.add(primary("Переименовать", pal)).clicked() || enter;
+                        if ok && !name.trim().is_empty() {
+                            action = Some(ProfileAction::Rename(*index, name.trim().to_owned()));
+                        }
+                        if ui.add(secondary("Отмена", pal)).clicked() {
+                            done = true;
+                        }
+                    });
+                }
+                ProfileAsk::Delete(index) => {
+                    let title = names.get(*index).map(|n| n.0.clone()).unwrap_or_default();
+                    ui.label(RichText::new("Удалить профиль?").size(15.5).color(pal.text));
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(format!("«{title}» будет удалён вместе с паролем.")).color(pal.subtext));
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::new(RichText::new("Удалить").color(pal.base)).fill(pal.warn))
+                            .clicked()
+                        {
+                            action = Some(ProfileAction::Delete(*index));
+                        }
+                        if ui.add(secondary("Отмена", pal)).clicked() {
+                            done = true;
+                        }
+                    });
+                }
+            }
+        });
+    if done || action.is_some() || modal.should_close() {
+        ctx.data_mut(|d| d.remove::<ProfileAsk>(id.with("ask")));
+    } else {
+        ctx.data_mut(|d| d.insert_temp(id.with("ask"), ask));
+    }
+    action
 }
