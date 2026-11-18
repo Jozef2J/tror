@@ -336,7 +336,8 @@ impl ConsolePanel {
     }
 
     fn quick_menu(&mut self, ui: &mut Ui, ctx: &egui::Context) {
-        ui.set_min_width(240.0);
+        ui.set_width(280.0);
+        ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
         let mut open = None;
         let names: Vec<(String, String)> = self
             .store
@@ -875,13 +876,6 @@ impl ConsolePanel {
                         }
                     }
                 });
-                ui.add_space(6.0);
-                if ui
-                    .add(Button::new("Добавить подключение (SSH, Telnet, Mosh)…").fill(pal.surface))
-                    .clicked()
-                {
-                    self.open_editor(true);
-                }
                 if let Some(action) = action {
                     self.profile_action(action, ctx);
                 }

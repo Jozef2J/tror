@@ -1102,14 +1102,32 @@ fn body(
             .spacing([22.0, 7.0])
             .show(ui, |ui| {
                 ui.label("Цветовая схема");
-                ComboBox::from_id_salt("tror_prefs_scheme")
-                    .width(240.0)
-                    .selected_text(scheme.as_str())
-                    .show_ui(ui, |ui| {
-                        for name in highlight::theme_names() {
-                            ui.selectable_value(scheme, name.to_owned(), name);
-                        }
-                    });
+                ui.horizontal(|ui| {
+                    ComboBox::from_id_salt("tror_prefs_scheme")
+                        .width(240.0)
+                        .selected_text(scheme.as_str())
+                        .show_ui(ui, |ui| {
+                            for name in highlight::theme_names() {
+                                ui.selectable_value(scheme, name.to_owned(), name);
+                            }
+                        });
+                    let default = if dark {
+                        highlight::DEFAULT_DARK
+                    } else {
+                        highlight::DEFAULT_LIGHT
+                    };
+                    let custom = scheme.as_str() != default || !code.is_empty();
+                    if ui
+                        .add_enabled(custom, Button::new("Сбросить").fill(pal.surface))
+                        .on_hover_text(format!(
+                            "Схема «{default}» без собственных цветов, только для {mode} темы"
+                        ))
+                        .clicked()
+                    {
+                        *scheme = default.to_owned();
+                        code.clear();
+                    }
+                });
                 ui.end_row();
                 for (key, label) in SYNTAX_PARTS {
                     ui.label(label);

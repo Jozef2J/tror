@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use eframe::egui::{self, Button, Color32, RichText, ScrollArea, Sense, TextEdit, Ui};
+use eframe::egui::{self, Button, Color32, RichText, ScrollArea, Sense, Ui};
 use regex::{Regex, RegexBuilder};
 
 use crate::{document::Document, theme::Palette};
@@ -48,6 +48,7 @@ pub struct FindFiles {
     query: String,
     replace: String,
     case: bool,
+    word: bool,
     regex: bool,
     mask: String,
     hits: Vec<Hit>,
@@ -58,12 +59,15 @@ pub struct FindFiles {
     searched: String,
 }
 
-pub fn pattern(query: &str, regex: bool, case: bool) -> Result<Regex, String> {
-    let source = if regex {
+pub fn pattern(query: &str, regex: bool, case: bool, word: bool) -> Result<Regex, String> {
+    let mut source = if regex {
         query.to_owned()
     } else {
         regex::escape(query)
     };
+    if word {
+        source = format!(r"\b(?:{source})\b");
+    }
     RegexBuilder::new(&source)
         .case_insensitive(!case)
         .multi_line(true)
@@ -182,7 +186,7 @@ impl FindFiles {
         self.cancel();
         self.hits.clear();
         self.confirm = false;
-        let re = match pattern(&self.query, self.regex, self.case) {
+        let re = match pattern(&self.query, self.regex, self.case, self.word) {
             Ok(re) => re,
             Err(e) => {
                 self.note = e;
@@ -227,7 +231,7 @@ impl FindFiles {
     }
 
     fn start_replace(&mut self, skip: Vec<PathBuf>, ctx: &egui::Context) {
-        let Ok(re) = pattern(&self.query, self.regex, self.case) else {
+        let Ok(re) = pattern(&self.query, self.regex, self.case, self.word) else {
             return;
         };
         let mut paths: Vec<PathBuf> = self.hits.iter().map(|h| h.path.clone()).collect();
@@ -339,73 +343,73 @@ impl FindFiles {
             Some(chosen)
         };
         let mut go = false;
-        let label = |ui: &mut Ui, text: &str| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(86.0, 28.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| ui.label(RichText::new(text).color(pal.subtext)),
+        use crate::widgets::{FORM_ROW, form_field, form_row, toggle};
+        ui.spacing_mut().item_spacing.y = 8.0;
+        form_row(ui, pal, "Найти", |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let width = crate::widgets::field_width(ui, 3.0 * 32.0 + 6.0);
+            let query =
+                ui.add(form_field(&mut self.query, "текст или выражение").desired_width(width));
+            if std::mem::take(&mut self.focus) {
+                query.request_focus();
+            }
+            go |= query.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.add_space(6.0);
+            toggle(ui, pal, &mut self.case, "Aa", "Учитывать регистр");
+            toggle(ui, pal, &mut self.word, "ab", "Слово целиком");
+            toggle(ui, pal, &mut self.regex, ".*", "Регулярное выражение");
+        });
+        form_row(ui, pal, "Заменить на", |ui| {
+            let hint = if self.regex { "$1, ${name}" } else { "" };
+            ui.add(
+                form_field(&mut self.replace, hint)
+                    .desired_width(crate::widgets::field_width(ui, 0.0)),
             );
-        };
-        fn field(text: &mut String, hint: String) -> TextEdit<'_> {
-            TextEdit::singleline(text)
-                .hint_text(hint)
-                .margin(egui::Margin::symmetric(8, 6))
-        }
-        egui::Grid::new("tror_find_files")
-            .num_columns(2)
-            .spacing([10.0, 8.0])
-            .show(ui, |ui| {
-                label(ui, "Найти");
-                let query = ui.add(
-                    field(&mut self.query, "текст или выражение".into()).desired_width(f32::INFINITY),
-                );
-                if std::mem::take(&mut self.focus) {
-                    query.request_focus();
+        });
+        form_row(ui, pal, "Папка", |ui| {
+            let hint = project
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "выберите папку".into());
+            ui.add(
+                form_field(&mut self.dir, hint)
+                    .desired_width(crate::widgets::field_width(ui, 94.0)),
+            );
+            if ui
+                .add(
+                    Button::new("Выбрать…")
+                        .fill(pal.surface)
+                        .min_size(egui::vec2(88.0, FORM_ROW)),
+                )
+                .clicked()
+            {
+                let mut dialog = rfd::FileDialog::new();
+                if let Some(start) = root.as_deref().or(project) {
+                    dialog = dialog.set_directory(start);
                 }
-                go |= query.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                ui.end_row();
-                label(ui, "Заменить на");
-                ui.add(field(&mut self.replace, String::new()).desired_width(f32::INFINITY));
-                ui.end_row();
-                label(ui, "Папка");
-                ui.horizontal(|ui| {
-                    let hint = project
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "выберите папку".into());
-                    ui.add(field(&mut self.dir, hint).desired_width((ui.available_width() - 96.0).max(60.0)));
-                    if ui.add(Button::new("Выбрать…").min_size(egui::vec2(88.0, 28.0))).clicked() {
-                        let mut dialog = rfd::FileDialog::new();
-                        if let Some(start) = root.as_deref().or(project) {
-                            dialog = dialog.set_directory(start);
-                        }
-                        if let Some(dir) = dialog.pick_folder() {
-                            self.dir = dir.display().to_string();
-                        }
-                    }
-                });
-                ui.end_row();
-                label(ui, "Файлы");
-                ui.add(
-                    field(&mut self.mask, "все; или маски через запятую: *.php, *.js".into())
-                        .desired_width(f32::INFINITY),
-                );
-                ui.end_row();
-                ui.label("");
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 16.0;
-                    ui.checkbox(&mut self.case, "Учитывать регистр");
-                    ui.checkbox(&mut self.regex, "Регулярное выражение");
-                });
-                ui.end_row();
-            });
+                if let Some(dir) = dialog.pick_folder() {
+                    self.dir = dir.display().to_string();
+                }
+            }
+        });
+        form_row(ui, pal, "Файлы", |ui| {
+            ui.add(
+                form_field(&mut self.mask, "все; или маски через запятую: *.php, *.js")
+                    .desired_width(crate::widgets::field_width(ui, 0.0)),
+            );
+        });
         ui.add_space(10.0);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
+            let size = egui::vec2(0.0, FORM_ROW);
             let ready = !self.query.is_empty() && !busy && root.is_some();
             go |= ui
-                .add_enabled(ready, crate::widgets::primary("Найти", pal))
+                .add_enabled(ready, crate::widgets::primary("Найти", pal).min_size(size))
                 .clicked();
-            if busy && ui.add(Button::new("Остановить").fill(pal.surface)).clicked() {
+            if busy
+                && ui
+                    .add(Button::new("Остановить").fill(pal.surface).min_size(size))
+                    .clicked()
+            {
                 self.cancel();
                 self.note = "Остановлено".to_owned();
             }
@@ -429,7 +433,12 @@ impl FindFiles {
                     self.confirm = false;
                 }
             } else if ui
-                .add_enabled(fresh, Button::new("Заменить во всех найденных…").fill(pal.surface))
+                .add_enabled(
+                    fresh,
+                    Button::new("Заменить во всех найденных…")
+                        .fill(pal.surface)
+                        .min_size(size),
+                )
                 .on_disabled_hover_text("Сначала выполните поиск")
                 .clicked()
             {
@@ -464,12 +473,11 @@ impl FindFiles {
         ui.separator();
         ui.spacing_mut().item_spacing.y = 0.0;
         let row_h = 22.0;
-        let tall = (self.hits.len() as f32 * row_h).min(300.0);
+        let tall = ui.available_height().max(row_h);
         ScrollArea::vertical()
             .id_salt("tror_find_files_hits")
-            .min_scrolled_height(tall)
             .max_height(tall)
-            .auto_shrink([false, true])
+            .auto_shrink(false)
             .show_rows(ui, row_h, self.hits.len(), |ui, range| {
                 for hit in &self.hits[range] {
                     let (rect, response) = ui.allocate_exact_size(
@@ -537,7 +545,7 @@ mod tests {
         assert_eq!(all.len(), 4);
         assert_eq!(files(&dir, "*.js", &stop).len(), 1);
 
-        let re = pattern("$price", false, true).unwrap();
+        let re = pattern("$price", false, true, false).unwrap();
         let mut hits = Vec::new();
         for path in &all {
             search_file(path, &re, &mut hits);
@@ -559,7 +567,7 @@ mod tests {
                 ("ru.php".to_owned(), 1)
             ]
         );
-        let loose = pattern("price", false, false).unwrap();
+        let loose = pattern("price", false, false, false).unwrap();
         let mut any = Vec::new();
         search_file(&dir.join("sub/b.js"), &loose, &mut any);
         assert_eq!(any.len(), 1);

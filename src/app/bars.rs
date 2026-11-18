@@ -169,40 +169,19 @@ impl TrorApp {
     }
 
     pub(super) fn search_bar(&mut self, ui: &mut Ui, pal: &Palette, _actions: &mut Vec<Action>) {
+        use crate::widgets::{FORM_ROW, form_field, form_row, toggle};
         let selection = self.docs.get(self.active).map(|d| {
             let range = d.selection();
             (range.start, range.end)
         });
         let s = &mut self.search;
-        let toggle = |ui: &mut Ui, value: &mut bool, label: &str, hint: &str| {
-            let text = RichText::new(label).monospace().color(if *value {
-                pal.accent
-            } else {
-                pal.subtext
-            });
-            let mut button = Button::new(text).min_size(egui::vec2(30.0, 28.0));
-            button = if *value {
-                button.fill(pal.surface)
-            } else {
-                button.frame(false)
-            };
-            let clicked = ui.add(button).on_hover_text(hint).clicked();
-            if clicked {
-                *value = !*value;
-            }
-            clicked
-        };
-        fn field<'a>(text: &'a mut String, hint: &str, width: f32) -> TextEdit<'a> {
-            TextEdit::singleline(text)
-                .hint_text(hint.to_owned())
-                .desired_width(width)
-                .margin(Margin::symmetric(8, 6))
-        }
-        let tools_w = 4.0 * 32.0 + 2.0 * 30.0 + 12.0;
-        ui.horizontal(|ui| {
+        let tools_w = 4.0 * 32.0 + 2.0 * 30.0 + 10.0;
+        ui.spacing_mut().item_spacing.y = 8.0;
+        form_row(ui, pal, "Найти", |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            let width = (ui.available_width() - tools_w).max(80.0);
-            let query = ui.add(field(&mut s.query, "Найти", width));
+            let width = crate::widgets::field_width(ui, tools_w);
+            let query =
+                ui.add(form_field(&mut s.query, "текст или выражение").desired_width(width));
             if std::mem::take(&mut s.focus_query) {
                 query.request_focus();
             }
@@ -216,11 +195,12 @@ impl TrorApp {
                 query.request_focus();
             }
             ui.add_space(6.0);
-            changed |= toggle(ui, &mut s.case, "Aa", "Учитывать регистр");
-            changed |= toggle(ui, &mut s.word, "ab", "Слово целиком");
-            changed |= toggle(ui, &mut s.regex, ".*", "Регулярное выражение");
+            changed |= toggle(ui, pal, &mut s.case, "Aa", "Учитывать регистр");
+            changed |= toggle(ui, pal, &mut s.word, "ab", "Слово целиком");
+            changed |= toggle(ui, pal, &mut s.regex, ".*", "Регулярное выражение");
             changed |= toggle(
                 ui,
+                pal,
                 &mut s.extended,
                 "\\n",
                 "Расширенный режим: \\n, \\r, \\t, \\0, \\xFF, \\uFFFF",
@@ -229,7 +209,7 @@ impl TrorApp {
                 s.pending = Some(Pending::FromAnchor);
                 s.last_replaced = None;
             }
-            ui.add_space(4.0);
+            ui.add_space(2.0);
             if icon_button(ui, pal, Icon::Up)
                 .on_hover_text("Найти ранее (Shift+F3)")
                 .clicked()
@@ -243,27 +223,32 @@ impl TrorApp {
                 s.pending = Some(Pending::Next);
             }
         });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let width = (ui.available_width() - tools_w).max(80.0);
-            let hint = if s.regex {
-                "Заменить на ($1, ${name})"
-            } else {
-                "Заменить на"
-            };
-            let replace = ui.add(field(&mut s.replacement, hint, width));
+        form_row(ui, pal, "Заменить на", |ui| {
+            let hint = if s.regex { "$1, ${name}" } else { "" };
+            let replace = ui.add(
+                form_field(&mut s.replacement, hint)
+                    .desired_width(crate::widgets::field_width(ui, 0.0)),
+            );
             if std::mem::take(&mut s.replace_mode) {
                 replace.request_focus();
             }
-            ui.add_space(4.0);
+        });
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
             let ready = !s.query.is_empty();
+            let size = egui::vec2(0.0, FORM_ROW);
+            if ui
+                .add_enabled(ready, crate::widgets::primary("Найти", pal).min_size(size))
+                .on_hover_text("Найти далее (Enter, F3)")
+                .clicked()
+            {
+                s.pending = Some(Pending::Next);
+            }
             if ui
                 .add_enabled(
                     ready,
-                    Button::new("Заменить")
-                        .fill(pal.surface)
-                        .min_size(egui::vec2(0.0, 28.0)),
+                    Button::new("Заменить").fill(pal.surface).min_size(size),
                 )
                 .clicked()
             {
@@ -272,24 +257,18 @@ impl TrorApp {
             if ui
                 .add_enabled(
                     ready,
-                    Button::new("Заменить все")
-                        .fill(pal.surface)
-                        .min_size(egui::vec2(0.0, 28.0)),
+                    Button::new("Заменить все").fill(pal.surface).min_size(size),
                 )
                 .clicked()
             {
                 s.pending = Some(Pending::ReplaceAll);
             }
-        });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let ready = !s.query.is_empty() && !s.matches.is_empty();
             if ui
                 .add_enabled(
-                    ready,
+                    ready && !s.matches.is_empty(),
                     Button::new("Удалить повторения")
                         .fill(pal.surface)
-                        .min_size(egui::vec2(0.0, 28.0)),
+                        .min_size(size),
                 )
                 .on_hover_text(
                     "Удаляет все найденные совпадения. Если совпадение занимает строку целиком, \
@@ -330,6 +309,70 @@ impl TrorApp {
                 ui.add(egui::Label::new(info.small()).truncate());
             });
         });
+        ui.add_space(6.0);
+        ui.separator();
+        let Some(doc) = self.docs.get_mut(self.active) else {
+            return;
+        };
+        let matches = &self.search.matches;
+        let current = matches.partition_point(|m| m.0 < doc.sel.0.min(doc.sel.1));
+        let row_h = 22.0;
+        let mut pick = None;
+        ui.spacing_mut().item_spacing.y = 0.0;
+        egui::ScrollArea::vertical()
+            .id_salt("tror_find_doc_hits")
+            .max_height(ui.available_height().max(row_h))
+            .auto_shrink(false)
+            .show_rows(ui, row_h, matches.len(), |ui, rows| {
+                for index in rows {
+                    let (start, end) = matches[index];
+                    let line = doc.rope.char_to_line(start.min(doc.len()));
+                    let text: String = doc
+                        .rope
+                        .line(line)
+                        .chars()
+                        .take(300)
+                        .collect::<String>()
+                        .trim()
+                        .replace('\t', "  ");
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_h),
+                        Sense::click(),
+                    );
+                    let painter = ui.painter_at(rect);
+                    if index == current && doc.sel == (start, end) {
+                        painter.rect_filled(rect, 4.0, pal.surface);
+                    } else if response.hovered() {
+                        painter.rect_filled(rect, 4.0, pal.crust);
+                    }
+                    let font = egui::FontId::monospace(12.0);
+                    let placed = painter.text(
+                        rect.left_center() + egui::vec2(6.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        format!("{}", line + 1),
+                        font.clone(),
+                        pal.accent,
+                    );
+                    painter.text(
+                        egui::pos2(
+                            rect.left() + 60.0_f32.max(placed.width() + 16.0),
+                            rect.center().y,
+                        ),
+                        egui::Align2::LEFT_CENTER,
+                        text,
+                        font,
+                        pal.text,
+                    );
+                    if response.clicked() {
+                        pick = Some((start, end));
+                    }
+                }
+            });
+        if let Some(sel) = pick {
+            doc.sel = sel;
+            doc.goal_x = None;
+            doc.reveal = true;
+        }
     }
 
     pub(super) fn status_bar(&mut self, ui: &mut Ui, pal: &Palette) {

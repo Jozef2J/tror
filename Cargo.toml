@@ -1,6 +1,6 @@
 [package]
 name = "trorpad"
-version = "0.24.0"
+version = "0.25.0"
 description = "TrorPad — быстрый компактный редактор кода проекта Tror"
 edition = "2024"
 

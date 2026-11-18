@@ -1,8 +1,8 @@
 use super::*;
 
 const TITLE: &str = "Поиск — TrorPad";
-const WIDTH: f32 = 560.0;
-const WIDE: f32 = 660.0;
+const WIDTH: f32 = 660.0;
+const HEIGHT: f32 = 520.0;
 const FADED: u8 = 115;
 
 #[derive(Default)]
@@ -11,12 +11,11 @@ pub(super) struct FindWindow {
     pub focus: bool,
     moved: bool,
     placed: Option<egui::Pos2>,
-    height: f32,
     faded: Option<bool>,
     focused: bool,
     on_top: Option<bool>,
+    owned: bool,
     pub scope: usize,
-    width: f32,
     tries: u8,
 }
 
@@ -33,9 +32,10 @@ impl TrorApp {
             self.find.faded = None;
             self.find.focused = false;
             self.find.on_top = None;
+            self.find.owned = false;
             return;
         }
-        if self.find.on_top != Some(app_focused) {
+        if !super::owner::OWNED && self.find.on_top != Some(app_focused) {
             self.find.on_top = Some(app_focused);
             let level = if app_focused {
                 egui::WindowLevel::AlwaysOnTop
@@ -44,7 +44,7 @@ impl TrorApp {
             };
             ctx.send_viewport_cmd_to(id, ViewportCommand::WindowLevel(level));
         }
-        let width = if self.search.files { WIDE } else { WIDTH };
+        let width = WIDTH;
         let root = ctx.input(|i| i.viewport().inner_rect);
         if !self.find.moved
             && let (Some(anchor), Some(root)) = (self.find.anchor, root)
@@ -57,18 +57,17 @@ impl TrorApp {
                 self.find.placed = Some(pos);
             }
         }
-        let height = if self.find.height > 0.0 {
-            self.find.height
-        } else {
-            86.0
-        };
         let mut builder = egui::ViewportBuilder::default()
             .with_title(TITLE)
             .with_decorations(false)
             .with_resizable(false)
             .with_taskbar(false)
-            .with_inner_size([width, height])
-            .with_window_level(egui::WindowLevel::AlwaysOnTop);
+            .with_inner_size([width, HEIGHT])
+            .with_window_level(if super::owner::OWNED {
+                egui::WindowLevel::Normal
+            } else {
+                egui::WindowLevel::AlwaysOnTop
+            });
         if let Some(pos) = self.find.placed {
             builder = builder.with_position(pos);
         }
@@ -76,6 +75,9 @@ impl TrorApp {
             let ctx = ui.ctx().clone();
             let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
             self.find.focused = focused;
+            if !self.find.owned {
+                self.find.owned = super::owner::adopt(TITLE);
+            }
             if std::mem::take(&mut self.find.focus) {
                 self.find.tries = 30;
             }
@@ -122,12 +124,6 @@ impl TrorApp {
                     } else {
                         self.search_bar(ui, &pal, actions);
                     }
-                    let used = ui.min_rect().height() + 24.0;
-                    if (used - self.find.height).abs() > 1.0 || self.find.width != width {
-                        self.find.height = used;
-                        self.find.width = width;
-                        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(width, used)));
-                    }
                 });
             if ctx.input(|i| i.viewport().close_requested()) {
                 actions.push(Action::CloseSearch);
@@ -142,36 +138,22 @@ impl TrorApp {
 impl TrorApp {
     fn find_tabs(&mut self, ui: &mut Ui, pal: &Palette, actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
-            egui::Frame::new()
-                .fill(pal.crust)
-                .corner_radius(7)
-                .inner_margin(Margin::same(2))
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    for (files, label) in [(false, "В документе"), (true, "В файлах")]
-                    {
-                        let active = self.search.files == files;
-                        let text =
-                            RichText::new(label).color(if active { pal.text } else { pal.subtext });
-                        let button = Button::new(text)
-                            .min_size(egui::vec2(104.0, 24.0))
-                            .corner_radius(5)
-                            .fill(if active {
-                                pal.surface
-                            } else {
-                                Color32::TRANSPARENT
-                            });
-                        if ui.add(button).clicked() && !active {
-                            self.search.files = files;
-                            self.find.focus = true;
-                            if files {
-                                self.find_files.show();
-                            } else {
-                                self.search.focus_query = true;
-                            }
-                        }
-                    }
-                });
+            let mut files = self.search.files;
+            if crate::widgets::segmented(
+                ui,
+                pal,
+                &mut files,
+                &[(false, "В документе"), (true, "В файлах")],
+                104.0,
+            ) {
+                self.search.files = files;
+                self.find.focus = true;
+                if files {
+                    self.find_files.show();
+                } else {
+                    self.search.focus_query = true;
+                }
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icon_button(ui, pal, Icon::Close)
                     .on_hover_text("Закрыть (Esc, Ctrl+F)")
@@ -201,11 +183,7 @@ impl TrorApp {
         }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
-            ui.allocate_ui_with_layout(
-                egui::vec2(86.0, 28.0),
-                Layout::left_to_right(Align::Center),
-                |ui| ui.label(RichText::new("Где искать").color(pal.subtext)),
-            );
+            crate::widgets::form_label(ui, pal, "Где искать");
             let current = scopes
                 .iter()
                 .find(|s| s.0 == self.find.scope)

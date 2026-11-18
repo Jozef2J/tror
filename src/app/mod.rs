@@ -33,6 +33,7 @@ mod hosts;
 mod look;
 mod menu;
 mod modals;
+mod owner;
 mod plugin_run;
 mod plugin_ui;
 mod tabs;
@@ -353,6 +354,7 @@ pub struct TrorApp {
     macros: editor::Macro,
     macro_dialog: Option<MacroDialog>,
     find: find::FindWindow,
+    floats: owner::Floats,
     recovery: crate::recover::Recovery,
     confirm: Option<Confirm>,
     allow_close: bool,
@@ -451,6 +453,7 @@ impl TrorApp {
             macros: Default::default(),
             macro_dialog: None,
             find: Default::default(),
+            floats: Default::default(),
             recovery: Default::default(),
             confirm: None,
             allow_close: false,

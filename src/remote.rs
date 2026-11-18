@@ -516,6 +516,7 @@ pub enum Cmd {
         path: String,
         mtime: u64,
     },
+    Extract(String),
 }
 
 pub enum Event {
@@ -599,7 +600,7 @@ fn sort(entries: &mut [Entry]) {
 
 enum Backend {
     Sftp {
-        _session: ssh2::Session,
+        session: ssh2::Session,
         sftp: ssh2::Sftp,
     },
     Ftp(Box<suppaftp::NativeTlsFtpStream>),
@@ -745,7 +746,7 @@ fn connect_sftp(
         .unwrap_or_else(|_| "/".into());
     Ok((
         Backend::Sftp {
-            _session: session,
+            session,
             sftp,
         },
         home,
@@ -1274,6 +1275,32 @@ impl Backend {
         Ok(())
     }
 
+    fn extract(&mut self, path: &str) -> Result<(), String> {
+        let Backend::Sftp { session, .. } = self else {
+            return Err("распаковка доступна только по SFTP".into());
+        };
+        let command = extract_command(path).ok_or("неизвестный формат архива")?;
+        let mut channel = session.channel_session().map_err(|e| e.to_string())?;
+        channel.exec(&command).map_err(|e| e.to_string())?;
+        let mut out = String::new();
+        let _ = channel.read_to_string(&mut out);
+        let mut err = String::new();
+        let _ = channel.stderr().read_to_string(&mut err);
+        let _ = channel.wait_close();
+        match channel.exit_status() {
+            Ok(0) => Ok(()),
+            Ok(code) => {
+                let text = err.trim();
+                Err(if text.is_empty() {
+                    format!("код завершения {code}")
+                } else {
+                    text.to_owned()
+                })
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     fn touch(&mut self, path: &str, mtime: u64) -> Result<(), String> {
         match self {
             Backend::Sftp { sftp, .. } => {
@@ -1343,6 +1370,7 @@ fn describe(cmd: &Cmd) -> String {
             if *recursive { " (recursive)" } else { "" }
         ),
         Cmd::Touch { path, mtime } => format!("[SFTP] setstat {path} mtime {mtime}"),
+        Cmd::Extract(path) => format!("[SSH] exec: {}", extract_command(path).unwrap_or_default()),
     }
 }
 
@@ -1447,7 +1475,46 @@ fn execute(
             backend.touch(path, *mtime)?;
             (Event::Changed(parent(path)), "ok".into())
         }
+        Cmd::Extract(path) => {
+            backend.extract(path)?;
+            (Event::Changed(parent(path)), "extracted".into())
+        }
     })
+}
+
+const ARCHIVES: [(&str, &str); 13] = [
+    (".tar.gz", "tar -xzf {f}"),
+    (".tgz", "tar -xzf {f}"),
+    (".tar.bz2", "tar -xjf {f}"),
+    (".tbz2", "tar -xjf {f}"),
+    (".tar.xz", "tar -xJf {f}"),
+    (".txz", "tar -xJf {f}"),
+    (".tar", "tar -xf {f}"),
+    (
+        ".zip",
+        "if command -v unzip >/dev/null 2>&1; then unzip -oq {f}; elif command -v python3 >/dev/null 2>&1; then python3 -m zipfile -e {f} .; else bsdtar -xf {f}; fi",
+    ),
+    (".gz", "gzip -dc {f} > {o}"),
+    (".bz2", "bzip2 -dc {f} > {o}"),
+    (".xz", "xz -dc {f} > {o}"),
+    (".7z", "7z x -y {f}"),
+    (".rar", "unrar x -o+ {f}"),
+];
+
+pub fn is_archive(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    ARCHIVES.iter().any(|(ext, _)| lower.ends_with(ext))
+}
+
+pub fn extract_command(path: &str) -> Option<String> {
+    let lower = path.to_lowercase();
+    let (ext, template) = ARCHIVES.iter().find(|(ext, _)| lower.ends_with(ext))?;
+    let name = file_name(path);
+    let out = name.get(..name.len().checked_sub(ext.len())?)?;
+    let run = template
+        .replace("{f}", &quote(name))
+        .replace("{o}", &quote(out));
+    Some(format!("cd {} && {run}", quote(&parent(path))))
 }
 
 fn serve(
@@ -1590,6 +1657,20 @@ pub struct SearchParams {
     pub query: String,
     pub content: bool,
     pub excludes: Vec<String>,
+    pub case: bool,
+    pub word: bool,
+    pub regex: bool,
+}
+
+fn ere_escape(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if "\\^$.|?*+()[]{}".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 pub enum SearchEvent {
@@ -1642,10 +1723,36 @@ pub fn search_command(params: &SearchParams) -> String {
     let root = quote(&params.root);
     let check = "command -v find >/dev/null 2>&1 && command -v grep >/dev/null 2>&1 || exit 97; ";
     if params.content {
+        let mut flags = String::from("-InH");
+        if !params.case {
+            flags.push_str(" -i");
+        }
+        if params.word {
+            flags.push_str(" -w");
+        }
+        flags.push_str(if params.regex { " -E" } else { " -F" });
         format!(
-            "{check}find -H {root} {prune}-type f -size -{}k -print0 2>/dev/null | xargs -0 grep -InH -i -F -e {} -- 2>/dev/null | head -n {MAX_HITS}",
+            "{check}find -H {root} {prune}-type f -size -{}k -print0 2>/dev/null | xargs -0 grep {flags} -e {} -- 2>/dev/null | head -n {MAX_HITS}",
             MAX_GREP_FILE / 1024,
             quote(&params.query)
+        )
+    } else if params.regex || params.word {
+        let mut re = if params.regex {
+            params.query.clone()
+        } else {
+            ere_escape(&params.query)
+        };
+        if params.word {
+            re = format!("(^|[^[:alnum:]_])({re})([^[:alnum:]_]|$)");
+        }
+        let (name, re) = if params.case {
+            ("$NF", re)
+        } else {
+            ("tolower($NF)", re.to_lowercase())
+        };
+        format!(
+            "{check}find -H {root} {prune}-print 2>/dev/null | RE={} awk -F/ '{name} ~ ENVIRON[\"RE\"]' | head -n {MAX_HITS}",
+            quote(&re)
         )
     } else {
         let mut glob = String::new();
@@ -1655,8 +1762,9 @@ pub fn search_command(params: &SearchParams) -> String {
             }
             glob.push(c);
         }
+        let test = if params.case { "-name" } else { "-iname" };
         format!(
-            "{check}find -H {root} {prune}-iname {} -print 2>/dev/null | head -n {MAX_HITS}",
+            "{check}find -H {root} {prune}{test} {} -print 2>/dev/null | head -n {MAX_HITS}",
             quote(&format!("*{glob}*"))
         )
     }
@@ -1777,7 +1885,14 @@ fn search_walk(
     cancel: &AtomicBool,
     emit: &dyn Fn(SearchEvent),
 ) -> usize {
-    let needle = params.query.to_lowercase();
+    let re = match crate::findfiles::pattern(&params.query, params.regex, params.case, params.word)
+    {
+        Ok(re) => re,
+        Err(e) => {
+            emit(SearchEvent::Status(e));
+            return 0;
+        }
+    };
     let mut stack = vec![params.root.clone()];
     let mut hits = 0;
     let mut dirs = 0;
@@ -1804,7 +1919,7 @@ fn search_walk(
                 stack.push(path.clone());
             }
             if !params.content {
-                if entry.name.to_lowercase().contains(&needle) {
+                if re.is_match(&entry.name) {
                     emit(SearchEvent::Hit {
                         path,
                         line: None,
@@ -1826,7 +1941,7 @@ fn search_walk(
             }
             let text = String::from_utf8_lossy(&data);
             for (number, line) in text.lines().enumerate() {
-                if line.to_lowercase().contains(&needle) {
+                if re.is_match(line) {
                     emit(SearchEvent::Hit {
                         path: path.clone(),
                         line: Some(number + 1),
@@ -1867,7 +1982,7 @@ pub fn search(
                     }
                     let sftp = session.sftp().map_err(|e| e.to_string())?;
                     let mut backend = Backend::Sftp {
-                        _session: session,
+                        session,
                         sftp,
                     };
                     Ok((
@@ -2541,6 +2656,37 @@ mod tests {
         assert!(matches!(next(), Ok(Event::Closed(_))));
     }
 
+    fn names_params() -> SearchParams {
+        SearchParams {
+            root: "/w".into(),
+            query: String::new(),
+            content: false,
+            excludes: Vec::new(),
+            case: false,
+            word: false,
+            regex: false,
+        }
+    }
+
+    #[test]
+    fn extract_commands() {
+        assert_eq!(
+            extract_command("/w/it's.tar.gz").as_deref(),
+            Some("cd '/w' && tar -xzf 'it'\\''s.tar.gz'")
+        );
+        assert_eq!(
+            extract_command("/w/a.sql.GZ").as_deref(),
+            Some("cd '/w' && gzip -dc 'a.sql.GZ' > 'a.sql'")
+        );
+        assert!(
+            extract_command("/w/a.zip")
+                .unwrap()
+                .contains("unzip -oq 'a.zip'")
+        );
+        assert!(is_archive("/w/b.TGZ"));
+        assert!(!is_archive("/w/b.php"));
+    }
+
     #[test]
     fn search_command_and_grep_parsing() {
         let params = SearchParams {
@@ -2552,6 +2698,9 @@ mod tests {
                 " node_modules ".into(),
                 String::new(),
             ],
+            case: false,
+            word: false,
+            regex: false,
         };
         let cmd = search_command(&params);
         assert!(cmd.contains("find -H '/var/www/site' \\( -path '*/bitrix/cache' -o -name 'node_modules' \\) -prune -o -type f"));
@@ -2563,6 +2712,22 @@ mod tests {
             ..params
         });
         assert!(names.contains("find -H '/var/www/site' -iname '*a\\*b*' -print"));
+        let strict = search_command(&SearchParams {
+            content: true,
+            query: "x".into(),
+            case: true,
+            word: true,
+            regex: true,
+            ..names_params()
+        });
+        assert!(strict.contains("grep -InH -w -E -e 'x' --"));
+        let named = search_command(&SearchParams {
+            content: false,
+            query: "Index.PHP".into(),
+            word: true,
+            ..names_params()
+        });
+        assert!(named.contains("RE='(^|[^[:alnum:]_])(index\\.php)([^[:alnum:]_]|$)' awk -F/ 'tolower($NF) ~ ENVIRON[\"RE\"]'"));
 
         assert_eq!(
             parse_grep_line("/www/a:b.php:12:  echo $x; // 3:4"),
@@ -2619,6 +2784,9 @@ mod tests {
             query: "needle_42".into(),
             content: true,
             excludes,
+            case: false,
+            word: false,
+            regex: false,
         };
         let (hits, note) = collect(search(&profile, known.clone(), text(Vec::new()), || {}));
         let mut found: Vec<_> = hits.iter().map(|h| (h.0.as_str(), h.1)).collect();
@@ -2648,6 +2816,9 @@ mod tests {
                 query: "B.J".into(),
                 content: false,
                 excludes: Vec::new(),
+                case: false,
+                word: false,
+                regex: false,
             },
             || {},
         ));

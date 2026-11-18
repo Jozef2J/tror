@@ -10,6 +10,103 @@ pub fn secondary(text: impl Into<String>, pal: &Palette) -> egui::Button<'static
     egui::Button::new(text.into()).fill(pal.surface)
 }
 
+pub const FORM_LABEL: f32 = 86.0;
+pub const FORM_ROW: f32 = 28.0;
+
+pub fn form_label(ui: &mut Ui, pal: &Palette, text: &str) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(FORM_LABEL, FORM_ROW),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_size(egui::vec2(FORM_LABEL, FORM_ROW));
+            ui.label(RichText::new(text).color(pal.subtext))
+        },
+    );
+}
+
+pub fn field_width(ui: &Ui, reserve: f32) -> f32 {
+    (ui.available_width() - reserve - 16.0).max(60.0)
+}
+
+pub fn form_row<R>(ui: &mut Ui, pal: &Palette, label: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    if ui.available_width() < 380.0 {
+        ui.label(RichText::new(label).color(pal.subtext));
+        return ui
+            .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                add(ui)
+            })
+            .inner;
+    }
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        form_label(ui, pal, label);
+        ui.spacing_mut().item_spacing.x = 6.0;
+        add(ui)
+    })
+    .inner
+}
+
+pub fn form_field<'a>(text: &'a mut String, hint: impl Into<egui::WidgetText>) -> TextEdit<'a> {
+    TextEdit::singleline(text)
+        .hint_text(hint)
+        .margin(egui::Margin::symmetric(8, 6))
+}
+
+pub fn toggle(ui: &mut Ui, pal: &Palette, value: &mut bool, label: &str, hint: &str) -> bool {
+    let text =
+        RichText::new(label)
+            .monospace()
+            .color(if *value { pal.accent } else { pal.subtext });
+    let button = egui::Button::new(text).fill(if *value {
+        pal.surface
+    } else {
+        Color32::TRANSPARENT
+    });
+    let clicked = ui
+        .add_sized(egui::vec2(30.0, FORM_ROW), button)
+        .on_hover_text(hint)
+        .clicked();
+    if clicked {
+        *value = !*value;
+    }
+    clicked
+}
+
+pub fn segmented<T: PartialEq + Copy>(
+    ui: &mut Ui,
+    pal: &Palette,
+    value: &mut T,
+    options: &[(T, &str)],
+    width: f32,
+) -> bool {
+    let mut changed = false;
+    egui::Frame::new()
+        .fill(pal.crust)
+        .corner_radius(7)
+        .inner_margin(egui::Margin::same(2))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (option, label) in options {
+                let active = *value == *option;
+                let text = RichText::new(*label).color(if active { pal.text } else { pal.subtext });
+                let button = egui::Button::new(text)
+                    .min_size(egui::vec2(width, 24.0))
+                    .corner_radius(5)
+                    .fill(if active {
+                        pal.surface
+                    } else {
+                        Color32::TRANSPARENT
+                    });
+                if ui.add(button).clicked() && !active {
+                    *value = *option;
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
 pub fn window_frame(pal: &Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(pal.mantle)
@@ -891,11 +988,15 @@ pub fn profile_list(
 ) -> Option<ProfileAction> {
     let mut action = None;
     ui.set_min_width(240.0);
+    ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
     let filter_id = id.with("filter");
     let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
     let field = ui.add(
         TextEdit::singleline(&mut filter)
             .hint_text("Поиск…")
+            .margin(egui::Margin::symmetric(8, 4))
+            .min_size(egui::vec2(0.0, 26.0))
+            .align(egui::Align2::LEFT_CENTER)
             .desired_width(f32::INFINITY),
     );
     if ui

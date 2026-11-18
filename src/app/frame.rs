@@ -343,6 +343,10 @@ impl eframe::App for TrorApp {
         dock::remember_homes(&dock);
         self.settings.homes = dock::homes();
         self.dock = dock;
+        if ctx.input(|i| i.viewport().focused) == Some(true) {
+            owner::remember_main();
+        }
+        self.floats.prune(&self.settings.detached);
         for pane in self.settings.detached.clone() {
             let title = match pane {
                 Pane::Doc(id) => self
@@ -357,23 +361,33 @@ impl eframe::App for TrorApp {
             let mut hidden = false;
             let (min_w, min_h) = pane.min_size();
             let mut builder = egui::ViewportBuilder::default()
-                .with_title(title)
+                .with_title(title.clone())
                 .with_decorations(false)
                 .with_taskbar(false)
                 .with_resizable(true)
                 .with_inner_size([860.0, 580.0])
                 .with_min_inner_size([min_w + 16.0, min_h + 48.0]);
-            if let Some((_, [x, y, w, h])) = self.settings.floats.iter().find(|(p, _)| *p == pane) {
+            if !self.floats.spawn.contains_key(&pane)
+                && let Some((_, rect)) = self.settings.floats.iter().find(|(p, _)| *p == pane)
+            {
+                self.floats.spawn.insert(pane, *rect);
+            }
+            if let Some([x, y, w, h]) = self.floats.spawn.get(&pane) {
                 builder = builder
                     .with_position([*x, *y])
                     .with_inner_size([w.max(min_w + 16.0), h.max(min_h + 16.0)]);
             }
             let mut placed = None;
+            let owned = self.floats.owned.contains(&pane);
+            let title_text = title.clone();
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of(("tror_window", pane)),
                 builder,
                 |ui, _class| {
                     closed = ui.input(|i| i.viewport().close_requested());
+                    if !owned && owner::adopt(&title_text) {
+                        self.floats.owned.insert(pane);
+                    }
                     placed = ui.input(|i| {
                         let outer = i.viewport().outer_rect?;
                         let inner = i.viewport().inner_rect?;

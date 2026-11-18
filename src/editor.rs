@@ -142,11 +142,7 @@ fn url_at(doc: &Document, pos: usize) -> Option<String> {
 fn line_span(doc: &Document, a: usize, b: usize) -> (usize, usize) {
     let (lo, hi) = (a.min(b), a.max(b));
     let start = doc.rope.line_to_char(lo);
-    let end = if hi + 1 < doc.line_count() {
-        doc.rope.line_to_char(hi + 1)
-    } else {
-        doc.len()
-    };
+    let end = doc.rope.line_to_char(hi) + doc.line_len(hi);
     if b < a { (end, start) } else { (start, end) }
 }
 
@@ -2110,7 +2106,7 @@ mod tests {
         assert_eq!(url_at(&doc, 36).as_deref(), Some("https://www.site.ru"));
         assert_eq!(url_at(&doc, 1), None);
         assert_eq!(url_at(&doc, 48), None);
-        assert_eq!(line_span(&doc, 0, 0), (0, 46));
+        assert_eq!(line_span(&doc, 0, 0), (0, 45));
         assert_eq!(line_span(&doc, 1, 0), (doc.len(), 0));
     }
 }

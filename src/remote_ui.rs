@@ -150,6 +150,9 @@ pub struct RemotePanel {
     search_query: String,
     search_root: String,
     search_content: bool,
+    search_case: bool,
+    search_word: bool,
+    search_regex: bool,
     search_excludes: String,
     search_job: Option<remote::SearchJob>,
     hits: Vec<(String, Option<usize>, String)>,
@@ -183,6 +186,9 @@ impl RemotePanel {
             search_query: String::new(),
             search_root: String::new(),
             search_content: true,
+            search_case: false,
+            search_word: false,
+            search_regex: false,
             search_excludes: store
                 .search_excludes
                 .clone()
@@ -265,6 +271,15 @@ impl RemotePanel {
     pub fn site_url(&self, profile: &str, path: &str) -> Option<String> {
         let profile = self.store.profiles.iter().find(|p| p.name == profile)?;
         crate::preview::remote_url(&profile.url, &profile.directory, path)
+    }
+
+    fn sftp(&self) -> bool {
+        self.conn.as_ref().is_some_and(|c| {
+            self.store
+                .profiles
+                .iter()
+                .any(|p| p.name == c.profile && p.protocol == Protocol::Sftp)
+        })
     }
 
     fn send(&mut self, cmd: Cmd, busy: impl Into<String>) {
@@ -1287,6 +1302,9 @@ impl RemotePanel {
             root: root.clone(),
             query: query.clone(),
             content: self.search_content,
+            case: self.search_case,
+            word: self.search_word,
+            regex: self.search_regex,
             excludes: self
                 .search_excludes
                 .split(',')
@@ -1320,35 +1338,84 @@ impl RemotePanel {
             return;
         }
         let mut start = false;
-        crate::widgets::wrapped_row(ui, 6.0, |ui| {
-            let field_w = (ui.available_width() - 20.0).clamp(80.0, 280.0);
+        use crate::widgets::{FORM_ROW, form_field, form_row, toggle};
+        ui.spacing_mut().item_spacing.y = 8.0;
+        form_row(ui, pal, "Найти", |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let width = crate::widgets::field_width(ui, 3.0 * 32.0 + 6.0);
             let field = ui.add(
-                TextEdit::singleline(&mut self.search_query)
-                    .hint_text("Найти")
-                    .desired_width(field_w),
+                form_field(&mut self.search_query, "текст или выражение").desired_width(width),
             );
             if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 start = true;
             }
-            for (content, label) in [(true, "В тексте файлов"), (false, "В именах")]
+            ui.add_space(6.0);
+            toggle(ui, pal, &mut self.search_case, "Aa", "Учитывать регистр");
+            toggle(ui, pal, &mut self.search_word, "ab", "Слово целиком");
+            toggle(
+                ui,
+                pal,
+                &mut self.search_regex,
+                ".*",
+                "Регулярное выражение",
+            );
+        });
+        form_row(ui, pal, "Искать", |ui| {
+            crate::widgets::segmented(
+                ui,
+                pal,
+                &mut self.search_content,
+                &[(true, "В тексте файлов"), (false, "В именах")],
+                120.0,
+            );
+        });
+        form_row(ui, pal, "Папка", |ui| {
+            let hint = self.cwd.clone();
+            ui.add(
+                form_field(&mut self.search_root, hint)
+                    .desired_width(crate::widgets::field_width(ui, 94.0)),
+            );
+            if ui
+                .add(
+                    Button::new("Текущая")
+                        .fill(pal.surface)
+                        .min_size(egui::vec2(88.0, FORM_ROW)),
+                )
+                .on_hover_text("Папка, открытая в панели хоста")
+                .clicked()
             {
-                let active = self.search_content == content;
-                let mut button = Button::new(RichText::new(label).small());
-                if active {
-                    button = button.fill(pal.surface);
-                }
-                if ui.add(button).clicked() {
-                    self.search_content = content;
-                }
+                self.search_root = self.cwd.clone();
             }
+        });
+        form_row(ui, pal, "Не искать в", |ui| {
+            ui.add(
+                form_field(
+                    &mut self.search_excludes,
+                    "папки через запятую: bitrix/cache, node_modules",
+                )
+                .desired_width(crate::widgets::field_width(ui, 0.0)),
+            );
+        });
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let size = egui::vec2(0.0, FORM_ROW);
             if self.search_job.is_some() {
-                if ui.add(Button::new("Стоп").fill(pal.surface)).clicked()
+                if ui
+                    .add(Button::new("Остановить").fill(pal.surface).min_size(size))
+                    .clicked()
                     && let Some(job) = &self.search_job
                 {
                     job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 ui.spinner();
-            } else if ui.add(Button::new("Найти").fill(pal.surface)).clicked() {
+            } else if ui
+                .add_enabled(
+                    !self.search_query.trim().is_empty(),
+                    crate::widgets::primary("Найти", pal).min_size(size),
+                )
+                .clicked()
+            {
                 start = true;
             }
             ui.label(
@@ -1357,34 +1424,8 @@ impl RemotePanel {
                     .small(),
             );
         });
-        crate::widgets::wrapped_row(ui, 6.0, |ui| {
-            ui.label(RichText::new("Папка:").color(pal.subtext).small());
-            ui.add(
-                TextEdit::singleline(&mut self.search_root)
-                    .hint_text(self.cwd.clone())
-                    .desired_width((ui.available_width() - 90.0).max(80.0))
-                    .font(egui::TextStyle::Small),
-            );
-            if ui
-                .button(RichText::new("Текущая").small())
-                .on_hover_text("Папка, открытая в панели хоста")
-                .clicked()
-            {
-                self.search_root = self.cwd.clone();
-            }
-        });
-        crate::widgets::wrapped_row(ui, 6.0, |ui| {
-            ui.label(
-                RichText::new("Не искать в папках:")
-                    .color(pal.subtext)
-                    .small(),
-            );
-            ui.add(
-                TextEdit::singleline(&mut self.search_excludes)
-                    .desired_width((ui.available_width() - 12.0).max(80.0))
-                    .font(egui::TextStyle::Small),
-            );
-        });
+        ui.add_space(6.0);
+        ui.separator();
         if start && self.search_job.is_none() {
             self.start_search(&ctx);
         }
@@ -1396,17 +1437,12 @@ impl RemotePanel {
         } else {
             self.search_root.trim().to_owned()
         };
-        let tall = (self.hits.len() as f32 * row_h).min(300.0);
+        let tall = ui.available_height().max(row_h);
         ScrollArea::vertical()
             .id_salt(("tror_server_hits", self.id))
-            .min_scrolled_height(tall)
             .max_height(tall)
-            .auto_shrink([false, true])
-            .show_rows(
-            ui,
-            row_h,
-            self.hits.len(),
-            |ui, rows| {
+            .auto_shrink(false)
+            .show_rows(ui, row_h, self.hits.len(), |ui, rows| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for row in rows {
                     let (path, line, text) = &self.hits[row];
@@ -1756,6 +1792,21 @@ impl RemotePanel {
                                 .collect();
                             if !files.is_empty() && ui.button("Открыть").clicked() {
                                 download.extend(files.iter().cloned());
+                            }
+                            let archives: Vec<String> = files
+                                .iter()
+                                .filter(|f| remote::is_archive(f))
+                                .cloned()
+                                .collect();
+                            if !archives.is_empty()
+                                && self.sftp()
+                                && ui.button("Распаковать здесь").clicked()
+                            {
+                                for archive in archives {
+                                    let busy =
+                                        format!("Распаковка {}…", remote::file_name(&archive));
+                                    self.send(Cmd::Extract(archive), busy);
+                                }
                             }
                             if chosen.len() == 1 && is_dir {
                                 if ui.button("Новый файл здесь…").clicked() {
