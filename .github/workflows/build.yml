@@ -141,26 +141,3 @@ jobs:
           (cd out && sha256sum * > SHA256SUMS)
           git log -1 --pretty=%B > notes.txt
           gh release create "v$VERSION" out/* --title "TrorPad $VERSION" --notes-file notes.txt --target "$GITHUB_SHA"
-
-  macos:
-    timeout-minutes: 60
-    runs-on: macos-15
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo test --locked
-      - run: packaging/macos.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          retention-days: 14
-          name: trorpad-macos-universal
-          path: TrorPad-macos.zip
-      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          gh release upload "v$VERSION" TrorPad-macos.zip --clobber || echo "Выпуска v$VERSION ещё нет"

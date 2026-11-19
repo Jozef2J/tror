@@ -388,6 +388,166 @@ impl Visual {
         }
     }
 
+    pub(super) fn selected_html(&self) -> String {
+        let (a, b) = self.ordered();
+        let mut out = String::new();
+        for para in a.para..=b.para {
+            let Some(runs) = self.runs(para) else {
+                continue;
+            };
+            let mut runs = runs.clone();
+            let len = text_len(&runs);
+            let from = if para == a.para { a.off.min(len) } else { 0 };
+            let to = if para == b.para { b.off.min(len) } else { len };
+            let piece = cut(&mut runs, from..to.max(from));
+            if a.para == b.para {
+                write_runs(&piece, &mut out);
+                break;
+            }
+            let tag = self
+                .paras
+                .get(para)
+                .and_then(|p| self.html.block(p))
+                .map(|b| b.tag().to_owned())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| "p".into());
+            out.push_str(&format!("<{tag}>"));
+            write_runs(&piece, &mut out);
+            out.push_str(&format!("</{tag}>\n"));
+        }
+        restore(&out, &self.html.atoms)
+    }
+
+    pub(super) fn insert_html(&mut self, html: &str) -> bool {
+        let fragment = parse(html);
+        let mut blocks = fragment.blocks;
+        blocks.retain(|b| match &b.kind {
+            Kind::Raw(raw) => !raw.trim().is_empty(),
+            _ => true,
+        });
+        let has_content = |b: &Block| -> bool {
+            fn any(b: &Block) -> bool {
+                match &b.kind {
+                    Kind::Para { runs, .. } => !runs.is_empty(),
+                    Kind::Box { children, .. } => children.iter().any(any) || !children.is_empty(),
+                    Kind::Raw(_) => true,
+                }
+            }
+            any(b)
+        };
+        if !blocks.iter().any(has_content) {
+            return false;
+        }
+        adopt(&mut blocks, &fragment.atoms, &mut self.html.atoms);
+        self.insert_blocks(blocks);
+        true
+    }
+
+    fn insert_blocks(&mut self, mut blocks: Vec<Block>) {
+        self.delete_selection();
+        self.pending = None;
+        let simple =
+            |b: &Block| matches!(&b.kind, Kind::Para { tag, .. } if tag.is_empty() || tag == "p");
+        let in_pre = self
+            .paras
+            .get(self.head.para)
+            .and_then(|p| self.html.block(p))
+            .is_some_and(|b| b.tag() == "pre");
+        if in_pre || (blocks.len() == 1 && simple(&blocks[0])) {
+            let mut runs = Vec::new();
+            for (i, block) in blocks.into_iter().enumerate() {
+                if let Kind::Para { runs: r, .. } = block.kind {
+                    if i > 0 {
+                        runs.push(Inline::Text {
+                            text: "\n".into(),
+                            marks: Vec::new(),
+                        });
+                    }
+                    runs.extend(r);
+                }
+            }
+            let count = text_len(&runs);
+            let head = self.head;
+            if let Some(target) = self.runs_mut(head.para) {
+                insert_runs(target, head.off, runs);
+            }
+            self.collapse_to(Pos {
+                para: head.para,
+                off: head.off + count,
+            });
+            return;
+        }
+        if simple(&blocks[0]) {
+            let first = blocks.remove(0);
+            if let Kind::Para { runs, .. } = first.kind {
+                let count = text_len(&runs);
+                let head = self.head;
+                if let Some(target) = self.runs_mut(head.para) {
+                    insert_runs(target, head.off, runs);
+                }
+                self.collapse_to(Pos {
+                    para: head.para,
+                    off: head.off + count,
+                });
+            }
+        }
+        if blocks.is_empty() {
+            return;
+        }
+        let head = self.head;
+        let len = self.len(head.para);
+        let mut path = self.paras.get(head.para).cloned().unwrap_or_default();
+        let mut at = *path.last().unwrap_or(&0);
+        let mut replace = false;
+        if head.off >= len && len > 0 {
+            at += 1;
+        } else if len == 0 {
+            replace = true;
+        } else if head.off > 0 {
+            self.split();
+            path = self.paras.get(self.head.para).cloned().unwrap_or_default();
+            at = *path.last().unwrap_or(&0);
+        }
+        let up = parent(&path).to_vec();
+        fn count(blocks: &[Block]) -> usize {
+            blocks
+                .iter()
+                .map(|b| match &b.kind {
+                    Kind::Para { .. } => 1,
+                    Kind::Box { children, .. } => count(children),
+                    Kind::Raw(_) => 0,
+                })
+                .sum()
+        }
+        let added = count(&blocks);
+        let first_path = [up.as_slice(), &[at]].concat();
+        if let Some(list) = self.html.list_mut(&up) {
+            if replace && at < list.len() {
+                list.remove(at);
+            }
+            let at = at.min(list.len());
+            for (k, block) in blocks.into_iter().enumerate() {
+                list.insert(at + k, block);
+            }
+        }
+        self.paras = self.html.paras();
+        if self.paras.is_empty() {
+            self.html.blocks.push(Block::para("p", Vec::new()));
+            self.paras = self.html.paras();
+        }
+        let first = self
+            .paras
+            .iter()
+            .position(|p| p.as_slice() >= first_path.as_slice())
+            .unwrap_or(0);
+        let last = (first + added)
+            .saturating_sub(1)
+            .min(self.paras.len().saturating_sub(1));
+        let off = self.len(last);
+        self.collapse_to(Pos { para: last, off });
+        self.refresh();
+    }
+
     pub(super) fn selected_text(&self) -> String {
         let (a, b) = self.ordered();
         let mut out = String::new();

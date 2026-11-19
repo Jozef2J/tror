@@ -1149,7 +1149,7 @@ pub fn parse(source: &str) -> Html {
     }
 }
 
-fn write_runs(runs: &[Inline], out: &mut String) {
+pub fn write_runs(runs: &[Inline], out: &mut String) {
     let mut open: Vec<&Mark> = Vec::new();
     for run in runs {
         let marks = run.marks();
@@ -1232,6 +1232,74 @@ fn write_block(block: &Block, depth: usize, out: &mut String) {
             out.push_str(&format!("</{tag}>"));
         }
     }
+}
+
+fn shift_atoms(text: &mut String, base: usize) {
+    if base == 0 || !text.contains(ATOM_OPEN) {
+        return;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find(ATOM_OPEN) {
+        out.push_str(&rest[..start + ATOM_OPEN.len_utf8()]);
+        let after = &rest[start + ATOM_OPEN.len_utf8()..];
+        let digits = after.chars().take_while(char::is_ascii_digit).count();
+        match after[..digits].parse::<usize>() {
+            Ok(n) if after[digits..].starts_with(ATOM_CLOSE) => {
+                out.push_str(&(n + base).to_string())
+            }
+            _ => out.push_str(&after[..digits]),
+        }
+        rest = &after[digits..];
+    }
+    out.push_str(rest);
+    *text = out;
+}
+
+fn shift_attrs(attrs: &mut Attrs, base: usize) {
+    for (_, value) in &mut attrs.0 {
+        if let Some(v) = value {
+            shift_atoms(v, base);
+        }
+    }
+}
+
+fn shift_runs(runs: &mut [Inline], base: usize) {
+    for run in runs {
+        match run {
+            Inline::Text { text, .. } => shift_atoms(text, base),
+            Inline::Object { html, .. } => shift_atoms(html, base),
+        }
+        for mark in run.marks_mut() {
+            shift_attrs(&mut mark.attrs, base);
+        }
+    }
+}
+
+fn shift_blocks(blocks: &mut [Block], base: usize) {
+    for block in blocks {
+        block.src = None;
+        block.gap.clear();
+        match &mut block.kind {
+            Kind::Raw(raw) => shift_atoms(raw, base),
+            Kind::Para { attrs, runs, .. } => {
+                shift_attrs(attrs, base);
+                shift_runs(runs, base);
+            }
+            Kind::Box {
+                attrs, children, ..
+            } => {
+                shift_attrs(attrs, base);
+                shift_blocks(children, base);
+            }
+        }
+    }
+}
+
+pub fn adopt(blocks: &mut [Block], atoms: &[String], into: &mut Vec<String>) {
+    let base = into.len();
+    into.extend(atoms.iter().cloned());
+    shift_blocks(blocks, base);
 }
 
 pub fn serialize(html: &Html) -> String {

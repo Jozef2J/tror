@@ -159,6 +159,9 @@ impl TrorApp {
                         .inner;
                     if switched {
                         if visual {
+                            if self.docs[index].syntax == "Plain Text" {
+                                self.docs[index].syntax = "HTML".into();
+                            }
                             let editor = crate::visual::Visual::new(&self.docs[index]);
                             self.visual.insert(id, editor);
                         } else {

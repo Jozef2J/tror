@@ -223,6 +223,8 @@ fn render(ui: &mut Ui, pal: &Palette, salt: u64, node: &mut Value, out: &mut Vec
                 .max_height(height)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
+                    let backdrop = ui.painter().add(egui::Shape::Noop);
+                    let mut row_rect: Option<egui::Rect> = None;
                     egui::Grid::new(("tror_plugin_grid", salt, &id))
                         .num_columns(cols)
                         .striped(true)
@@ -237,12 +239,15 @@ fn render(ui: &mut Ui, pal: &Palette, salt: u64, node: &mut Value, out: &mut Vec
                             for (index, row) in rows.iter().enumerate() {
                                 for (k, cell) in row.iter().enumerate() {
                                     let response = ui.add(
-                                        egui::Button::selectable(
-                                            selected == Some(index),
-                                            cell.as_str(),
-                                        )
-                                        .frame_when_inactive(false),
+                                        egui::Button::selectable(false, cell.as_str())
+                                            .frame_when_inactive(false),
                                     );
+                                    if selected == Some(index) {
+                                        row_rect = Some(
+                                            row_rect
+                                                .map_or(response.rect, |r| r.union(response.rect)),
+                                        );
+                                    }
                                     if response.clicked() {
                                         picked = Some((index, k, false));
                                     }
@@ -253,6 +258,13 @@ fn render(ui: &mut Ui, pal: &Palette, salt: u64, node: &mut Value, out: &mut Vec
                                 ui.end_row();
                             }
                         });
+                    if let Some(rect) = row_rect {
+                        let rect = rect.expand2(egui::vec2(4.0, 1.0));
+                        ui.painter().set(
+                            backdrop,
+                            egui::Shape::rect_filled(rect, 4.0, ui.visuals().selection.bg_fill),
+                        );
+                    }
                 });
             if let Some((index, column, open)) = picked {
                 node["selected"] = json!(index);

@@ -1,5 +1,6 @@
 pub mod model;
 mod ops;
+mod paste;
 
 use std::sync::Arc;
 
@@ -78,6 +79,14 @@ pub fn supports(doc: &Document) -> bool {
         return !syntax.contains("xml") || syntax.contains("html");
     }
     let name = doc.title().to_ascii_lowercase();
+    let bare = doc.remote.is_none()
+        && doc
+            .path
+            .as_ref()
+            .is_none_or(|p| p.extension().is_none());
+    if bare && syntax == "plain text" {
+        return true;
+    }
     [".html", ".htm", ".xhtml", ".php", ".phtml", ".twig", ".tpl"]
         .iter()
         .any(|e| name.ends_with(e))
@@ -938,22 +947,23 @@ impl Visual {
                         *changed = Some(EditKind::Insert);
                     }
                 }
-                Event::Copy => {
+                Event::Copy | Event::Cut => {
                     let text = self.selected_text();
                     if !text.is_empty() {
-                        ui.ctx().copy_text(text);
-                    }
-                }
-                Event::Cut => {
-                    let text = self.selected_text();
-                    if !text.is_empty() {
-                        ui.ctx().copy_text(text);
-                        self.delete_selection();
-                        *changed = Some(EditKind::Other);
+                        if !paste::write_html(&self.selected_html(), &text) {
+                            ui.ctx().copy_text(text);
+                        }
+                        if matches!(event, Event::Cut) {
+                            self.delete_selection();
+                            *changed = Some(EditKind::Other);
+                        }
                     }
                 }
                 Event::Paste(text) => {
-                    self.insert_text(&text);
+                    let rich = paste::read_html().is_some_and(|html| self.insert_html(&paste::clean(&html)));
+                    if !rich {
+                        self.insert_text(&text);
+                    }
                     *changed = Some(EditKind::Other);
                 }
                 Event::Key {
