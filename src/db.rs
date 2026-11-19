@@ -1095,7 +1095,7 @@ impl DbPanel {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let width = (ui.available_width() - 32.0).max(40.0);
                 ui.add_enabled_ui(!active, |ui| {
-                    ComboBox::from_id_salt(list_id)
+                    let combo = ComboBox::from_id_salt(list_id)
                         .width(width)
                         .truncate()
                         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -1111,6 +1111,13 @@ impl DbPanel {
                                 action = Some(a);
                             }
                         });
+                    let current = self.selected;
+                    let name = names[current].0.clone();
+                    if let Some(a) =
+                        crate::widgets::profile_context(ui, list_id, &combo.response, current, &name)
+                    {
+                        action = Some(a);
+                    }
                 });
                 if crate::widgets::plus_button(ui, pal, egui::vec2(26.0, 24.0))
                     .on_hover_text("Добавить подключение")

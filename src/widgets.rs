@@ -12,6 +12,7 @@ pub fn secondary(text: impl Into<String>, pal: &Palette) -> egui::Button<'static
 
 pub const FORM_LABEL: f32 = 86.0;
 pub const FORM_ROW: f32 = 28.0;
+pub const RESULTS: f32 = 320.0;
 
 pub fn form_label(ui: &mut Ui, pal: &Palette, text: &str) {
     ui.allocate_ui_with_layout(
@@ -1010,13 +1011,14 @@ pub fn profile_list(
         });
     }
     let needle = filter.to_lowercase();
-    let shown: Vec<usize> = (0..names.len())
+    let mut shown: Vec<usize> = (0..names.len())
         .filter(|i| {
             needle.is_empty()
                 || names[*i].0.to_lowercase().contains(&needle)
                 || names[*i].1.to_lowercase().contains(&needle)
         })
         .collect();
+    shown.sort_by_cached_key(|i| names[*i].0.to_lowercase());
     if field.lost_focus()
         && ui.input(|i| i.key_pressed(egui::Key::Enter))
         && let Some(first) = shown.first()
@@ -1090,6 +1092,43 @@ pub fn profile_list(
             d.remove::<(usize, egui::Pos2)>(id.with("menu"));
         });
         ui.close();
+    }
+    action
+}
+
+pub fn profile_context(
+    ui: &mut Ui,
+    id: egui::Id,
+    response: &egui::Response,
+    index: usize,
+    name: &str,
+) -> Option<ProfileAction> {
+    let key = id.with("context");
+    if response.secondary_clicked() {
+        let pos = ui
+            .input(|i| i.pointer.interact_pos())
+            .unwrap_or(response.rect.left_bottom());
+        ui.data_mut(|d| d.insert_temp(key, pos));
+        return None;
+    }
+    let pos = ui.data(|d| d.get_temp::<egui::Pos2>(key))?;
+    let mut action = None;
+    let area = egui::Area::new(key.with("area"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::menu(ui.style()).show(ui, |ui| {
+                ui.set_min_width(170.0);
+                action = profile_menu(ui, id, index, name);
+            });
+        });
+    let outside = ui.input(|i| i.pointer.any_pressed())
+        && ui
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|p| !area.response.rect.contains(p));
+    let asked = ui.data(|d| d.get_temp::<ProfileAsk>(id.with("ask")).is_some());
+    if action.is_some() || asked || outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ui.data_mut(|d| d.remove::<egui::Pos2>(key));
     }
     action
 }

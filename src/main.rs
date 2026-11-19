@@ -18,6 +18,7 @@ mod mosh;
 mod plugins;
 mod prefs;
 mod preview;
+mod instance;
 mod recover;
 mod remote;
 mod remote_ui;
@@ -40,6 +41,9 @@ fn main() -> eframe::Result {
     STARTED.get_or_init(std::time::Instant::now);
     if std::env::args().nth(1).as_deref() == Some("--forget-passwords") {
         vault::clear();
+        return Ok(());
+    }
+    if !instance::restarted() && instance::forward(&instance::args()) {
         return Ok(());
     }
     let options = eframe::NativeOptions {

@@ -27,7 +27,6 @@ pub enum PanelEvent {
         dir: String,
         names: Vec<String>,
     },
-    OpenLocal(Vec<PathBuf>),
     Toast(String),
     Relay {
         target: u8,
@@ -54,6 +53,7 @@ enum Prompt {
     NewFile(String, String),
     Rename { from: String, name: String },
     Delete(Vec<(String, bool)>),
+    Extract(Vec<String>, String),
 }
 
 struct AttrsDialog {
@@ -145,7 +145,9 @@ pub struct RemotePanel {
     host_key: Option<(String, bool)>,
     editor: Option<ProfileEditor>,
     save_to: HashMap<String, PathBuf>,
-    dropped: Option<Vec<PathBuf>>,
+    drop_zone: Option<Rect>,
+    drop_dirs: Vec<(Rect, String)>,
+    pub external_hover: Option<String>,
     pub want_search: bool,
     search_query: String,
     search_root: String,
@@ -221,7 +223,9 @@ impl RemotePanel {
             host_key: None,
             editor: None,
             save_to: HashMap::new(),
-            dropped: None,
+            drop_zone: None,
+            drop_dirs: Vec::new(),
+            external_hover: None,
         }
     }
 
@@ -244,7 +248,6 @@ impl RemotePanel {
         self.prompt.is_some()
             || self.host_key.is_some()
             || self.editor.is_some()
-            || self.dropped.is_some()
             || self.attrs.is_some()
     }
 
@@ -260,8 +263,22 @@ impl RemotePanel {
         self.visible && self.connected
     }
 
-    pub fn offer_drop(&mut self, paths: Vec<PathBuf>) {
-        self.dropped = Some(paths);
+    pub fn drop_zone(&self) -> Option<Rect> {
+        self.drop_zone.filter(|_| self.can_upload())
+    }
+
+    pub fn drop_target(&self, pos: egui::Pos2) -> Option<String> {
+        if !self.can_upload() {
+            return None;
+        }
+        self.drop_zone.filter(|z| z.contains(pos))?;
+        Some(
+            self.drop_dirs
+                .iter()
+                .find(|(rect, _)| rect.contains(pos))
+                .map(|(_, dir)| dir.clone())
+                .unwrap_or_else(|| self.cwd.clone()),
+        )
     }
 
     fn push_log(&mut self, text: String, error: bool) {
@@ -1037,7 +1054,7 @@ impl RemotePanel {
             ui.spacing_mut().item_spacing.x = 4.0;
             let width = (ui.available_width() - 32.0).max(40.0);
             ui.add_enabled_ui(!active, |ui| {
-                ComboBox::from_id_salt(list_id)
+                let combo = ComboBox::from_id_salt(list_id)
                     .width(width)
                     .truncate()
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -1051,6 +1068,13 @@ impl RemotePanel {
                             "Добавить профиль…",
                         );
                     });
+                let current = self.selected;
+                let name = names[current].0.clone();
+                if let Some(a) =
+                    crate::widgets::profile_context(ui, list_id, &combo.response, current, &name)
+                {
+                    action = Some(a);
+                }
             });
             if crate::widgets::plus_button(ui, pal, egui::vec2(26.0, 24.0))
                 .on_hover_text("Добавить профиль")
@@ -1342,12 +1366,23 @@ impl RemotePanel {
         ui.spacing_mut().item_spacing.y = 8.0;
         form_row(ui, pal, "Найти", |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            let width = crate::widgets::field_width(ui, 3.0 * 32.0 + 6.0);
+            let width = crate::widgets::field_width(ui, 3.0 * 32.0 + 34.0);
             let field = ui.add(
                 form_field(&mut self.search_query, "текст или выражение").desired_width(width),
             );
             if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 start = true;
+            }
+            if crate::app::icon_button(ui, pal, crate::app::Icon::Close)
+                .on_hover_text("Очистить поиск")
+                .clicked()
+            {
+                if let Some(job) = &self.search_job {
+                    job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                self.search_query.clear();
+                self.hits.clear();
+                self.search_status.clear();
             }
             ui.add_space(6.0);
             toggle(ui, pal, &mut self.search_case, "Aa", "Учитывать регистр");
@@ -1424,8 +1459,10 @@ impl RemotePanel {
                     .small(),
             );
         });
-        ui.add_space(6.0);
-        ui.separator();
+        if !self.hits.is_empty() {
+            ui.add_space(6.0);
+            ui.separator();
+        }
         if start && self.search_job.is_none() {
             self.start_search(&ctx);
         }
@@ -1437,11 +1474,12 @@ impl RemotePanel {
         } else {
             self.search_root.trim().to_owned()
         };
-        let tall = ui.available_height().max(row_h);
+        let tall = (self.hits.len() as f32 * row_h).min(crate::widgets::RESULTS);
         ScrollArea::vertical()
             .id_salt(("tror_server_hits", self.id))
+            .min_scrolled_height(tall)
             .max_height(tall)
-            .auto_shrink(false)
+            .auto_shrink([false, true])
             .show_rows(ui, row_h, self.hits.len(), |ui, rows| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for row in rows {
@@ -1604,6 +1642,10 @@ impl RemotePanel {
             ui.scope_id().with(("tror_remote_blank", self.id)),
             Sense::click(),
         );
+        let root = ui.ctx().viewport_id() == egui::ViewportId::ROOT;
+        self.drop_zone = root.then_some(blank.rect);
+        self.drop_dirs.clear();
+        let mut dirs = Vec::new();
         let wide = crate::widgets::rows_width(
             ui,
             rows.iter().map(|r| {
@@ -1636,8 +1678,12 @@ impl RemotePanel {
                                 dragged.panel == self.id
                                     && !dragged.paths.iter().any(|(p, _)| *p == path)
                             });
+                    if is_dir && root {
+                        dirs.push((rect.intersect(view), path.clone()));
+                    }
+                    let external = is_dir && self.external_hover.as_deref() == Some(path.as_str());
                     let painter = ui.painter_at(rect);
-                    if drop_target {
+                    if drop_target || external {
                         painter.rect_filled(rect, 5.0, pal.selection);
                     } else if marked {
                         painter.rect_filled(rect, 5.0, pal.surface);
@@ -1798,14 +1844,40 @@ impl RemotePanel {
                                 .filter(|f| remote::is_archive(f))
                                 .cloned()
                                 .collect();
-                            if !archives.is_empty()
-                                && self.sftp()
-                                && ui.button("Распаковать здесь").clicked()
-                            {
-                                for archive in archives {
-                                    let busy =
-                                        format!("Распаковка {}…", remote::file_name(&archive));
-                                    self.send(Cmd::Extract(archive), busy);
+                            if !archives.is_empty() && self.sftp() {
+                                let mut extract: Option<Vec<(String, Option<String>)>> = None;
+                                if ui.button("Распаковать здесь").clicked() {
+                                    extract = Some(archives.iter().map(|a| (a.clone(), None)).collect());
+                                }
+                                let label = match archives.as_slice() {
+                                    [one] => format!(
+                                        "Распаковать в «{}/»",
+                                        remote::archive_stem(one).unwrap_or_default()
+                                    ),
+                                    _ => "Распаковать каждый в свою папку".to_owned(),
+                                };
+                                if ui.button(label).clicked() {
+                                    extract = Some(
+                                        archives
+                                            .iter()
+                                            .map(|a| {
+                                                let stem = remote::archive_stem(a).unwrap_or("archive");
+                                                (a.clone(), Some(remote::join(&remote::parent(a), stem)))
+                                            })
+                                            .collect(),
+                                    );
+                                }
+                                if ui.button("Распаковать в…").clicked() {
+                                    let first = &archives[0];
+                                    let suggest = remote::join(
+                                        &remote::parent(first),
+                                        remote::archive_stem(first).unwrap_or_default(),
+                                    );
+                                    self.prompt = Some(Prompt::Extract(archives.clone(), suggest));
+                                }
+                                for (archive, dest) in extract.into_iter().flatten() {
+                                    let busy = format!("Распаковка {}…", remote::file_name(&archive));
+                                    self.send(Cmd::Extract { path: archive, dest }, busy);
                                 }
                             }
                             if chosen.len() == 1 && is_dir {
@@ -1897,6 +1969,7 @@ impl RemotePanel {
                 }
             });
         let inner = area.inner_rect;
+        self.drop_dirs = dirs;
         if blank.clicked() {
             self.marked.clear();
         }
@@ -2175,48 +2248,11 @@ impl RemotePanel {
 
     pub fn dialogs(&mut self, ctx: &egui::Context, pal: &Palette) -> Vec<PanelEvent> {
         self.sync_dialog(ctx, pal);
-        let mut out = Vec::new();
         self.host_key_dialog(ctx, pal);
         self.prompt_dialog(ctx, pal);
         self.attrs_dialog(ctx, pal);
         self.editor_dialog(ctx, pal);
-        self.drop_dialog(ctx, pal, &mut out);
-        out
-    }
-
-    fn drop_dialog(&mut self, ctx: &egui::Context, pal: &Palette, out: &mut Vec<PanelEvent>) {
-        let Some(paths) = &self.dropped else {
-            return;
-        };
-        let mut choice = None;
-        let count = paths.len();
-        let modal = dialog(("tror_drop_choice", self.id), pal).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.label(format!("Что сделать с перетащенными файлами ({count})?"));
-            ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
-                if dialog_button(ui, pal, "Открыть в редакторе", true) {
-                    choice = Some(0);
-                }
-                if dialog_button(ui, pal, &format!("Загрузить в {}", self.cwd), false) {
-                    choice = Some(1);
-                }
-                if dialog_button(ui, pal, "Отмена", false) {
-                    choice = Some(2);
-                }
-            });
-        });
-        if modal.should_close() && choice.is_none() {
-            choice = Some(2);
-        }
-        if let Some(choice) = choice {
-            let paths = self.dropped.take().unwrap_or_default();
-            match choice {
-                0 => out.push(PanelEvent::OpenLocal(paths)),
-                1 => self.upload_local(paths),
-                _ => {}
-            }
-        }
+        Vec::new()
     }
 
     fn host_key_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
@@ -2436,6 +2472,15 @@ impl RemotePanel {
                 Prompt::NewFolder(dir, name) => (format!("Новая папка в {dir}"), Some(name), "Создать"),
                 Prompt::NewFile(dir, name) => (format!("Новый файл в {dir}"), Some(name), "Создать"),
                 Prompt::Rename { name, .. } => ("Переименовать".to_owned(), Some(name), "Переименовать"),
+                Prompt::Extract(items, dest) => (
+                    if items.len() == 1 {
+                        format!("Распаковать «{}» в папку", remote::file_name(&items[0]))
+                    } else {
+                        format!("Распаковать архивы ({}) в папку", items.len())
+                    },
+                    Some(dest),
+                    "Распаковать",
+                ),
                 Prompt::Delete(items) => {
                     let folders = items.iter().filter(|(_, dir)| *dir).count();
                     if items.len() == 1 {
@@ -2490,6 +2535,26 @@ impl RemotePanel {
                 (!name.is_empty() && !name.contains('/')).then(|| name.to_owned())
             };
             match self.prompt.take() {
+                Some(Prompt::Extract(items, dest)) => {
+                    let dest = dest.trim().trim_end_matches('/');
+                    if !dest.is_empty() {
+                        let dest = if dest.starts_with('/') {
+                            dest.to_owned()
+                        } else {
+                            remote::join(&self.cwd, dest)
+                        };
+                        for archive in items {
+                            let busy = format!("Распаковка {}…", remote::file_name(&archive));
+                            self.send(
+                                Cmd::Extract {
+                                    path: archive,
+                                    dest: Some(dest.clone()),
+                                },
+                                busy,
+                            );
+                        }
+                    }
+                }
                 Some(Prompt::NewFolder(dir, name)) => {
                     if let Some(name) = valid(&name) {
                         if self.tree {
@@ -2793,9 +2858,26 @@ impl RemotePanel {
             editor.result = None;
             editor.probe = Some(crate::console::probe(move || remote::test(&profile, known)));
         }
+        if save
+            && let Some(editor) = &mut self.editor
+            && editor
+                .drafts
+                .get(editor.index)
+                .is_some_and(|p| p.host.trim().is_empty() && !self.store.profiles.contains(p))
+        {
+            editor.result = Some(Err("Укажите сервер".into()));
+            save = false;
+        }
         if save {
-            if let Some(editor) = self.editor.take() {
-                self.selected = editor.index;
+            if let Some(mut editor) = self.editor.take() {
+                let chosen = editor.drafts.get(editor.index).cloned();
+                let known = &self.store.profiles;
+                editor
+                    .drafts
+                    .retain(|p| !p.host.trim().is_empty() || known.contains(p));
+                self.selected = chosen
+                    .and_then(|c| editor.drafts.iter().position(|p| *p == c))
+                    .unwrap_or(0);
                 self.store.profiles = editor.drafts;
                 if let Err(e) = self.store.save() {
                     self.busy = Some(format!("Профили не сохранены: {e}"));

@@ -851,7 +851,9 @@ impl ConsolePanel {
                 let mut open = None;
                 let mut action = None;
                 ui.horizontal_wrapped(|ui| {
-                    for (index, profile) in self.store.terminals.iter().enumerate() {
+                    let mut order: Vec<_> = self.store.terminals.iter().enumerate().collect();
+                    order.sort_by_cached_key(|(_, p)| p.name.to_lowercase());
+                    for (index, profile) in order {
                         let text = format!("{}  ·  {}", profile.name, profile.protocol.label());
                         let chip = ui.add(Button::new(text).fill(pal.surface));
                         if chip.clicked() {
@@ -1179,9 +1181,23 @@ impl ConsolePanel {
             editor.result = None;
             editor.probe = Some(probe(move || remote::test_terminal(&profile, known)));
         }
+        if save
+            && let Some(editor) = &mut self.editor
+            && editor
+                .drafts
+                .get(editor.index)
+                .is_some_and(|p| p.host.trim().is_empty() && !self.store.terminals.contains(p))
+        {
+            editor.result = Some(Err("Укажите сервер".into()));
+            save = false;
+        }
         if save {
-            if let Some(editor) = self.editor.take() {
+            if let Some(mut editor) = self.editor.take() {
                 let chosen = editor.drafts.get(editor.index).cloned();
+                let known = &self.store.terminals;
+                editor
+                    .drafts
+                    .retain(|p| !p.host.trim().is_empty() || known.contains(p));
                 self.store.terminals = editor.drafts;
                 if let Err(e) = self.store.save() {
                     crate::trace::popup(format!("Подключения не сохранены: {e}"), false);

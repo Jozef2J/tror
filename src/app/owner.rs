@@ -43,6 +43,23 @@ mod imp {
         }
     }
 
+    pub fn cursor() -> Option<(f32, f32)> {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let main = MAIN.load(Ordering::Relaxed);
+        if main == 0 {
+            return None;
+        }
+        let mut point = POINT { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut point) } == 0
+            || unsafe { ScreenToClient(main as HWND, &mut point) } == 0
+        {
+            return None;
+        }
+        Some((point.x as f32, point.y as f32))
+    }
+
     pub fn adopt(title: &str) -> bool {
         let main = MAIN.load(Ordering::Relaxed);
         if main == 0 {
@@ -84,11 +101,15 @@ mod imp {
 mod imp {
     pub fn remember_main() {}
 
+    pub fn cursor() -> Option<(f32, f32)> {
+        None
+    }
+
     pub fn adopt(_title: &str) -> bool {
         true
     }
 }
 
-pub(super) use imp::{adopt, remember_main};
+pub(super) use imp::{adopt, cursor, remember_main};
 
 pub(super) const OWNED: bool = cfg!(windows);

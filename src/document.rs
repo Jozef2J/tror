@@ -225,6 +225,7 @@ pub struct Document {
     pub missing: bool,
     pub missing_ack: bool,
     pub untitled: u32,
+    pub name: Option<String>,
     pub pinned: bool,
     pub rope: Rope,
     pub encoding: &'static Encoding,
@@ -285,6 +286,7 @@ impl Document {
             missing_ack: false,
             pinned: false,
             untitled,
+            name: None,
             rope: Rope::new(),
             encoding: UTF_8,
             bom: false,
@@ -511,7 +513,10 @@ impl Document {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| p.display().to_string()),
-            None => format!("Новый {}", self.untitled),
+            None => self
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("Новый {}", self.untitled)),
         }
     }
 
@@ -651,6 +656,12 @@ impl Document {
         let pos = self.sel.1.min(self.len());
         self.sel = (pos, pos);
         self.bump();
+    }
+
+    pub fn forget_history(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        self.last_edit = None;
     }
 
     fn restore(&mut self, snapshot: Snapshot) {

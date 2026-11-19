@@ -355,6 +355,9 @@ pub struct TrorApp {
     macro_dialog: Option<MacroDialog>,
     find: find::FindWindow,
     floats: owner::Floats,
+    drop_hint: Option<Option<(usize, String)>>,
+    scale: f32,
+    instance: Option<std::sync::mpsc::Receiver<PathBuf>>,
     recovery: crate::recover::Recovery,
     confirm: Option<Confirm>,
     allow_close: bool,
@@ -454,6 +457,9 @@ impl TrorApp {
             macro_dialog: None,
             find: Default::default(),
             floats: Default::default(),
+            drop_hint: None,
+            scale: 0.0,
+            instance: None,
             recovery: Default::default(),
             confirm: None,
             allow_close: false,
@@ -486,16 +492,10 @@ impl TrorApp {
         if active < app.docs.len() {
             app.active = active;
         }
-        for arg in std::env::args_os().skip(1) {
-            let path = PathBuf::from(arg);
-            let path = std::path::absolute(&path).unwrap_or(path);
-            if path.is_dir() {
-                app.project.set_root(path);
-                dock::show(&mut app.dock, Pane::Project, &app.settings.floats);
-            } else {
-                app.open_path(&path, 0.0);
-            }
+        for path in crate::instance::args() {
+            app.open_arg(path);
         }
+        app.instance = crate::instance::listen(cc.egui_ctx.clone());
         app.sync_plugin_panels();
         app
     }

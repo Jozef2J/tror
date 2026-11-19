@@ -347,13 +347,25 @@ impl FindFiles {
         ui.spacing_mut().item_spacing.y = 8.0;
         form_row(ui, pal, "Найти", |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            let width = crate::widgets::field_width(ui, 3.0 * 32.0 + 6.0);
+            let width = crate::widgets::field_width(ui, 3.0 * 32.0 + 34.0);
             let query =
                 ui.add(form_field(&mut self.query, "текст или выражение").desired_width(width));
             if std::mem::take(&mut self.focus) {
                 query.request_focus();
             }
             go |= query.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if crate::app::icon_button(ui, pal, crate::app::Icon::Close)
+                .on_hover_text("Очистить поиск")
+                .clicked()
+            {
+                self.cancel();
+                self.query.clear();
+                self.replace.clear();
+                self.hits.clear();
+                self.note.clear();
+                self.confirm = false;
+                self.focus = true;
+            }
             ui.add_space(6.0);
             toggle(ui, pal, &mut self.case, "Aa", "Учитывать регистр");
             toggle(ui, pal, &mut self.word, "ab", "Слово целиком");
@@ -469,15 +481,18 @@ impl FindFiles {
             ui.add_space(6.0);
             ui.label(RichText::new(&self.note).small().color(pal.subtext));
         }
-        ui.add_space(6.0);
-        ui.separator();
+        if !self.hits.is_empty() {
+            ui.add_space(6.0);
+            ui.separator();
+        }
         ui.spacing_mut().item_spacing.y = 0.0;
         let row_h = 22.0;
-        let tall = ui.available_height().max(row_h);
+        let tall = (self.hits.len() as f32 * row_h).min(crate::widgets::RESULTS);
         ScrollArea::vertical()
             .id_salt("tror_find_files_hits")
+            .min_scrolled_height(tall)
             .max_height(tall)
-            .auto_shrink(false)
+            .auto_shrink([false, true])
             .show_rows(ui, row_h, self.hits.len(), |ui, range| {
                 for hit in &self.hits[range] {
                     let (rect, response) = ui.allocate_exact_size(

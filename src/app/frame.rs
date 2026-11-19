@@ -4,6 +4,7 @@ use crate::files::ProjectEvent;
 
 impl eframe::App for TrorApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        crate::instance::release();
         if let Some(path) = self.update.setup.take() {
             let _ = crate::update::run_setup(&path);
         }
@@ -15,6 +16,21 @@ impl eframe::App for TrorApp {
         self.apply_look(&ctx);
         let pal = self.palette();
         let mut actions = Vec::new();
+        self.poll_instance(&ctx);
+        let scale = ctx.input(|i| i.viewport().native_pixels_per_point.unwrap_or(0.0));
+        if scale != self.scale {
+            if self.scale > 0.0 {
+                let size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
+                crate::trace::line(
+                    format!(
+                        "[UI] масштаб экрана {} → {scale}, окно {size:?}",
+                        self.scale
+                    ),
+                    false,
+                );
+            }
+            self.scale = scale;
+        }
 
         if ctx.input(|i| i.viewport().close_requested())
             && self.settings.keep_session
@@ -70,9 +86,35 @@ impl eframe::App for TrorApp {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
+        let drop_pos = || {
+            owner::cursor()
+                .map(|(x, y)| egui::pos2(x, y) / ctx.pixels_per_point())
+                .or_else(|| ctx.input(|i| i.pointer.latest_pos()))
+        };
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        let target = if hovering || !dropped.is_empty() {
+            drop_pos().and_then(|pos| {
+                self.remotes
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, r)| Some((i, r.drop_target(pos)?)))
+            })
+        } else {
+            None
+        };
+        for (i, panel) in self.remotes.iter_mut().enumerate() {
+            panel.external_hover = target
+                .as_ref()
+                .filter(|(t, _)| hovering && *t == i)
+                .map(|(_, dir)| dir.clone());
+        }
+        if hovering {
+            ctx.request_repaint();
+        }
+        self.drop_hint = hovering.then(|| target.as_ref().map(|(i, dir)| (*i, dir.clone())));
         if !dropped.is_empty() {
-            if let Some(panel) = self.remotes.iter_mut().find(|r| r.can_upload()) {
-                panel.offer_drop(dropped);
+            if let Some((i, dir)) = target {
+                self.remotes[i].upload_local_to(dropped, &dir);
             } else if dropped.len() == 1 && dropped[0].is_dir() {
                 self.project.set_root(dropped[0].clone());
                 actions.push(Action::Show(Pane::Project));
@@ -546,7 +588,32 @@ impl eframe::App for TrorApp {
             self.capturing = None;
         }
 
-        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
+        if let Some(Some((i, dir))) = &self.drop_hint
+            && let Some(zone) = self.remotes.get(*i).and_then(|r| r.drop_zone())
+        {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::unique("tror_drop"),
+            ));
+            painter.rect_stroke(
+                zone.shrink(2.0),
+                8.0,
+                Stroke::new(2.0, pal.accent),
+                egui::StrokeKind::Inside,
+            );
+            let label = format!("Загрузить в {dir}");
+            let galley = painter.layout_no_wrap(label, FontId::proportional(14.0), pal.text);
+            let at = egui::pos2(
+                zone.center().x - galley.size().x / 2.0,
+                zone.bottom() - galley.size().y - 18.0,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_size(at, galley.size()).expand2(egui::vec2(10.0, 6.0)),
+                6.0,
+                pal.surface,
+            );
+            painter.galley(at, galley, pal.text);
+        } else if self.drop_hint.is_some() {
             let screen = ctx.content_rect();
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,

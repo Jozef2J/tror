@@ -243,7 +243,13 @@ impl TrorApp {
                                 })
                         }
                     }
-                    _ => Err("файл ещё не сохранён — используйте «Сохранить как»".into()),
+                    (None, None) => {
+                        let first = self.docs[index].first_line();
+                        self.docs[index].syntax =
+                            self.syntaxes.detect(Some(Path::new(&name)), &first);
+                        self.docs[index].name = Some(name.clone());
+                        Ok(())
+                    }
                 };
                 match result {
                     Ok(()) => {

@@ -272,7 +272,6 @@ impl Viewer<'_> {
         let location = doc.location();
         let path = doc.path.clone();
         let remote = doc.remote.clone();
-        let saved = path.is_some() || remote.is_some();
         let color = location
             .as_ref()
             .and_then(|k| self.app.settings.tab_colors.get(k))
@@ -316,7 +315,7 @@ impl Viewer<'_> {
         if row(ui, "Сохранить как…", key("save_as"), true) {
             cmd = Some(TabCmd::SaveAs);
         }
-        if row(ui, "Переименовать…", String::new(), saved) {
+        if row(ui, "Переименовать…", String::new(), true) {
             cmd = Some(TabCmd::Rename);
         }
         ui.separator();

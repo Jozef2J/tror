@@ -175,7 +175,7 @@ impl TrorApp {
             (range.start, range.end)
         });
         let s = &mut self.search;
-        let tools_w = 4.0 * 32.0 + 2.0 * 30.0 + 10.0;
+        let tools_w = 4.0 * 32.0 + 3.0 * 30.0 + 10.0;
         ui.spacing_mut().item_spacing.y = 8.0;
         form_row(ui, pal, "Найти", |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -193,6 +193,17 @@ impl TrorApp {
                     Pending::Next
                 });
                 query.request_focus();
+            }
+            if icon_button(ui, pal, Icon::Close)
+                .on_hover_text("Очистить поиск")
+                .clicked()
+            {
+                s.query.clear();
+                s.replacement.clear();
+                s.matches.clear();
+                s.error = None;
+                s.focus_query = true;
+                changed = true;
             }
             ui.add_space(6.0);
             changed |= toggle(ui, pal, &mut s.case, "Aa", "Учитывать регистр");
@@ -309,20 +320,25 @@ impl TrorApp {
                 ui.add(egui::Label::new(info.small()).truncate());
             });
         });
-        ui.add_space(6.0);
-        ui.separator();
         let Some(doc) = self.docs.get_mut(self.active) else {
             return;
         };
         let matches = &self.search.matches;
+        if self.search.query.is_empty() || matches.is_empty() {
+            return;
+        }
+        ui.add_space(6.0);
+        ui.separator();
         let current = matches.partition_point(|m| m.0 < doc.sel.0.min(doc.sel.1));
         let row_h = 22.0;
         let mut pick = None;
         ui.spacing_mut().item_spacing.y = 0.0;
+        let tall = (matches.len() as f32 * row_h).min(crate::widgets::RESULTS);
         egui::ScrollArea::vertical()
             .id_salt("tror_find_doc_hits")
-            .max_height(ui.available_height().max(row_h))
-            .auto_shrink(false)
+            .min_scrolled_height(tall)
+            .max_height(tall)
+            .auto_shrink([false, true])
             .show_rows(ui, row_h, matches.len(), |ui, rows| {
                 for index in rows {
                     let (start, end) = matches[index];

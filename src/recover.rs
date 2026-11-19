@@ -16,6 +16,8 @@ pub struct Entry {
     pub path: Option<PathBuf>,
     pub remote: Option<(String, String)>,
     pub untitled: u32,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Default)]
@@ -63,6 +65,7 @@ impl Recovery {
                 path: d.path.clone(),
                 remote: d.remote.clone(),
                 untitled: d.untitled,
+                name: d.name.clone(),
             })
             .collect();
         for old in &self.listed {

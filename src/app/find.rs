@@ -2,7 +2,6 @@ use super::*;
 
 const TITLE: &str = "Поиск — TrorPad";
 const WIDTH: f32 = 660.0;
-const HEIGHT: f32 = 520.0;
 const FADED: u8 = 115;
 
 #[derive(Default)]
@@ -15,6 +14,7 @@ pub(super) struct FindWindow {
     focused: bool,
     on_top: Option<bool>,
     owned: bool,
+    height: f32,
     pub scope: usize,
     tries: u8,
 }
@@ -33,6 +33,7 @@ impl TrorApp {
             self.find.focused = false;
             self.find.on_top = None;
             self.find.owned = false;
+            self.find.height = 0.0;
             return;
         }
         if !super::owner::OWNED && self.find.on_top != Some(app_focused) {
@@ -62,7 +63,7 @@ impl TrorApp {
             .with_decorations(false)
             .with_resizable(false)
             .with_taskbar(false)
-            .with_inner_size([width, HEIGHT])
+            .with_inner_size([width, self.find.height.max(120.0)])
             .with_window_level(if super::owner::OWNED {
                 egui::WindowLevel::Normal
             } else {
@@ -118,11 +119,21 @@ impl TrorApp {
                         self.find.moved = false;
                         self.find.placed = Some(egui::pos2(f32::MAX, f32::MAX));
                     }
-                    self.find_tabs(ui, &pal, actions);
-                    if self.search.files {
-                        self.files_search(ui, &pal);
-                    } else {
-                        self.search_bar(ui, &pal, actions);
+                    let content = ui
+                        .scope(|ui| {
+                            self.find_tabs(ui, &pal, actions);
+                            if self.search.files {
+                                self.files_search(ui, &pal);
+                            } else {
+                                self.search_bar(ui, &pal, actions);
+                            }
+                        })
+                        .response
+                        .rect;
+                    let used = (content.height() + 24.0).round();
+                    if (used - self.find.height).abs() > 0.5 {
+                        self.find.height = used;
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
                     }
                 });
             if ctx.input(|i| i.viewport().close_requested()) {

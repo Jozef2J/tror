@@ -1148,7 +1148,11 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         let x = (p.x - text_rect.left() - PAD_X) as f64 + doc.scroll_x;
         if !wrap {
             let y = py as f64 + doc.scroll_y;
-            let line = doc.line_of_visual((y / row).floor().max(0.0) as usize);
+            let visual = (y / row).floor().max(0.0) as usize;
+            if visual >= doc.shown_count() {
+                return doc.len();
+            }
+            let line = doc.line_of_visual(visual);
             return doc.rope.line_to_char(line) + layout_line(ui, doc, line, &m).col_at(x);
         }
         let visible = visible_lines(ui, doc, &m, view_h as f32);
@@ -1160,7 +1164,11 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             .copied()
             .unwrap_or((0, 0.0));
         let layout = layout_line(ui, doc, line, &m);
-        let at = (((py as f64 - top) / row).floor().max(0.0) as usize).min(layout.rows() - 1);
+        let at = ((py as f64 - top) / row).floor().max(0.0) as usize;
+        if at >= layout.rows() && line + 1 >= doc.line_count() {
+            return doc.len();
+        }
+        let at = at.min(layout.rows() - 1);
         doc.rope.line_to_char(line) + layout.col_at_row(x, at, char_w)
     };
     let pointer = ui.input(|i| i.pointer.interact_pos());

@@ -15,6 +15,7 @@ impl TrorApp {
                 .path
                 .as_ref()
                 .and_then(|p| self.docs.iter().position(|d| d.path.as_ref() == Some(p)));
+            let mut fresh = false;
             let index = match open {
                 Some(index) => index,
                 None => {
@@ -32,18 +33,24 @@ impl TrorApp {
                             self.next_id += 1;
                             doc.path = entry.path.clone();
                             doc.remote = entry.remote.clone();
+                            doc.name = entry.name.clone();
                             let name = entry
                                 .path
                                 .clone()
-                                .or_else(|| entry.remote.as_ref().map(|r| PathBuf::from(&r.1)));
+                                .or_else(|| entry.remote.as_ref().map(|r| PathBuf::from(&r.1)))
+                                .or_else(|| entry.name.as_ref().map(PathBuf::from));
                             doc.syntax = self.syntaxes.detect(name.as_deref(), &text);
                             self.docs.push(doc);
+                            fresh = true;
                             self.docs.len() - 1
                         }
                     }
                 }
             };
             self.docs[index].set_text(&text);
+            if fresh {
+                self.docs[index].forget_history();
+            }
             self.active = index;
         }
         crate::recover::clear(&dir);
@@ -52,6 +59,36 @@ impl TrorApp {
             format!("Восстановлены несохранённые изменения, вкладок: {count}"),
             0.0,
         ));
+    }
+
+    pub(super) fn open_arg(&mut self, path: PathBuf) {
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        if path.is_dir() {
+            self.project.set_root(path);
+            dock::show(&mut self.dock, Pane::Project, &self.settings.floats);
+        } else {
+            self.open_path(&path, 0.0);
+        }
+    }
+
+    pub(super) fn poll_instance(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.instance else {
+            return;
+        };
+        let paths: Vec<PathBuf> = rx.try_iter().collect();
+        if paths.is_empty() {
+            return;
+        }
+        for path in paths {
+            self.open_arg(path);
+        }
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::Minimized(false),
+        );
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
     }
 
     pub(super) fn notify(&mut self, text: impl Into<String>, now: f64) {
@@ -214,7 +251,12 @@ impl TrorApp {
                 }
                 dialog = dialog.set_file_name(doc.title());
             }
-            None => dialog = dialog.set_file_name(format!("{}.txt", doc.title())),
+            None => {
+                dialog = dialog.set_file_name(match &doc.name {
+                    Some(name) => name.clone(),
+                    None => format!("{}.txt", doc.title()),
+                })
+            }
         }
         let Some(path) = dialog.save_file() else {
             return false;

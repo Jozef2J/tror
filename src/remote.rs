@@ -516,7 +516,10 @@ pub enum Cmd {
         path: String,
         mtime: u64,
     },
-    Extract(String),
+    Extract {
+        path: String,
+        dest: Option<String>,
+    },
 }
 
 pub enum Event {
@@ -1275,11 +1278,11 @@ impl Backend {
         Ok(())
     }
 
-    fn extract(&mut self, path: &str) -> Result<(), String> {
+    fn extract(&mut self, path: &str, dest: Option<&str>) -> Result<(), String> {
         let Backend::Sftp { session, .. } = self else {
             return Err("распаковка доступна только по SFTP".into());
         };
-        let command = extract_command(path).ok_or("неизвестный формат архива")?;
+        let command = extract_command(path, dest).ok_or("неизвестный формат архива")?;
         let mut channel = session.channel_session().map_err(|e| e.to_string())?;
         channel.exec(&command).map_err(|e| e.to_string())?;
         let mut out = String::new();
@@ -1370,7 +1373,10 @@ fn describe(cmd: &Cmd) -> String {
             if *recursive { " (recursive)" } else { "" }
         ),
         Cmd::Touch { path, mtime } => format!("[SFTP] setstat {path} mtime {mtime}"),
-        Cmd::Extract(path) => format!("[SSH] exec: {}", extract_command(path).unwrap_or_default()),
+        Cmd::Extract { path, dest } => format!(
+            "[SSH] exec: {}",
+            extract_command(path, dest.as_deref()).unwrap_or_default()
+        ),
     }
 }
 
@@ -1475,8 +1481,8 @@ fn execute(
             backend.touch(path, *mtime)?;
             (Event::Changed(parent(path)), "ok".into())
         }
-        Cmd::Extract(path) => {
-            backend.extract(path)?;
+        Cmd::Extract { path, dest } => {
+            backend.extract(path, dest.as_deref())?;
             (Event::Changed(parent(path)), "extracted".into())
         }
     })
@@ -1506,15 +1512,28 @@ pub fn is_archive(path: &str) -> bool {
     ARCHIVES.iter().any(|(ext, _)| lower.ends_with(ext))
 }
 
-pub fn extract_command(path: &str) -> Option<String> {
+pub fn archive_stem(path: &str) -> Option<&str> {
     let lower = path.to_lowercase();
-    let (ext, template) = ARCHIVES.iter().find(|(ext, _)| lower.ends_with(ext))?;
+    let (ext, _) = ARCHIVES.iter().find(|(ext, _)| lower.ends_with(ext))?;
     let name = file_name(path);
-    let out = name.get(..name.len().checked_sub(ext.len())?)?;
+    name.get(..name.len().checked_sub(ext.len())?)
+}
+
+pub fn extract_command(path: &str, dest: Option<&str>) -> Option<String> {
+    let lower = path.to_lowercase();
+    let (_, template) = ARCHIVES.iter().find(|(ext, _)| lower.ends_with(ext))?;
+    let out = archive_stem(path)?;
+    let Some(dest) = dest else {
+        let run = template
+            .replace("{f}", &quote(file_name(path)))
+            .replace("{o}", &quote(out));
+        return Some(format!("cd {} && {run}", quote(&parent(path))));
+    };
     let run = template
-        .replace("{f}", &quote(name))
+        .replace("{f}", &quote(path))
         .replace("{o}", &quote(out));
-    Some(format!("cd {} && {run}", quote(&parent(path))))
+    let dest = quote(dest);
+    Some(format!("mkdir -p {dest} && cd {dest} && {run}"))
 }
 
 fn serve(
@@ -2671,18 +2690,23 @@ mod tests {
     #[test]
     fn extract_commands() {
         assert_eq!(
-            extract_command("/w/it's.tar.gz").as_deref(),
+            extract_command("/w/it's.tar.gz", None).as_deref(),
             Some("cd '/w' && tar -xzf 'it'\\''s.tar.gz'")
         );
         assert_eq!(
-            extract_command("/w/a.sql.GZ").as_deref(),
+            extract_command("/w/a.sql.GZ", None).as_deref(),
             Some("cd '/w' && gzip -dc 'a.sql.GZ' > 'a.sql'")
         );
         assert!(
-            extract_command("/w/a.zip")
+            extract_command("/w/a.zip", None)
                 .unwrap()
                 .contains("unzip -oq 'a.zip'")
         );
+        assert_eq!(
+            extract_command("/w/a.tar.gz", Some("/w/a")).as_deref(),
+            Some("mkdir -p '/w/a' && cd '/w/a' && tar -xzf '/w/a.tar.gz'")
+        );
+        assert_eq!(archive_stem("/w/site.backup.tar.xz"), Some("site.backup"));
         assert!(is_archive("/w/b.TGZ"));
         assert!(!is_archive("/w/b.php"));
     }

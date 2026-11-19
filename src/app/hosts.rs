@@ -75,11 +75,6 @@ impl TrorApp {
                     }
                 }
                 PanelEvent::Toast(text) => self.notify(text, now),
-                PanelEvent::OpenLocal(paths) => {
-                    for path in paths {
-                        self.open_path(&path, now);
-                    }
-                }
                 PanelEvent::Listed {
                     profile,
                     dir,

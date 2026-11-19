@@ -585,6 +585,24 @@ pub fn leaf_min(tabs: &[Pane]) -> egui::Vec2 {
     })
 }
 
+fn node_min(tree: &egui_stack::Tree<Pane>, node: NodeIndex, horizontal: bool) -> f32 {
+    let item = &tree[node];
+    if let Some(leaf) = item.get_leaf() {
+        let min = leaf_min(leaf.tabs());
+        return if horizontal { min.x } else { min.y };
+    }
+    let Some(linear) = item.get_linear() else {
+        return 0.0;
+    };
+    let along = matches!(linear.dir, egui_stack::LinearDir::Horizontal) == horizontal;
+    let mins = linear.children().iter().map(|c| node_min(tree, *c, horizontal));
+    if along {
+        mins.sum::<f32>() + 2.0 * linear.children().len() as f32
+    } else {
+        mins.fold(0.0, f32::max)
+    }
+}
+
 pub fn enforce_min(dock: &mut DockState<Pane>) {
     let surfaces: Vec<SurfaceIndex> = dock.iter_surfaces_indexed().map(|(i, _)| i).collect();
     for surface in surfaces {
@@ -612,6 +630,14 @@ pub fn enforce_min(dock: &mut DockState<Pane>) {
                 }
                 let mut child = node;
                 while let Some(parent) = tree.parent(child) {
+                    let crowded = tree[parent].get_linear().is_some_and(|l| {
+                        let span = if horizontal {
+                            l.rect().width()
+                        } else {
+                            l.rect().height()
+                        };
+                        node_min(tree, parent, horizontal) > span
+                    });
                     let Some(linear) = tree[parent].get_linear_mut() else {
                         child = parent;
                         continue;
@@ -629,7 +655,7 @@ pub fn enforce_min(dock: &mut DockState<Pane>) {
                     } else {
                         linear.rect().height()
                     };
-                    if span <= need * 1.1 {
+                    if span <= need * 1.1 || crowded {
                         break;
                     }
                     let shares = linear.shares().to_vec();
