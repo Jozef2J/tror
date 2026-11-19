@@ -139,6 +139,55 @@ impl TrorApp {
             return;
         };
         let active = index == self.active;
+        if crate::visual::supports(&self.docs[index]) {
+            let mut visual = self.visual.contains_key(&id);
+            egui::Frame::new()
+                .fill(pal.mantle)
+                .inner_margin(egui::Margin::symmetric(8, 4))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    let switched = ui
+                        .horizontal(|ui| {
+                            crate::widgets::segmented(
+                                ui,
+                                pal,
+                                &mut visual,
+                                &[(false, "Код"), (true, "Визуально")],
+                                86.0,
+                            )
+                        })
+                        .inner;
+                    if switched {
+                        if visual {
+                            let editor = crate::visual::Visual::new(&self.docs[index]);
+                            self.visual.insert(id, editor);
+                        } else {
+                            self.visual.remove(&id);
+                            self.focus_editor = true;
+                        }
+                    }
+                });
+            if let Some(editor) = self.visual.get_mut(&id) {
+                if active && ui.ctx().viewport_id() == egui::ViewportId::ROOT {
+                    self.find.anchor =
+                        Some(ui.available_rect_before_wrap().right_top() + egui::vec2(-22.0, 8.0));
+                }
+                let focus = active && !modal_open && !self.search.open;
+                let size = self.settings.look.font_size;
+                editor.ui(ui, &mut self.docs[index], pal, size, focus);
+                if !active
+                    && ui.ctx().memory(|m| {
+                        m.focused()
+                            .is_some_and(|f| f == egui::Id::unique(("tror_visual", id)))
+                    })
+                {
+                    actions.push(Action::Activate(index));
+                }
+                return;
+            }
+        } else {
+            self.visual.remove(&id);
+        }
         let pane = ui.available_rect_before_wrap();
         let look = &self.settings.look;
         let (wrap, font_size, line_spacing) =
@@ -162,6 +211,11 @@ impl TrorApp {
                     edit: self.settings.edit,
                     macros: &mut self.macros,
                     complete: &mut self.complete,
+                    decos: self
+                        .decorations
+                        .get(&id)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]),
                 },
             );
             if ui.ctx().viewport_id() == egui::ViewportId::ROOT {
@@ -186,6 +240,11 @@ impl TrorApp {
                 edit: self.settings.edit,
                 macros: &mut macros,
                 complete: &mut complete,
+                decos: self
+                    .decorations
+                    .get(&id)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]),
             },
         );
         if ui.memory(|m| m.has_focus(editor::editor_id(id))) {

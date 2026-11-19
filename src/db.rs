@@ -540,6 +540,33 @@ fn open_engine(profile: &DbProfile, host: String, port: u16) -> Result<(Engine, 
     }
 }
 
+pub fn one_shot(store: &Store, name: &str, sql: &str) -> Result<serde_json::Value, String> {
+    let profile = store
+        .databases
+        .iter()
+        .find(|p| p.name == name)
+        .cloned()
+        .ok_or_else(|| format!("подключение «{name}» не найдено"))?;
+    let mut ssh = None;
+    if !profile.tunnel.is_empty() && profile.kind != DbKind::Sqlite {
+        let host = store
+            .profiles
+            .iter()
+            .find(|p| p.name == profile.tunnel)
+            .ok_or_else(|| format!("хост «{}» для туннеля не найден", profile.tunnel))?;
+        let key = format!("{}:{}", host.host.trim(), host.port);
+        ssh = Some((host.clone(), store.known_hosts.get(&key).cloned()));
+    }
+    let (mut engine, _, _tunnel) = link(&profile, &ssh)?;
+    let table = engine.query(sql)?;
+    Ok(serde_json::json!({
+        "columns": table.columns,
+        "rows": table.rows,
+        "affected": table.affected,
+        "truncated": table.truncated,
+    }))
+}
+
 fn test_profile(profile: DbProfile, ssh: Ssh) -> Result<String, String> {
     let (mut engine, version, _tunnel) = link(&profile, &ssh)?;
     engine.query("SELECT 1")?;

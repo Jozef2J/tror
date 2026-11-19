@@ -13,6 +13,42 @@ const CASES: [&str; 6] = [
 struct Tools {
     words: Vec<String>,
     watching: bool,
+    tasks: Vec<(usize, usize, String)>,
+}
+
+pub fn tasks(source: &str) -> Vec<(usize, usize, usize, String)> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for (line, row) in source.split('\n').enumerate() {
+        let upper = row.to_uppercase();
+        for tag in ["TODO", "FIXME"] {
+            if let Some(byte) = upper.find(tag)
+                && upper.len() == row.len()
+            {
+                let start = offset + row[..byte].chars().count();
+                let rest: String = row[byte..].chars().take(120).collect();
+                out.push((line + 1, start, start + tag.len(), rest.trim().to_owned()));
+                break;
+            }
+        }
+        offset += row.chars().count() + 1;
+    }
+    out
+}
+
+pub fn trailing(source: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for row in source.split('\n') {
+        let row = row.strip_suffix('\r').map_or(row, |r| r);
+        let len = row.chars().count();
+        let trimmed = row.trim_end_matches([' ', '\t']).chars().count();
+        if trimmed < len && trimmed > 0 {
+            out.push((offset + trimmed, offset + len));
+        }
+        offset += len + 1 + usize::from(row.len() != row.trim_end_matches('\r').len());
+    }
+    out
 }
 
 trorpad_plugin::export!(Tools);
@@ -241,6 +277,60 @@ impl Tools {
     }
 }
 
+impl Tools {
+    fn check(&mut self, panel: bool) -> Result<(), String> {
+        let enabled = host::setting::<bool>("marks").unwrap_or(true);
+        let source = host::text().unwrap_or_default();
+        let found = tasks(&source);
+        if enabled {
+            let mut marks = Vec::new();
+            for (line, start, end, text) in &found {
+                marks.push(
+                    host::Decoration::highlight(*start, *end)
+                        .color("#f2c46d")
+                        .message(text),
+                );
+                marks.push(
+                    host::Decoration::gutter(*line)
+                        .color("#f2c46d")
+                        .message(text),
+                );
+            }
+            for (start, end) in trailing(&source) {
+                marks.push(
+                    host::Decoration::underline(start, end)
+                        .color("#e06c75")
+                        .message("Пробелы в конце строки"),
+                );
+            }
+            host::decorate("marks", &marks)?;
+        } else {
+            host::clear_decorations("marks")?;
+        }
+        self.tasks = found
+            .iter()
+            .map(|(l, s, _, t)| (*l, *s, t.clone()))
+            .collect();
+        if panel || !self.tasks.is_empty() {
+            let rows = self
+                .tasks
+                .iter()
+                .map(|(line, _, text)| vec![line.to_string(), text.clone()])
+                .collect();
+            let body = if self.tasks.is_empty() {
+                ui::small("В файле нет TODO и FIXME")
+            } else {
+                ui::table("task", &["Строка", "Задача"], rows, None)
+            };
+            host::panel(
+                "tasks",
+                ui::column(vec![ui::heading("Задачи в файле"), body]),
+            )?;
+        }
+        Ok(())
+    }
+}
+
 impl Plugin for Tools {
     fn command(&mut self, id: &str) -> Result<(), String> {
         match id {
@@ -281,12 +371,22 @@ impl Plugin for Tools {
         }
     }
 
-    fn panel_open(&mut self, _panel: &str) -> Result<(), String> {
+    fn panel_open(&mut self, panel: &str) -> Result<(), String> {
+        if panel == "tasks" {
+            return self.check(true);
+        }
         self.refresh()
     }
 
     fn panel_event(&mut self, _panel: &str, id: &str, value: &Value) -> Result<(), String> {
         match id {
+            "task" => {
+                let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                match self.tasks.get(index) {
+                    Some((_, from, _)) => host::select(*from, *from),
+                    None => Ok(()),
+                }
+            }
             "refresh" => self.refresh(),
             "watch" => {
                 self.watching = value.as_bool().unwrap_or(false);
@@ -322,6 +422,7 @@ impl Plugin for Tools {
                 }
                 Ok(())
             }
+            "changed" | "activeChanged" | "opened" => self.check(false),
             "settings" if !self.words.is_empty() => self.refresh(),
             _ => Ok(()),
         }
@@ -331,6 +432,18 @@ impl Plugin for Tools {
 #[cfg(test)]
 mod tests {
     use super::{recase, tokens, transform};
+
+    #[test]
+    fn tasks_and_trailing() {
+        let found = super::tasks("a\n  // todo: fix\nb FIXME x");
+        assert_eq!(found[0].0, 2);
+        assert_eq!(found[0].1, 7);
+        assert_eq!(found[1].0, 3);
+        assert_eq!(
+            super::trailing("ab  \ncd\n  \nx \t"),
+            vec![(2, 4), (12, 14)]
+        );
+    }
 
     #[test]
     fn line_operations() {

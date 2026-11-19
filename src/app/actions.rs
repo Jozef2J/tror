@@ -344,8 +344,12 @@ impl TrorApp {
                     Err(e) => self.notify(format!("Папка плагинов: {e}"), now),
                 }
             }
+            Action::PluginsManage => self.manager = Some(Default::default()),
             Action::PluginsReload => {
                 self.plugins.reload();
+                self.plugin_decos.clear();
+                self.decorations.clear();
+                self.plugin_active = None;
                 self.sync_plugin_panels();
                 let errors = self.plugins.errors.clone();
                 for plugin in &self.plugins.wasm {

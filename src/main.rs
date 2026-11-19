@@ -30,6 +30,7 @@ mod theme;
 mod trace;
 mod update;
 mod vault;
+mod visual;
 mod wasm;
 mod widgets;
 

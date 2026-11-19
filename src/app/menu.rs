@@ -465,6 +465,9 @@ impl TrorApp {
                     ui.weak("Плагинов пока нет");
                 }
                 ui.separator();
+                if item(ui, "Управление плагинами…", "", true) {
+                    actions.push(Action::PluginsManage);
+                }
                 if item(ui, "Открыть папку плагинов", "", true) {
                     actions.push(Action::PluginsFolder);
                 }

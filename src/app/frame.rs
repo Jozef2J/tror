@@ -206,6 +206,7 @@ impl eframe::App for TrorApp {
         self.db.poll();
         self.plugin_results(now);
         self.plugin_finished(now);
+        self.plugin_watch(now);
         for note in self.console.poll() {
             self.notify(note, now);
         }
@@ -637,6 +638,7 @@ impl eframe::App for TrorApp {
 
         self.goto_modal(&ctx, &pal);
         self.plugin_modal(&ctx, &pal);
+        self.plugin_manager(&ctx, &pal);
         self.macro_modal(&ctx, &pal);
         self.rename_modal(&ctx, &pal);
         self.confirm_modal(&ctx);

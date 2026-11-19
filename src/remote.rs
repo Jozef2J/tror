@@ -2310,6 +2310,49 @@ pub fn test_terminal(profile: &TermProfile, known: Option<String>) -> Result<Str
     timed(started, result)
 }
 
+pub enum OneShot {
+    List(String),
+    Read(String),
+    Write(String, Vec<u8>),
+}
+
+pub fn one_shot(profile: &Profile, known: Option<&str>, op: OneShot) -> Result<serde_json::Value, String> {
+    let mut backend = match profile.protocol {
+        Protocol::Sftp => {
+            let (session, _) = open_session(profile, known, &|_, _| false)?;
+            let sftp = session.sftp().map_err(|e| e.to_string())?;
+            Backend::Sftp { session, sftp }
+        }
+        _ => connect_ftp(profile)?.0,
+    };
+    match op {
+        OneShot::List(path) => {
+            let entries = backend.list(&path)?;
+            Ok(serde_json::Value::Array(
+                entries
+                    .into_iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "name": e.name,
+                            "dir": e.is_dir,
+                            "size": e.size,
+                            "mtime": e.mtime,
+                        })
+                    })
+                    .collect(),
+            ))
+        }
+        OneShot::Read(path) => {
+            let bytes = backend.download(&path, &|_, _| {})?;
+            Ok(serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+        }
+        OneShot::Write(path, data) => {
+            backend.upload(&path, &data, &|_, _| {})?;
+            Ok(serde_json::Value::Null)
+        }
+    }
+}
+
 pub fn connect(
     profile: &Profile,
     known: Option<String>,

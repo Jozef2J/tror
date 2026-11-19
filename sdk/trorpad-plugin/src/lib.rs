@@ -192,6 +192,158 @@ pub mod host {
         let value = serde_json::to_value(value).map_err(|e| e.to_string())?;
         unit("storage_set", json!({ "key": key, "value": value }))
     }
+
+    #[derive(Debug, Clone, Default, Serialize)]
+    pub struct Decoration {
+        pub kind: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub start: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub end: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub line: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub color: Option<String>,
+        pub message: String,
+    }
+
+    impl Decoration {
+        pub fn highlight(start: usize, end: usize) -> Self {
+            Self {
+                kind: "highlight",
+                start: Some(start),
+                end: Some(end),
+                ..Self::default()
+            }
+        }
+
+        pub fn underline(start: usize, end: usize) -> Self {
+            Self {
+                kind: "underline",
+                start: Some(start),
+                end: Some(end),
+                ..Self::default()
+            }
+        }
+
+        pub fn gutter(line: usize) -> Self {
+            Self {
+                kind: "gutter",
+                line: Some(line),
+                ..Self::default()
+            }
+        }
+
+        pub fn color(mut self, hex: &str) -> Self {
+            self.color = Some(hex.to_owned());
+            self
+        }
+
+        pub fn message(mut self, text: &str) -> Self {
+            self.message = text.to_owned();
+            self
+        }
+    }
+
+    pub fn decorate(key: &str, items: &[Decoration]) -> Result<(), String> {
+        unit("decorate", json!({ "key": key, "items": items }))
+    }
+
+    pub fn clear_decorations(key: &str) -> Result<(), String> {
+        decorate(key, &[])
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct Response {
+        pub status: u16,
+        pub body: String,
+    }
+
+    pub fn http(
+        method: &str,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+    ) -> Result<Response, String> {
+        let headers: serde_json::Map<String, Value> = headers
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), json!(v)))
+            .collect();
+        parse(request(
+            "http",
+            json!({ "method": method, "url": url, "headers": headers, "body": body }),
+        )?)
+    }
+
+    pub fn get(url: &str) -> Result<Response, String> {
+        http("GET", url, &[], None)
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct HostProfile {
+        pub name: String,
+        pub protocol: String,
+        pub host: String,
+        pub directory: String,
+    }
+
+    pub fn hosts() -> Result<Vec<HostProfile>, String> {
+        parse(request("hosts", json!({}))?)
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct RemoteEntry {
+        pub name: String,
+        pub dir: bool,
+        pub size: u64,
+        pub mtime: Option<u64>,
+    }
+
+    pub fn remote_list(profile: &str, path: &str) -> Result<Vec<RemoteEntry>, String> {
+        parse(request(
+            "remote_list",
+            json!({ "profile": profile, "path": path }),
+        )?)
+    }
+
+    pub fn remote_read(profile: &str, path: &str) -> Result<String, String> {
+        parse(request(
+            "remote_read",
+            json!({ "profile": profile, "path": path }),
+        )?)
+    }
+
+    pub fn remote_write(profile: &str, path: &str, text: &str) -> Result<(), String> {
+        unit(
+            "remote_write",
+            json!({ "profile": profile, "path": path, "text": text }),
+        )
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct DatabaseProfile {
+        pub name: String,
+        pub kind: String,
+    }
+
+    pub fn databases() -> Result<Vec<DatabaseProfile>, String> {
+        parse(request("databases", json!({}))?)
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct QueryResult {
+        pub columns: Vec<String>,
+        pub rows: Vec<Vec<Option<String>>>,
+        pub affected: u64,
+        pub truncated: bool,
+    }
+
+    pub fn db_query(profile: &str, sql: &str) -> Result<QueryResult, String> {
+        parse(request(
+            "db_query",
+            json!({ "profile": profile, "sql": sql }),
+        )?)
+    }
 }
 
 pub mod text {
@@ -307,6 +459,24 @@ pub mod ui {
 
     pub fn space(size: f32) -> Value {
         json!({ "type": "space", "size": size })
+    }
+
+    pub fn table<S: AsRef<str>>(
+        id: &str,
+        columns: &[S],
+        rows: Vec<Vec<String>>,
+        selected: Option<usize>,
+    ) -> Value {
+        let columns: Vec<&str> = columns.iter().map(AsRef::as_ref).collect();
+        json!({ "type": "table", "id": id, "columns": columns, "rows": rows, "selected": selected })
+    }
+
+    pub fn node(id: &str, label: &str, children: Vec<Value>) -> Value {
+        json!({ "id": id, "label": label, "children": children })
+    }
+
+    pub fn tree(id: &str, items: Vec<Value>, selected: Option<&str>) -> Value {
+        json!({ "type": "tree", "id": id, "items": items, "selected": selected })
     }
 }
 

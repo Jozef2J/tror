@@ -145,6 +145,32 @@ impl TrorApp {
         }
     }
 
+    pub(super) fn plugin_watch(&mut self, now: f64) {
+        if self.plugins.wasm.is_empty() {
+            return;
+        }
+        let Some(doc) = self.docs.get(self.active) else {
+            return;
+        };
+        let (id, version, activity) = (doc.id, doc.version, doc.activity);
+        if self.plugin_active != Some(id) {
+            self.plugin_active = Some(id);
+            self.plugin_seen.insert(id, version);
+            self.plugin_event("activeChanged", self.active);
+            return;
+        }
+        if self.plugin_seen.get(&id) != Some(&version) {
+            let wait = 0.4 - (now - activity);
+            if wait > 0.0 {
+                self.ctx
+                    .request_repaint_after(std::time::Duration::from_secs_f64(wait + 0.02));
+                return;
+            }
+            self.plugin_seen.insert(id, version);
+            self.plugin_event("changed", self.active);
+        }
+    }
+
     pub(super) fn plugin_send(
         &mut self,
         plugin: usize,
@@ -211,6 +237,19 @@ impl TrorApp {
                     | Effect::Pick(..)
                     | Effect::Panel(..)
                     | Effect::ShowPanel(..) => self.plugin_effect_ui(done.plugin, effect),
+                    Effect::Decorate(key, items) => {
+                        if let Some((id, _)) = done.doc {
+                            self.plugin_decos.insert((id, done.plugin, key), items);
+                            let mut all: Vec<crate::wasm::Decoration> = self
+                                .plugin_decos
+                                .iter()
+                                .filter(|((doc, _, _), _)| *doc == id)
+                                .flat_map(|(_, v)| v.iter().cloned())
+                                .collect();
+                            all.sort_by_key(|d| (d.start, d.end));
+                            self.decorations.insert(id, all);
+                        }
+                    }
                     Effect::OpenTab(title, text) => {
                         self.new_doc();
                         let syntax = self.syntaxes.detect(Some(Path::new(&title)), &text);

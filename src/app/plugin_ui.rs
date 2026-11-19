@@ -177,6 +177,157 @@ fn render(ui: &mut Ui, pal: &Palette, salt: u64, node: &mut Value, out: &mut Vec
                 ));
             }
         }
+        "table" => {
+            let columns: Vec<String> = node
+                .get("columns")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_str().unwrap_or_default().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let rows: Vec<Vec<String>> = node
+                .get("rows")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .map(|r| {
+                            r.as_array()
+                                .map(|c| {
+                                    c.iter()
+                                        .map(|v| match v {
+                                            Value::String(s) => s.clone(),
+                                            Value::Null => String::new(),
+                                            other => other.to_string(),
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let selected = node
+                .get("selected")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize);
+            let cols = columns
+                .len()
+                .max(rows.iter().map(Vec::len).max().unwrap_or(0))
+                .max(1);
+            let mut picked = None;
+            let height = node.get("height").and_then(Value::as_f64).unwrap_or(260.0) as f32;
+            egui::ScrollArea::both()
+                .id_salt(("tror_plugin_table", salt, &id))
+                .max_height(height)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    egui::Grid::new(("tror_plugin_grid", salt, &id))
+                        .num_columns(cols)
+                        .striped(true)
+                        .spacing([14.0, 4.0])
+                        .show(ui, |ui| {
+                            for column in &columns {
+                                ui.label(RichText::new(column).strong().color(pal.subtext));
+                            }
+                            if !columns.is_empty() {
+                                ui.end_row();
+                            }
+                            for (index, row) in rows.iter().enumerate() {
+                                for (k, cell) in row.iter().enumerate() {
+                                    let response = ui.add(
+                                        egui::Button::selectable(
+                                            selected == Some(index),
+                                            cell.as_str(),
+                                        )
+                                        .frame_when_inactive(false),
+                                    );
+                                    if response.clicked() {
+                                        picked = Some((index, k, false));
+                                    }
+                                    if response.double_clicked() {
+                                        picked = Some((index, k, true));
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+            if let Some((index, column, open)) = picked {
+                node["selected"] = json!(index);
+                out.push((
+                    id,
+                    json!({"index": index, "column": column, "row": rows[index], "open": open}),
+                ));
+            }
+        }
+        "tree" => {
+            fn branch(
+                ui: &mut Ui,
+                pal: &Palette,
+                salt: u64,
+                items: &mut Value,
+                selected: &str,
+                picked: &mut Option<(String, bool)>,
+            ) {
+                let Some(list) = items.as_array_mut() else {
+                    return;
+                };
+                for item in list {
+                    let item_id = text_of(item, "id");
+                    let label = text_of(item, "label");
+                    let has_children = item
+                        .get("children")
+                        .and_then(Value::as_array)
+                        .is_some_and(|c| !c.is_empty());
+                    if has_children {
+                        let open = item.get("open").and_then(Value::as_bool).unwrap_or(false);
+                        let header =
+                            egui::CollapsingHeader::new(RichText::new(&label).color(pal.text))
+                                .id_salt(("tror_plugin_tree", salt, &item_id))
+                                .default_open(open)
+                                .show(ui, |ui| {
+                                    if let Some(children) = item.get_mut("children") {
+                                        branch(ui, pal, salt, children, selected, picked);
+                                    }
+                                });
+                        if header.header_response.secondary_clicked()
+                            || header.header_response.double_clicked()
+                        {
+                            *picked = Some((item_id.clone(), true));
+                        }
+                    } else {
+                        let response = ui.add(egui::Button::selectable(
+                            selected == item_id,
+                            label.as_str(),
+                        ));
+                        if response.clicked() {
+                            *picked = Some((item_id.clone(), false));
+                        }
+                        if response.double_clicked() {
+                            *picked = Some((item_id, true));
+                        }
+                    }
+                }
+            }
+            let selected = text_of(node, "selected");
+            let mut picked = None;
+            let height = node.get("height").and_then(Value::as_f64).unwrap_or(320.0) as f32;
+            egui::ScrollArea::vertical()
+                .id_salt(("tror_plugin_tree_scroll", salt, &id))
+                .max_height(height)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    if let Some(items) = node.get_mut("items") {
+                        branch(ui, pal, salt, items, &selected, &mut picked);
+                    }
+                });
+            if let Some((item, open)) = picked {
+                node["selected"] = json!(item);
+                out.push((id, json!({"id": item, "open": open})));
+            }
+        }
         "progress" => {
             let value = node.get("value").and_then(Value::as_f64).unwrap_or(0.0) as f32;
             ui.add(egui::ProgressBar::new(value.clamp(0.0, 1.0)).show_percentage());

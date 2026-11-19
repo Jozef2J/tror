@@ -150,6 +150,7 @@ pub type View = (PathBuf, Vec<usize>, Vec<(usize, usize)>);
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub plugins_off: Vec<String>,
     pub look: Look,
     pub wrap: bool,
     pub recent: Vec<PathBuf>,
@@ -194,6 +195,7 @@ impl Default for Settings {
     fn default() -> Self {
         let look = Look::default();
         Self {
+            plugins_off: Vec::new(),
             wrap: false,
             recent: Vec::new(),
             open: Vec::new(),

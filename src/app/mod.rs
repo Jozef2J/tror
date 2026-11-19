@@ -34,6 +34,7 @@ mod look;
 mod menu;
 mod modals;
 mod owner;
+mod plugin_manager;
 mod plugin_run;
 mod plugin_ui;
 mod tabs;
@@ -124,6 +125,7 @@ enum Action {
     Attach(Pane),
     PluginsFolder,
     PluginsReload,
+    PluginsManage,
     NextTab,
     PrevTab,
 }
@@ -355,6 +357,12 @@ pub struct TrorApp {
     macro_dialog: Option<MacroDialog>,
     find: find::FindWindow,
     floats: owner::Floats,
+    manager: Option<plugin_manager::Manager>,
+    plugin_active: Option<u64>,
+    plugin_seen: std::collections::HashMap<u64, u64>,
+    decorations: std::collections::HashMap<u64, Vec<crate::wasm::Decoration>>,
+    plugin_decos: std::collections::HashMap<(u64, usize, String), Vec<crate::wasm::Decoration>>,
+    visual: std::collections::HashMap<u64, crate::visual::Visual>,
     drop_hint: Option<Option<(usize, String)>>,
     scale: f32,
     instance: Option<std::sync::mpsc::Receiver<PathBuf>>,
@@ -375,6 +383,7 @@ impl TrorApp {
             .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
             .unwrap_or_default();
         settings.migrate();
+        let plugins_off = settings.plugins_off.clone();
         crate::vault::set_in_file(settings.passwords_in_file);
         let mut dock = cc
             .storage
@@ -432,6 +441,7 @@ impl TrorApp {
             preview: Preview::default(),
             plugins: crate::plugins::Plugins::new(
                 eframe::storage_dir("Tror").map(|dir| dir.join("plugins")),
+                plugins_off,
             ),
             console_shown: false,
             settings_shown: false,
@@ -457,6 +467,12 @@ impl TrorApp {
             macro_dialog: None,
             find: Default::default(),
             floats: Default::default(),
+            manager: None,
+            plugin_active: None,
+            plugin_seen: Default::default(),
+            decorations: Default::default(),
+            plugin_decos: Default::default(),
+            visual: Default::default(),
             drop_hint: None,
             scale: 0.0,
             instance: None,
@@ -488,7 +504,7 @@ impl TrorApp {
         if app.settings.updates {
             app.update.rx = Some(crate::update::check());
         }
-        app.next_id = top;
+        app.next_id = app.next_id.max(top);
         if active < app.docs.len() {
             app.active = active;
         }

@@ -187,6 +187,7 @@ pub struct Plugins {
     pub wasm: Vec<crate::wasm::Worker>,
     done: Receiver<crate::wasm::Done>,
     pub errors: Vec<String>,
+    pub off: Vec<String>,
     pub running: usize,
     tx: Sender<Finished>,
     rx: Receiver<Finished>,
@@ -224,6 +225,86 @@ pub fn load(dir: &Path) -> (Vec<Plugin>, Vec<String>) {
         }
     }
     (list, errors)
+}
+
+pub fn peek_manifest(archive: &Path) -> Result<crate::wasm::Manifest, String> {
+    let files = unzip(archive)?;
+    let json = files
+        .iter()
+        .filter(|(name, _)| name == "plugin.json" || name.ends_with("/plugin.json"))
+        .min_by_key(|(name, _)| name.len())
+        .map(|(_, data)| data.clone())
+        .ok_or("в архиве нет plugin.json")?;
+    serde_json::from_slice(&json).map_err(|e| format!("plugin.json: {e}"))
+}
+
+fn unzip(archive: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    use std::io::Read;
+    let data = std::fs::read(archive).map_err(|e| e.to_string())?;
+    if data.len() > 64 << 20 {
+        return Err("архив больше 64 МБ".into());
+    }
+    let u16_at = |i: usize| -> Result<usize, String> {
+        data.get(i..i + 2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize)
+            .ok_or_else(|| "повреждённый архив".to_owned())
+    };
+    let u32_at = |i: usize| -> Result<usize, String> {
+        data.get(i..i + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+            .ok_or_else(|| "повреждённый архив".to_owned())
+    };
+    let end = (0..data.len().saturating_sub(21))
+        .rev()
+        .find(|&i| data[i..].starts_with(&[0x50, 0x4b, 0x05, 0x06]))
+        .ok_or("это не zip-архив")?;
+    let count = u16_at(end + 10)?;
+    let mut at = u32_at(end + 16)?;
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    for _ in 0..count {
+        if u32_at(at)? != 0x0201_4b50 {
+            return Err("повреждённый архив".into());
+        }
+        let method = u16_at(at + 10)?;
+        let packed = u32_at(at + 20)?;
+        let size = u32_at(at + 24)?;
+        let name_len = u16_at(at + 28)?;
+        let extra = u16_at(at + 30)?;
+        let comment = u16_at(at + 32)?;
+        let local = u32_at(at + 42)?;
+        let name = String::from_utf8_lossy(
+            data.get(at + 46..at + 46 + name_len)
+                .ok_or("повреждённый архив")?,
+        )
+        .replace('\\', "/");
+        at += 46 + name_len + extra + comment;
+        if name.ends_with('/') {
+            continue;
+        }
+        total += size;
+        if total > 256 << 20 {
+            return Err("распакованный архив больше 256 МБ".into());
+        }
+        let start = local + 30 + u16_at(local + 26)? + u16_at(local + 28)?;
+        let raw = data
+            .get(start..start + packed)
+            .ok_or("повреждённый архив")?;
+        let bytes = match method {
+            0 => raw.to_vec(),
+            8 => {
+                let mut buf = Vec::with_capacity(size);
+                flate2::read::DeflateDecoder::new(raw)
+                    .take(size as u64 + 1)
+                    .read_to_end(&mut buf)
+                    .map_err(|e| e.to_string())?;
+                buf
+            }
+            other => return Err(format!("{name}: неподдерживаемое сжатие {other}")),
+        };
+        out.push((name, bytes));
+    }
+    Ok(out)
 }
 
 #[cfg(windows)]
@@ -321,7 +402,7 @@ pub fn execute(
 }
 
 impl Plugins {
-    pub fn new(dir: Option<PathBuf>) -> Self {
+    pub fn new(dir: Option<PathBuf>, off: Vec<String>) -> Self {
         let (tx, rx) = channel();
         let done = channel().1;
         let mut plugins = Self {
@@ -330,6 +411,7 @@ impl Plugins {
             wasm: Vec::new(),
             done,
             errors: Vec::new(),
+            off,
             running: 0,
             tx,
             rx,
@@ -343,7 +425,7 @@ impl Plugins {
         let (wasm, wasm_errors) = self
             .dir
             .as_deref()
-            .map(crate::wasm::load_all)
+            .map(|d| crate::wasm::load_enabled(d, &self.off))
             .unwrap_or_default();
         errors.extend(wasm_errors);
         let (done_tx, done_rx) = channel();
@@ -368,6 +450,76 @@ impl Plugins {
             }
         }
         done
+    }
+
+    pub fn install(&mut self, archive: &Path) -> Result<crate::wasm::Manifest, String> {
+        let dir = self.dir.clone().ok_or("нет папки данных программы")?;
+        let files = unzip(archive)?;
+        let (prefix, json) = files
+            .iter()
+            .filter(|(name, _)| name == "plugin.json" || name.ends_with("/plugin.json"))
+            .min_by_key(|(name, _)| name.len())
+            .map(|(name, data)| {
+                (
+                    name.trim_end_matches("plugin.json").to_owned(),
+                    data.clone(),
+                )
+            })
+            .ok_or("в архиве нет plugin.json")?;
+        let manifest: crate::wasm::Manifest =
+            serde_json::from_slice(&json).map_err(|e| format!("plugin.json: {e}"))?;
+        let safe = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.';
+        if manifest.id.is_empty() || !manifest.id.chars().all(safe) || manifest.id.starts_with('.')
+        {
+            return Err("недопустимый id плагина".into());
+        }
+        let target = dir.join(&manifest.id);
+        let staging = dir.join(format!(".{}-new", manifest.id));
+        let _ = std::fs::remove_dir_all(&staging);
+        for (name, data) in &files {
+            let Some(rest) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            if rest.is_empty() || rest.ends_with('/') {
+                continue;
+            }
+            let relative = Path::new(rest);
+            if relative
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            {
+                return Err(format!("недопустимый путь в архиве: {name}"));
+            }
+            let out = staging.join(relative);
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&out, data).map_err(|e| e.to_string())?;
+        }
+        if !staging.join(&manifest.wasm).is_file() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("в архиве нет {}", manifest.wasm));
+        }
+        for keep in ["storage.json", "settings.json"] {
+            let old = target.join(keep);
+            if old.is_file() {
+                let _ = std::fs::copy(&old, staging.join(keep));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::rename(&staging, &target).map_err(|e| e.to_string())?;
+        self.reload();
+        Ok(manifest)
+    }
+
+    pub fn remove(&mut self, folder: &Path) -> Result<(), String> {
+        let dir = self.dir.clone().ok_or("нет папки данных программы")?;
+        if folder.parent() != Some(dir.as_path()) {
+            return Err("папка вне каталога плагинов".into());
+        }
+        std::fs::remove_dir_all(folder).map_err(|e| e.to_string())?;
+        self.reload();
+        Ok(())
     }
 
     pub fn busy(&self) -> Option<&str> {
@@ -433,6 +585,91 @@ impl Plugins {
 mod tests {
     use super::*;
 
+    fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for (name, data) in files {
+            let offset = out.len() as u32;
+            let local = |buf: &mut Vec<u8>, sig: u32| {
+                buf.extend(sig.to_le_bytes());
+            };
+            local(&mut out, 0x0403_4b50);
+            out.extend([20u8, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            out.extend(0u32.to_le_bytes());
+            out.extend((data.len() as u32).to_le_bytes());
+            out.extend((data.len() as u32).to_le_bytes());
+            out.extend((name.len() as u16).to_le_bytes());
+            out.extend(0u16.to_le_bytes());
+            out.extend(name.as_bytes());
+            out.extend(*data);
+            local(&mut central, 0x0201_4b50);
+            central.extend([20u8, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            central.extend(0u32.to_le_bytes());
+            central.extend((data.len() as u32).to_le_bytes());
+            central.extend((data.len() as u32).to_le_bytes());
+            central.extend((name.len() as u16).to_le_bytes());
+            central.extend([0u8; 12]);
+            central.extend(offset.to_le_bytes());
+            central.extend(name.as_bytes());
+        }
+        let start = out.len() as u32;
+        let size = central.len() as u32;
+        out.extend(central);
+        out.extend(0x0605_4b50u32.to_le_bytes());
+        out.extend([0u8; 4]);
+        out.extend((files.len() as u16).to_le_bytes());
+        out.extend((files.len() as u16).to_le_bytes());
+        out.extend(size.to_le_bytes());
+        out.extend(start.to_le_bytes());
+        out.extend(0u16.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn plugin_zip_is_installed_and_traversal_rejected() {
+        let dir = std::env::temp_dir().join(format!("tror-zip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = br#"{"id":"demo","name":"Demo","permissions":["network"]}"#;
+        let good = dir.join("good.zip");
+        std::fs::write(
+            &good,
+            stored_zip(&[
+                ("demo/plugin.json", manifest),
+                ("demo/plugin.wasm", b"\0asm"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            peek_manifest(&good).unwrap().permissions,
+            vec!["network".to_owned()]
+        );
+        let mut plugins = Plugins::new(Some(dir.join("plugins")), Vec::new());
+        std::fs::create_dir_all(dir.join("plugins")).unwrap();
+        plugins.install(&good).unwrap();
+        assert!(dir.join("plugins/demo/plugin.wasm").is_file());
+        let bad = dir.join("bad.zip");
+        std::fs::write(
+            &bad,
+            stored_zip(&[
+                ("plugin.json", manifest),
+                ("plugin.wasm", b"x"),
+                ("../evil", b"x"),
+            ]),
+        )
+        .unwrap();
+        assert!(
+            plugins
+                .install(&bad)
+                .unwrap_err()
+                .contains("недопустимый путь")
+        );
+        assert!(!dir.join("plugins/evil").exists() && !dir.join("evil").exists());
+        plugins.remove(&dir.join("plugins/demo")).unwrap();
+        assert!(!dir.join("plugins/demo").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn context() -> Context {
         Context {
             file: "/tmp/a b.php".into(),
@@ -467,7 +704,7 @@ mod tests {
     fn folder_is_prepared_and_loaded() {
         let dir = std::env::temp_dir().join(format!("tror_plugins_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut plugins = Plugins::new(Some(dir.clone()));
+        let mut plugins = Plugins::new(Some(dir.clone()), Vec::new());
         assert!(plugins.list.is_empty());
         plugins.prepare().unwrap();
         assert_eq!(plugins.list.len(), 1);

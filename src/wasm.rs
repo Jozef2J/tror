@@ -12,7 +12,7 @@ use wasmi::{
 const FUEL: u64 = 4_000_000_000;
 #[cfg(test)]
 const FUEL: u64 = 2_000_000;
-const API: u32 = 1;
+const API: u32 = 2;
 const MEMORY: usize = 512 << 20;
 #[cfg(test)]
 const FUEL_PROBE: u64 = 300_000_000;
@@ -96,6 +96,93 @@ pub enum Effect {
     Pick(String, String, Vec<String>),
     Panel(String, Value),
     ShowPanel(String),
+    Decorate(String, Vec<Decoration>),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Decoration {
+    pub kind: DecoKind,
+    pub start: usize,
+    pub end: usize,
+    pub color: Option<[u8; 3]>,
+    pub message: String,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum DecoKind {
+    Highlight,
+    Underline,
+    Gutter,
+}
+
+fn hex_color(text: &str) -> Option<[u8; 3]> {
+    let hex = text.trim().trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some([byte(0)?, byte(2)?, byte(4)?])
+}
+
+fn http(params: &Value) -> Result<Value, String> {
+    use std::io::Read;
+    let url = params
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("адрес должен начинаться с http:// или https://".into());
+    }
+    let method = params
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("GET")
+        .to_ascii_uppercase();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .provider(ureq::tls::TlsProvider::NativeTls)
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(20)))
+        .user_agent(concat!("trorpad-plugin/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into();
+    let headers: Vec<(String, String)> = params
+        .get("headers")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let body = params
+        .get("body")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let request = ureq::http::Request::builder()
+        .method(method.as_str())
+        .uri(url);
+    let request = headers
+        .iter()
+        .fold(request, |r, (k, v)| r.header(k.as_str(), v.as_str()));
+    let response = match body {
+        Some(body) => agent.run(request.body(body).map_err(|e| e.to_string())?),
+        None => agent.run(request.body(()).map_err(|e| e.to_string())?),
+    }
+    .map_err(|e| e.to_string())?;
+    let status = response.status().as_u16();
+    let mut out = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(10 << 20)
+        .read_to_end(&mut out)
+        .map_err(|e| e.to_string())?;
+    Ok(json!({"status": status, "body": String::from_utf8_lossy(&out)}))
 }
 
 struct Host {
@@ -178,6 +265,10 @@ fn storage_load(path: &Path) -> serde_json::Map<String, Value> {
         .unwrap_or_default()
 }
 
+fn store() -> crate::remote::Store {
+    crate::remote::Store::load(eframe::storage_dir("Tror").map(|d| d.join("connections.json")))
+}
+
 fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, String> {
     let s = |k: &str| {
         params
@@ -258,6 +349,105 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
             );
             let text = serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?;
             std::fs::write(host.dir.join("storage.json"), text).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "http" => {
+            allowed(host, "network")?;
+            http(params)
+        }
+        "hosts" | "databases" => {
+            allowed(host, if method == "hosts" { "hosts" } else { "db" })?;
+            let store = store();
+            Ok(if method == "hosts" {
+                Value::Array(
+                    store
+                        .profiles
+                        .iter()
+                        .map(|p| json!({"name": p.name, "protocol": p.protocol.label(), "host": p.host, "directory": p.directory}))
+                        .collect(),
+                )
+            } else {
+                Value::Array(
+                    store
+                        .databases
+                        .iter()
+                        .map(|p| json!({"name": p.name, "kind": p.kind.label()}))
+                        .collect(),
+                )
+            })
+        }
+        "remote_list" | "remote_read" | "remote_write" => {
+            allowed(host, "hosts")?;
+            let store = store();
+            let name = s("profile");
+            let profile = store
+                .profiles
+                .iter()
+                .find(|p| p.name == name)
+                .ok_or_else(|| format!("профиль «{name}» не найден"))?;
+            let known = store
+                .known_hosts
+                .get(&format!("{}:{}", profile.host.trim(), profile.port))
+                .cloned();
+            let op = match method {
+                "remote_list" => crate::remote::OneShot::List(s("path")),
+                "remote_read" => crate::remote::OneShot::Read(s("path")),
+                _ => crate::remote::OneShot::Write(s("path"), s("text").into_bytes()),
+            };
+            crate::remote::one_shot(profile, known.as_deref(), op)
+        }
+        "db_query" => {
+            allowed(host, "db")?;
+            crate::db::one_shot(&store(), &s("profile"), &s("sql"))
+        }
+        "decorate" => {
+            let snap = host.snap.as_ref().ok_or("нет открытого файла")?;
+            let len = snap.rope.len_chars();
+            let lines = snap.rope.len_lines();
+            let mut items = Vec::new();
+            for item in params
+                .get("items")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let kind = match item
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("highlight")
+                {
+                    "underline" => DecoKind::Underline,
+                    "gutter" => DecoKind::Gutter,
+                    _ => DecoKind::Highlight,
+                };
+                let num = |k: &str| item.get(k).and_then(Value::as_u64).map(|v| v as usize);
+                let (start, end) = if kind == DecoKind::Gutter {
+                    let line = num("line").unwrap_or(1).clamp(1, lines) - 1;
+                    (line, line)
+                } else {
+                    let a = num("start").unwrap_or(0).min(len);
+                    let b = num("end").unwrap_or(a).min(len);
+                    (a.min(b), a.max(b))
+                };
+                items.push(Decoration {
+                    kind,
+                    start,
+                    end,
+                    color: item
+                        .get("color")
+                        .and_then(Value::as_str)
+                        .and_then(hex_color),
+                    message: item
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                });
+                if items.len() >= 5000 {
+                    break;
+                }
+            }
+            host.effects.push(Effect::Decorate(s("key"), items));
             Ok(Value::Null)
         }
         "read_file" | "write_file" => {
@@ -571,11 +761,9 @@ impl Worker {
     }
 }
 
-pub fn load_all(dir: &Path) -> (Vec<Loaded>, Vec<String>) {
-    let mut loaded = Vec::new();
-    let mut errors = Vec::new();
+pub fn manifests(dir: &Path) -> Vec<(PathBuf, Result<Manifest, String>)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return (loaded, errors);
+        return Vec::new();
     };
     let mut dirs: Vec<PathBuf> = entries
         .flatten()
@@ -583,6 +771,30 @@ pub fn load_all(dir: &Path) -> (Vec<Loaded>, Vec<String>) {
         .filter(|p| p.join("plugin.json").is_file())
         .collect();
     dirs.sort();
+    dirs.into_iter()
+        .map(|d| {
+            let manifest = std::fs::read_to_string(d.join("plugin.json"))
+                .map_err(|e| e.to_string())
+                .and_then(|t| {
+                    serde_json::from_str::<Manifest>(&t).map_err(|e| format!("plugin.json: {e}"))
+                });
+            (d, manifest)
+        })
+        .collect()
+}
+
+pub fn load_all(dir: &Path) -> (Vec<Loaded>, Vec<String>) {
+    load_enabled(dir, &[])
+}
+
+pub fn load_enabled(dir: &Path, off: &[String]) -> (Vec<Loaded>, Vec<String>) {
+    let mut loaded = Vec::new();
+    let mut errors = Vec::new();
+    let dirs: Vec<PathBuf> = manifests(dir)
+        .into_iter()
+        .filter(|(_, m)| !m.as_ref().is_ok_and(|m| off.contains(&m.id)))
+        .map(|(d, _)| d)
+        .collect();
     for dir in dirs {
         match Loaded::load(&dir) {
             Ok(plugin)
@@ -696,6 +908,39 @@ mod tests {
             syntax: "Text".into(),
             root,
         }
+    }
+
+    #[test]
+    fn decorations_and_permissions() {
+        let mut host = test_host(snap("one\ntwo\nthree", None), std::env::temp_dir());
+        request(
+            &mut host,
+            "decorate",
+            &json!({"key":"k","items":[
+                {"kind":"highlight","start":2,"end":99,"color":"#ff0000","message":"m"},
+                {"kind":"gutter","line":50},
+                {"kind":"underline","start":5,"end":4}
+            ]}),
+        )
+        .unwrap();
+        let Some(Effect::Decorate(key, items)) = host.effects.pop() else {
+            panic!("нет декораций");
+        };
+        assert_eq!(key, "k");
+        assert_eq!(
+            (items[0].start, items[0].end, items[0].color),
+            (2, 13, Some([255, 0, 0]))
+        );
+        assert_eq!((items[1].kind, items[1].start), (DecoKind::Gutter, 2));
+        assert_eq!((items[2].start, items[2].end), (4, 5));
+        for method in ["http", "hosts", "databases", "remote_read", "db_query"] {
+            let err =
+                request(&mut host, method, &json!({"url":"https://example.com"})).unwrap_err();
+            assert!(err.contains("нет разрешения"), "{method}: {err}");
+        }
+        host.manifest.permissions.push("network".into());
+        let err = request(&mut host, "http", &json!({"url":"file:///etc/passwd"})).unwrap_err();
+        assert!(err.contains("http"));
     }
 
     #[test]

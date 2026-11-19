@@ -32,6 +32,7 @@ pub struct View<'a> {
     pub edit: crate::prefs::Edit,
     pub macros: &'a mut Macro,
     pub complete: &'a mut Completion,
+    pub decos: &'a [crate::wasm::Decoration],
 }
 
 #[derive(Default)]
@@ -1012,6 +1013,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         edit,
         macros,
         complete,
+        decos,
     } = view;
     let font = FontId::monospace(font_size);
     let (char_w, font_h) = ui.fonts_mut(|f| (f.glyph_width(&font, '0'), f.row_height(&font)));
@@ -1508,6 +1510,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         .filter(|t| !t.contains('\n') && !t.trim().is_empty());
 
     let gutter_click = ui.interact(gutter_rect, id.with("fold_gutter"), Sense::click_and_drag());
+    let mut hints: Vec<(Rect, &str)> = Vec::new();
     let mut fold_rows: Vec<(usize, f32, f32)> = Vec::new();
     let mut shown_rows: Vec<(usize, f32, f32)> = Vec::new();
     let mut fold_marks: Vec<(usize, Rect)> = Vec::new();
@@ -1578,6 +1581,67 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                         pal.match_bg
                     };
                     fill(a, b, 0.0, 2.0, color);
+                }
+            }
+        }
+        for deco in decos {
+            use crate::wasm::DecoKind;
+            let color = deco
+                .color
+                .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b))
+                .unwrap_or(match deco.kind {
+                    DecoKind::Underline => pal.warn,
+                    _ => pal.accent,
+                });
+            match deco.kind {
+                DecoKind::Gutter => {
+                    if deco.start == line {
+                        let center = egui::pos2(gutter_rect.left() + 7.0, y + row_h * 0.5);
+                        gutter_painter.circle_filled(center, 3.5, color);
+                        if !deco.message.is_empty() {
+                            hints.push((Rect::from_center_size(center, egui::vec2(12.0, row_h)), &deco.message));
+                        }
+                    }
+                }
+                _ if deco.end < line_start || deco.start > line_end || deco.end == deco.start => {}
+                DecoKind::Highlight => {
+                    let a = deco.start.max(line_start) - line_start;
+                    let b = deco.end.min(line_end) - line_start;
+                    fill(a, b, 0.0, 2.0, color.gamma_multiply(0.35));
+                    if !deco.message.is_empty() {
+                        let (x0, r0) = layout.place(a, char_w);
+                        let (x1, _) = layout.place(b, char_w);
+                        let top = row_top(r0);
+                        hints.push((Rect::from_min_max(egui::pos2(sx(x0), top), egui::pos2(sx(x1).max(sx(x0) + 4.0), top + row_h)), &deco.message));
+                    }
+                }
+                DecoKind::Underline => {
+                    let a = deco.start.max(line_start) - line_start;
+                    let b = deco.end.min(line_end) - line_start;
+                    for r in row_from..row_to {
+                        let (start, end) = layout.row_range(r);
+                        if a > end || b < start {
+                            continue;
+                        }
+                        let lo = a.max(start);
+                        let hi = b.min(end).max(lo + 1);
+                        let x0 = sx(layout.x_in_row(r, lo, char_w));
+                        let x1 = sx(layout.x_in_row(r, hi, char_w)).max(x0 + char_w);
+                        let base = row_top(r) + row_h - 2.5;
+                        let mut points = Vec::new();
+                        let mut x = x0;
+                        let mut up = false;
+                        while x < x1 {
+                            points.push(egui::pos2(x, if up { base - 2.0 } else { base }));
+                            up = !up;
+                            x += 2.5;
+                        }
+                        points.push(egui::pos2(x1, if up { base - 2.0 } else { base }));
+                        painter.add(egui::Shape::line(points, Stroke::new(1.0, color)));
+                        if !deco.message.is_empty() {
+                            hints.push((Rect::from_min_max(egui::pos2(x0, row_top(r)), egui::pos2(x1, row_top(r) + row_h)), &deco.message));
+                        }
+                    }
                 }
             }
         }
@@ -1769,6 +1833,16 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         }
     }
 
+    if let Some(p) = ui.input(|i| i.pointer.hover_pos())
+        && let Some((_, text)) = hints.iter().find(|(r, _)| r.contains(p))
+    {
+        let text = text.to_string();
+        if gutter_rect.contains(p) {
+            gutter_click.clone().on_hover_text_at_pointer(text);
+        } else {
+            response.clone().on_hover_text_at_pointer(text);
+        }
+    }
     let fold_x = gutter_rect.right() - 8.0;
     let current = doc
         .block_around(doc.rope.char_to_line(doc.sel.1))
