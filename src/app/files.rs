@@ -120,6 +120,33 @@ impl TrorApp {
             self.focus_editor = true;
             return;
         }
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("docx"))
+        {
+            match crate::visual::docx::to_html(path) {
+                Ok(html) => {
+                    self.new_doc();
+                    let index = self.active;
+                    let doc = &mut self.docs[index];
+                    doc.replace(0..0, &html, crate::document::EditKind::Other);
+                    let stem = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "document".into());
+                    doc.name = Some(format!("{stem}.html"));
+                    doc.syntax = "HTML".into();
+                    let editor = crate::visual::Visual::new(doc);
+                    self.visual.insert(doc.id, editor);
+                    self.notify(
+                        format!("Документ Word «{stem}» открыт как HTML — сохраните его как .html"),
+                        now,
+                    );
+                }
+                Err(e) => self.notify(format!("Не удалось открыть {}: {e}", path.display()), now),
+            }
+            return;
+        }
         let started = std::time::Instant::now();
         match Document::open(self.next_id, path) {
             Ok(mut doc) => {

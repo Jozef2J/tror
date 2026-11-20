@@ -250,7 +250,7 @@ impl DiffPanel {
                     });
                 if side == 0
                     && ui
-                        .add(Button::new("← →").fill(pal.surface))
+                        .add(Button::new("← →"))
                         .on_hover_text("Поменять местами")
                         .clicked()
                 {
@@ -259,11 +259,11 @@ impl DiffPanel {
             }
             if !self.hunks.is_empty() {
                 let count = self.hunks.len();
-                if ui.add(Button::new("↑").fill(pal.surface)).clicked() {
+                if ui.add(Button::new("↑")).clicked() {
                     self.at = (self.at + count - 1) % count;
                     self.jump = Some(self.hunks[self.at]);
                 }
-                if ui.add(Button::new("↓").fill(pal.surface)).clicked() {
+                if ui.add(Button::new("↓")).clicked() {
                     self.at = (self.at + 1) % count;
                     self.jump = Some(self.hunks[self.at]);
                 }

@@ -26,6 +26,7 @@ pub enum ProjectEvent {
     View(bool),
     Transfer(Vec<PathBuf>, bool),
     Dropped(Vec<PathBuf>, egui::Pos2),
+    Move(Vec<PathBuf>, PathBuf, bool),
 }
 
 fn free_name(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
@@ -58,8 +59,8 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-pub fn transfer(paths: &[PathBuf], dir: &Path, keep: bool) -> Result<usize, String> {
-    let mut done = 0;
+pub fn transfer(paths: &[PathBuf], dir: &Path, keep: bool) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    let mut done = Vec::new();
     for path in paths {
         let Some(name) = path.file_name() else {
             continue;
@@ -84,7 +85,7 @@ pub fn transfer(paths: &[PathBuf], dir: &Path, keep: bool) -> Result<usize, Stri
             })
         };
         result.map_err(|e| format!("{}: {e}", path.display()))?;
-        done += 1;
+        done.push((path.clone(), target));
     }
     Ok(done)
 }
@@ -125,6 +126,7 @@ pub struct ProjectPanel {
     dragging: Option<Vec<PathBuf>>,
     dragged_out: bool,
     anchor: Option<PathBuf>,
+    clip: Option<(Vec<PathBuf>, bool)>,
     prompt: Option<Prompt>,
     attrs: Option<Attrs>,
     out: Vec<ProjectEvent>,
@@ -228,6 +230,7 @@ impl ProjectPanel {
             dragging: None,
             dragged_out: false,
             anchor: None,
+            clip: None,
             prompt: None,
             attrs: None,
             out: Vec::new(),
@@ -368,6 +371,18 @@ impl ProjectPanel {
         }
     }
 
+    fn paste_item(&mut self, ui: &mut Ui, dir: &Path) {
+        if let Some((paths, keep)) = self.clip.clone()
+            && ui.button("Вставить").clicked()
+        {
+            self.out.push(ProjectEvent::Move(paths, dir.to_path_buf(), keep));
+            if !keep {
+                self.clip = None;
+            }
+            ui.close();
+        }
+    }
+
     fn create_items(&mut self, ui: &mut Ui, dir: &Path) {
         if ui.button("Новый файл…").clicked() {
             self.prompt = Some(Prompt::NewFile(dir.to_path_buf(), String::new()));
@@ -386,7 +401,7 @@ impl ProjectPanel {
             ui.label(RichText::new("Папка проекта не открыта.").color(pal.subtext));
             ui.add_space(4.0);
             if ui
-                .add(Button::new("Открыть папку…").fill(pal.surface))
+                .add(Button::new("Открыть папку…"))
                 .clicked()
             {
                 self.pick_root();
@@ -528,6 +543,14 @@ impl ProjectPanel {
                 });
         }
         let blank = ui.interact(outer, ui.scope_id().with("tror_project_blank"), Sense::click());
+        let dir = if tree {
+            self.root.clone().unwrap_or_default()
+        } else {
+            self.cwd.clone()
+        };
+        let pointer = ui.ctx().pointer_latest_pos();
+        let mut target: Option<PathBuf> = None;
+        let mut released: Option<(Vec<PathBuf>, egui::Pos2)> = None;
         let wide = crate::widgets::rows_width(
             ui,
             rows.iter().map(|r| {
@@ -573,18 +596,35 @@ impl ProjectPanel {
                             && let Some(paths) = self.dragging.take()
                             && let Some(pos) = ui.ctx().pointer_latest_pos()
                         {
-                            self.out.push(ProjectEvent::Dropped(paths, pos));
+                            released = Some((paths, pos));
                         }
                         self.dragging = None;
                         self.dragged_out = false;
                     }
                     let is_dir = row.entry.as_ref().is_none_or(|e| e.is_dir);
+                    let over = (self.dragging.is_some() || released.is_some())
+                        && pointer.is_some_and(|p| rect.contains(p) && view.contains(p));
+                    if over {
+                        target = if is_dir {
+                            Some(row.path.clone())
+                        } else {
+                            row.path.parent().map(Path::to_path_buf)
+                        };
+                    }
                     let marked = row.entry.is_some() && self.marked.contains(&row.path);
                     let painter = ui.painter_at(rect);
                     if marked {
                         painter.rect_filled(rect, 5.0, pal.surface);
                     } else if response.hovered() {
                         painter.rect_filled(rect, 5.0, pal.crust);
+                    }
+                    if over && is_dir && self.dragging.is_some() {
+                        painter.rect_stroke(
+                            rect.shrink(1.0),
+                            5.0,
+                            egui::Stroke::new(1.5, pal.accent),
+                            egui::StrokeKind::Inside,
+                        );
                     }
                     let indent = row.depth as f32 * 14.0 + if tree { 14.0 } else { 0.0 };
                     if tree && is_dir && row.entry.is_some() {
@@ -694,6 +734,17 @@ impl ProjectPanel {
                             if !files.is_empty() && ui.button("Открыть").clicked() {
                                 open.extend(files.iter().cloned());
                             }
+                            let picked: Vec<PathBuf> = chosen.iter().map(|(p, _)| p.clone()).collect();
+                            if ui.button("Вырезать").clicked() {
+                                self.clip = Some((picked.clone(), false));
+                            }
+                            if ui.button("Копировать").clicked() {
+                                self.clip = Some((picked, true));
+                            }
+                            if chosen.len() == 1 && is_dir {
+                                self.paste_item(ui, &path);
+                            }
+                            ui.separator();
                             if chosen.len() == 1 && is_dir {
                                 self.create_items(ui, &path);
                             }
@@ -769,6 +820,53 @@ impl ProjectPanel {
                 }
             });
         let _ = area;
+        if (self.dragging.is_some() || released.is_some())
+            && target.is_none()
+            && pointer.is_some_and(|p| outer.contains(p))
+        {
+            target = Some(dir.clone());
+        }
+        let command = ui.input(|i| i.modifiers.command);
+        let valid = |paths: &[PathBuf], to: &Path, keep: bool| {
+            !paths.iter().any(|p| to.starts_with(p))
+                && (keep || !paths.iter().all(|p| p.parent() == Some(to)))
+        };
+        if let Some((paths, pos)) = released {
+            if outer.contains(pos) {
+                if let Some(to) = target.clone()
+                    && valid(&paths, &to, command)
+                {
+                    self.out.push(ProjectEvent::Move(paths, to, command));
+                }
+            } else {
+                self.out.push(ProjectEvent::Dropped(paths, pos));
+            }
+        }
+        if let (Some(paths), Some(pos)) = (&self.dragging, pointer)
+            && !self.dragged_out
+            && outer.contains(pos)
+            && let Some(to) = &target
+            && valid(paths, to, command)
+        {
+            let name = match paths.len() {
+                1 => paths[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                n => format!("файлов: {n}"),
+            };
+            let folder = to
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| to.display().to_string());
+            let verb = if command { "копировать в" } else { "переместить в" };
+            egui::Area::new(ui.scope_id().with("tror_project_move"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(pos + egui::vec2(14.0, 10.0))
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(RichText::new(format!("{name} → {verb} «{folder}»")).small());
+                    });
+                });
+        }
         if blank.clicked() {
             self.marked.clear();
         }
@@ -787,6 +885,31 @@ impl ProjectPanel {
                     i.consume_key(egui::Modifiers::NONE, egui::Key::F2),
                 )
             });
+            let (cut, copy, paste) = ui.input(|i| {
+                let mut found = (false, false, false);
+                for event in &i.events {
+                    match event {
+                        egui::Event::Cut => found.0 = true,
+                        egui::Event::Copy => found.1 = true,
+                        egui::Event::Paste(_) => found.2 = true,
+                        _ => {}
+                    }
+                }
+                found
+            });
+            if (cut || copy) && !chosen.is_empty() {
+                self.clip = Some((chosen.clone(), copy));
+            }
+            if paste && let Some((paths, keep)) = self.clip.clone() {
+                let to = match chosen.as_slice() {
+                    [one] if one.is_dir() => one.clone(),
+                    _ => dir.clone(),
+                };
+                self.out.push(ProjectEvent::Move(paths, to, keep));
+                if !keep {
+                    self.clip = None;
+                }
+            }
             if delete && !chosen.is_empty() {
                 self.prompt = Some(Prompt::Delete(chosen));
             } else if rename && chosen.len() == 1 {
@@ -797,13 +920,9 @@ impl ProjectPanel {
                 self.prompt = Some(Prompt::Rename(chosen[0].clone(), name));
             }
         }
-        let dir = if tree {
-            self.root.clone().unwrap_or_default()
-        } else {
-            self.cwd.clone()
-        };
         egui::Popup::context_menu(&blank).show(|ui| {
             ui.set_min_width(220.0);
+            self.paste_item(ui, &dir);
             self.create_items(ui, &dir);
             ui.separator();
             if ui.button("Обновить").clicked() {

@@ -290,21 +290,30 @@ fn go_home(dock: &mut DockState<Pane>, pane: Pane) -> bool {
     let Some(home) = homes().into_iter().find(|(p, _)| *p == pane).map(|(_, h)| h) else {
         return false;
     };
-    let Some(path) = dock.find_tab(&home.anchor) else {
+    let found = dock
+        .find_tab(&home.anchor)
+        .map(|p| (p.surface, p.node))
+        .or_else(|| {
+            (!steady(&home.anchor))
+                .then(|| zone_leaf(dock, Zone::Center))
+                .flatten()
+                .map(|p| (p.surface, p.node))
+        });
+    let Some((surface, anchor_node)) = found else {
         return false;
     };
-    if path.surface != SurfaceIndex::main() {
+    if surface != SurfaceIndex::main() {
         return false;
     }
     let tree = dock.main_surface_mut();
     if home.how == 0 {
-        if let Some(leaf) = tree[path.node].get_leaf_mut() {
+        if let Some(leaf) = tree[anchor_node].get_leaf_mut() {
             leaf.append_tab(pane);
             return true;
         }
         return false;
     }
-    let mut node = path.node;
+    let mut node = anchor_node;
     for _ in 0..home.depth {
         match tree.parent(node) {
             Some(up) => node = up,
@@ -323,18 +332,18 @@ fn go_home(dock: &mut DockState<Pane>, pane: Pane) -> bool {
 
 #[derive(Default)]
 pub struct Sizes {
-    known: Vec<(Pane, f32)>,
-    area: egui::Vec2,
+    pub known: Vec<(Pane, bool, f32)>,
+    pub seen: std::collections::HashMap<usize, (f32, Vec<Pane>)>,
+    pub changed: bool,
 }
 
-pub fn keep_sizes(dock: &mut DockState<Pane>, sizes: &mut Sizes, area: egui::Vec2, dragging: bool) {
-    let resized = (area - sizes.area).length() > 0.5;
-    sizes.area = area;
+pub fn keep_sizes(dock: &mut DockState<Pane>, sizes: &mut Sizes, dragging: bool) {
     let tree = dock.main_surface_mut();
     let linears: Vec<NodeIndex> = (0..tree.len())
         .map(NodeIndex)
         .filter(|i| tree[*i].get_linear().is_some())
         .collect();
+    let mut seen = std::collections::HashMap::new();
     for index in linears {
         let Some(linear) = tree[index].get_linear() else {
             continue;
@@ -348,53 +357,72 @@ pub fn keep_sizes(dock: &mut DockState<Pane>, sizes: &mut Sizes, area: egui::Vec
         let children = linear.children().to_vec();
         let shares = linear.shares().to_vec();
         let total: f32 = shares.iter().sum();
+        let firsts: Vec<Pane> = children.iter().filter_map(|c| first_tab(tree, *c)).collect();
+        let changed = sizes
+            .seen
+            .get(&index.0)
+            .is_none_or(|(old, panes)| (old - span).abs() > 0.5 || *panes != firsts);
+        seen.insert(index.0, (span, firsts));
         let sides: Vec<(usize, Pane)> = children
             .iter()
             .enumerate()
             .filter(|(_, c)| side(tree, **c))
             .filter_map(|(i, c)| Some((i, first_tab(tree, *c)?)))
             .collect();
-        if sides.is_empty() || sides.len() == children.len() {
+        if sides.is_empty() || sides.len() == children.len() || total <= 0.0 {
             continue;
         }
-        if !resized {
+        let known = |known: &[(Pane, bool, f32)], pane: &Pane| {
+            known
+                .iter()
+                .find(|(p, h, _)| p == pane && *h == horizontal)
+                .map(|(_, _, px)| *px)
+        };
+        let mut updated = shares.clone();
+        if changed {
+            let mut fixed = 0.0;
             for (i, pane) in &sides {
-                let known = sizes.known.iter().any(|(p, _)| p == pane);
-                if dragging || !known {
-                    sizes.known.retain(|(p, _)| p != pane);
-                    sizes.known.push((*pane, shares[*i] / total * span));
+                if let Some(px) = known(&sizes.known, pane) {
+                    updated[*i] = px / span * total;
+                }
+                fixed += updated[*i];
+            }
+            if fixed > total * 0.8 {
+                let scale = total * 0.8 / fixed;
+                for (i, _) in &sides {
+                    updated[*i] *= scale;
+                }
+                fixed = total * 0.8;
+            }
+            let flex: f32 = (0..children.len())
+                .filter(|i| !sides.iter().any(|(s, _)| s == i))
+                .map(|i| shares[i])
+                .sum();
+            for i in 0..children.len() {
+                if !sides.iter().any(|(s, _)| *s == i) {
+                    updated[i] = if flex > 0.0 {
+                        shares[i] / flex * (total - fixed)
+                    } else {
+                        total - fixed
+                    };
                 }
             }
-            continue;
+            if updated != shares
+                && let Some(linear) = tree[index].get_linear_mut()
+            {
+                linear.set_shares(updated.clone());
+            }
         }
-        let mut updated = shares.clone();
-        let mut fixed = 0.0;
         for (i, pane) in &sides {
-            if let Some((_, px)) = sizes.known.iter().find(|(p, _)| p == pane) {
-                updated[*i] = px / span * total;
+            if known(&sizes.known, pane).is_none() || (dragging && !changed) {
+                let px = updated[*i] / total * span;
+                sizes.known.retain(|(p, h, _)| !(p == pane && *h == horizontal));
+                sizes.known.push((*pane, horizontal, px));
+                sizes.changed = true;
             }
-            fixed += updated[*i];
-        }
-        if fixed > total * 0.8 {
-            let scale = total * 0.8 / fixed;
-            for (i, _) in &sides {
-                updated[*i] *= scale;
-            }
-            fixed = total * 0.8;
-        }
-        let flex: f32 = (0..children.len())
-            .filter(|i| !sides.iter().any(|(s, _)| s == i))
-            .map(|i| shares[i])
-            .sum();
-        for i in 0..children.len() {
-            if !sides.iter().any(|(s, _)| *s == i) {
-                updated[i] = if flex > 0.0 { shares[i] / flex * (total - fixed) } else { total - fixed };
-            }
-        }
-        if let Some(linear) = tree[index].get_linear_mut() {
-            linear.set_shares(updated);
         }
     }
+    sizes.seen = seen;
 }
 
 pub fn show(dock: &mut DockState<Pane>, pane: Pane, floats: &Floats) {
@@ -744,6 +772,73 @@ pub fn style(pal: &Palette, egui_style: &egui::Style, radius: u8) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn layout(tree: &mut egui_stack::Tree<Pane>, node: NodeIndex, rect: egui::Rect) {
+        tree[node].set_rect(rect);
+        let Some(linear) = tree[node].get_linear() else {
+            return;
+        };
+        let horizontal = matches!(linear.dir, egui_stack::LinearDir::Horizontal);
+        let children = linear.children().to_vec();
+        let shares = linear.shares().to_vec();
+        let total: f32 = shares.iter().sum();
+        let mut start = if horizontal { rect.left() } else { rect.top() };
+        for (child, share) in children.into_iter().zip(shares) {
+            let len = share / total * if horizontal { rect.width() } else { rect.height() };
+            let part = if horizontal {
+                egui::Rect::from_min_size(egui::pos2(start, rect.top()), egui::vec2(len, rect.height()))
+            } else {
+                egui::Rect::from_min_size(egui::pos2(rect.left(), start), egui::vec2(rect.width(), len))
+            };
+            layout(tree, child, part);
+            start += len;
+        }
+    }
+
+    fn frame(dock: &mut DockState<Pane>, sizes: &mut Sizes, dragging: bool) {
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 800.0));
+        layout(dock.main_surface_mut(), NodeIndex::root(), area);
+        keep_sizes(dock, sizes, dragging);
+        layout(dock.main_surface_mut(), NodeIndex::root(), area);
+        remember_homes(dock);
+    }
+
+    fn width(dock: &DockState<Pane>, pane: Pane) -> f32 {
+        let path = dock.find_tab(&pane).unwrap();
+        dock.main_surface()[path.node].rect().unwrap().width()
+    }
+
+    #[test]
+    fn side_panels_keep_their_width() {
+        let mut dock = new();
+        sync(&mut dock, &[1]);
+        show(&mut dock, Pane::Project, &Vec::new());
+        let doc = dock.find_tab(&Pane::Doc(1)).unwrap().node;
+        dock.main_surface_mut().split_right(doc, 0.6, vec![Pane::Db]);
+        let mut sizes = Sizes::default();
+        frame(&mut dock, &mut sizes, false);
+        let db = width(&dock, Pane::Db);
+        let root = NodeIndex::root();
+        if let Some(linear) = dock.main_surface_mut()[root].get_linear_mut() {
+            let mut shares = linear.shares().to_vec();
+            let delta = shares[0] * 0.6;
+            shares[0] += delta;
+            shares[1] -= delta;
+            linear.set_shares(shares);
+        }
+        frame(&mut dock, &mut sizes, true);
+        frame(&mut dock, &mut sizes, true);
+        let project = width(&dock, Pane::Project);
+        assert!((width(&dock, Pane::Db) - db).abs() < 1.0, "{db} -> {}", width(&dock, Pane::Db));
+        frame(&mut dock, &mut sizes, false);
+        hide(&mut dock, Pane::Db);
+        frame(&mut dock, &mut sizes, false);
+        assert!((width(&dock, Pane::Project) - project).abs() < 1.0);
+        show(&mut dock, Pane::Db, &Vec::new());
+        frame(&mut dock, &mut sizes, false);
+        assert!((width(&dock, Pane::Db) - db).abs() < 1.0, "{db} -> {}", width(&dock, Pane::Db));
+        assert!((width(&dock, Pane::Project) - project).abs() < 1.0);
+    }
 
     fn zones(dock: &DockState<Pane>) -> Vec<Vec<Pane>> {
         dock.iter_leaves()

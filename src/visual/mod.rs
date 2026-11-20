@@ -1,4 +1,5 @@
 pub mod model;
+pub mod docx;
 mod ops;
 mod paste;
 
@@ -68,6 +69,7 @@ pub struct Visual {
     menu: Option<Pos2>,
     color_menu: Option<(bool, Pos2)>,
     chars_menu: Option<Pos2>,
+    pub notice: Option<String>,
     base_dir: Option<std::path::PathBuf>,
 }
 
@@ -112,6 +114,7 @@ impl Visual {
             menu: None,
             color_menu: None,
             chars_menu: None,
+            notice: None,
             base_dir: doc.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()),
         };
         if visual.paras.is_empty() {
@@ -533,6 +536,20 @@ impl Visual {
                     self.insert_block_after(Block::new(Kind::Raw("<hr>".into())), true);
                     *changed = Some(EditKind::Other);
                 }
+                if tool(ui, pal, "W", "Вставить документ Word (.docx)…", false)
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Документ Word", &["docx"])
+                        .pick_file()
+                {
+                    match docx::to_html(&path) {
+                        Ok(html) => {
+                            if self.insert_html(&html) {
+                                *changed = Some(EditKind::Other);
+                            }
+                        }
+                        Err(e) => self.notice = Some(format!("Не удалось открыть {}: {e}", path.display())),
+                    }
+                }
                 let chars = tool(ui, pal, "Ω", "Специальный символ", false);
                 if chars {
                     self.chars_menu = ui.ctx().pointer_latest_pos();
@@ -670,6 +687,7 @@ impl Visual {
                         for (i, hex) in colors.iter().enumerate() {
                             let color = parse_color(hex).unwrap_or(pal.text);
                             let (rect, response) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::click());
+                            let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
                             ui.painter().rect_filled(rect, 3.0, color);
                             ui.painter().rect_stroke(rect, 3.0, Stroke::new(1.0, pal.border), egui::StrokeKind::Inside);
                             if response.on_hover_text(*hex).clicked() {
@@ -1269,6 +1287,7 @@ enum Icon {
 
 fn icon_tool(ui: &mut Ui, pal: &Palette, icon: Icon, hint: &str, active: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 26.0), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     let painter = ui.painter_at(rect.expand(1.0));
     if active {
         painter.rect_filled(rect, 5.0, pal.surface);
@@ -1393,7 +1412,7 @@ fn tool(ui: &mut Ui, pal: &Palette, label: &str, hint: &str, active: bool) -> bo
     let button = Button::new(text)
         .min_size(egui::vec2(28.0, 26.0))
         .corner_radius(CornerRadius::same(5))
-        .fill(if active { pal.surface } else { Color32::TRANSPARENT });
+        .frame_when_inactive(active);
     ui.add(button).on_hover_text(hint).clicked()
 }
 
@@ -1409,7 +1428,7 @@ fn style_tool(ui: &mut Ui, pal: &Palette, label: &str, hint: &str, style: Style,
     let button = Button::new(text)
         .min_size(egui::vec2(28.0, 26.0))
         .corner_radius(CornerRadius::same(5))
-        .fill(if active { pal.surface } else { Color32::TRANSPARENT });
+        .frame_when_inactive(active);
     ui.add(button).on_hover_text(hint).clicked()
 }
 

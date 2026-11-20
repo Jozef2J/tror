@@ -6,8 +6,35 @@ pub fn primary(text: impl Into<String>, pal: &Palette) -> egui::Button<'static> 
     egui::Button::new(RichText::new(text.into()).color(pal.base)).fill(pal.accent)
 }
 
-pub fn secondary(text: impl Into<String>, pal: &Palette) -> egui::Button<'static> {
-    egui::Button::new(text.into()).fill(pal.surface)
+pub fn secondary(text: impl Into<String>, _pal: &Palette) -> egui::Button<'static> {
+    egui::Button::new(text.into())
+}
+
+pub trait Lit {
+    fn lit(self, ui: &Ui) -> Self;
+}
+
+impl Lit for egui::Response {
+    fn lit(self, ui: &Ui) -> Self {
+        if self.enabled() && (self.hovered() || self.is_pointer_button_down_on()) {
+            let alpha = if self.is_pointer_button_down_on() {
+                48
+            } else {
+                26
+            };
+            let color = if ui.visuals().dark_mode {
+                Color32::from_white_alpha(alpha)
+            } else {
+                Color32::from_black_alpha(alpha)
+            };
+            ui.painter().rect_filled(
+                self.rect,
+                ui.visuals().widgets.inactive.corner_radius,
+                color,
+            );
+        }
+        self
+    }
 }
 
 pub const FORM_LABEL: f32 = 86.0;
@@ -167,9 +194,18 @@ pub fn port_field(ui: &mut Ui, port: &mut u16, width: f32) -> egui::Response {
 
 pub fn dots_button(ui: &mut Ui, pal: &Palette) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
     if response.hovered() || open {
-        ui.painter().rect_filled(rect, 5.0, pal.surface);
+        ui.painter().rect_filled(
+            rect,
+            5.0,
+            if response.is_pointer_button_down_on() {
+                pal.surface_hover
+            } else {
+                pal.surface
+            },
+        );
     }
     let color = if response.hovered() || open {
         pal.text
@@ -185,9 +221,18 @@ pub fn dots_button(ui: &mut Ui, pal: &Palette) -> egui::Response {
 
 pub fn plus_button(ui: &mut Ui, pal: &Palette, size: egui::Vec2) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
     if response.hovered() || open {
-        ui.painter().rect_filled(rect, 6.0, pal.surface);
+        ui.painter().rect_filled(
+            rect,
+            6.0,
+            if response.is_pointer_button_down_on() {
+                pal.surface_hover
+            } else {
+                pal.surface
+            },
+        );
     }
     let color = if response.hovered() || open {
         pal.text
@@ -216,6 +261,7 @@ pub fn plus_button(ui: &mut Ui, pal: &Palette, size: egui::Vec2) -> egui::Respon
 
 pub fn scroll_arrow(ui: &mut Ui, pal: &Palette, forward: bool, enabled: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 22.0), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     let color = if !enabled {
         pal.faint.gamma_multiply(0.5)
     } else if response.hovered() {
@@ -323,8 +369,17 @@ pub fn paint_icon(painter: &egui::Painter, center: Pos2, is_dir: bool, name: &st
 
 pub fn refresh_button(ui: &mut Ui, pal: &Palette) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.hovered() {
-        ui.painter().rect_filled(rect, 5.0, pal.surface);
+        ui.painter().rect_filled(
+            rect,
+            5.0,
+            if response.is_pointer_button_down_on() {
+                pal.surface_hover
+            } else {
+                pal.surface
+            },
+        );
     }
     let color = if response.hovered() {
         pal.text
@@ -520,6 +575,7 @@ mod tests {
 
 fn step_button(ui: &mut Ui, pal: &Palette, plus: bool, enabled: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     let lit = enabled && response.hovered();
     ui.painter()
         .rect_filled(rect, 6.0, if lit { pal.surface_hover } else { pal.surface });
@@ -1201,6 +1257,7 @@ pub fn profile_dialogs(
                                 egui::Button::new(RichText::new("Удалить").color(pal.base))
                                     .fill(pal.warn),
                             )
+                            .lit(ui)
                             .clicked()
                         {
                             action = Some(ProfileAction::Delete(*index));

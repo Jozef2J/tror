@@ -1,4 +1,5 @@
 use super::*;
+use crate::widgets::Lit;
 
 impl TrorApp {
     pub(super) fn update_ui(&mut self, ctx: &egui::Context, pal: &Palette, now: f64) {
@@ -119,6 +120,7 @@ impl TrorApp {
                     ui.horizontal(|ui| {
                         if ui
                             .add(crate::widgets::primary("Перезапустить сейчас", pal))
+                            .lit(ui)
                             .clicked()
                         {
                             match crate::update::restart() {
@@ -140,6 +142,7 @@ impl TrorApp {
                         if can_install
                             && ui
                                 .add(crate::widgets::primary("Скачать и установить", pal))
+                                .lit(ui)
                                 .clicked()
                         {
                             self.update.busy = true;

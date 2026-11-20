@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use crate::widgets::Lit;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
@@ -1032,7 +1033,7 @@ impl RemotePanel {
             ui.add_space(4.0);
             ui.label(RichText::new("Подключений пока нет.").color(pal.subtext));
             if ui
-                .add(Button::new("Создать профиль").fill(pal.surface))
+                .add(Button::new("Создать профиль"))
                 .clicked()
             {
                 self.open_editor();
@@ -1088,7 +1089,7 @@ impl RemotePanel {
         }
         let width = (ui.available_width() - 4.0).max(20.0);
         if ui
-            .add_sized([width, 24.0], Button::new(label).fill(pal.surface).truncate())
+            .add_sized([width, 24.0], Button::new(label).truncate())
             .clicked()
         {
             if active {
@@ -1280,7 +1281,7 @@ impl RemotePanel {
                         let dropped = std::mem::take(&mut self.failed);
                         self.forget(dropped);
                     }
-                    if ui.add(crate::widgets::primary("Повторить", pal).small()).clicked() {
+                    if ui.add(crate::widgets::primary("Повторить", pal).small()).lit(ui).clicked() {
                         self.retry_failed();
                     }
                 });
@@ -1413,7 +1414,6 @@ impl RemotePanel {
             if ui
                 .add(
                     Button::new("Текущая")
-                        .fill(pal.surface)
                         .min_size(egui::vec2(88.0, FORM_ROW)),
                 )
                 .on_hover_text("Папка, открытая в панели хоста")
@@ -1437,7 +1437,7 @@ impl RemotePanel {
             let size = egui::vec2(0.0, FORM_ROW);
             if self.search_job.is_some() {
                 if ui
-                    .add(Button::new("Остановить").fill(pal.surface).min_size(size))
+                    .add(Button::new("Остановить").min_size(size))
                     .clicked()
                     && let Some(job) = &self.search_job
                 {
@@ -1448,7 +1448,7 @@ impl RemotePanel {
                 .add_enabled(
                     !self.search_query.trim().is_empty(),
                     crate::widgets::primary("Найти", pal).min_size(size),
-                )
+                ).lit(ui)
                 .clicked()
             {
                 start = true;
@@ -2193,7 +2193,7 @@ impl RemotePanel {
                         .add_enabled(
                             total > 0,
                             crate::widgets::primary(label, pal),
-                        )
+                        ).lit(ui)
                         .clicked();
                     close = crate::app::dialog_button(ui, pal, "Отмена", false);
                 });
@@ -2632,7 +2632,7 @@ impl RemotePanel {
                     });
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if ui.add(Button::new("Добавить").fill(pal.surface)).clicked() {
+                        if ui.add(Button::new("Добавить")).clicked() {
                             editor.drafts.push(Profile::new(format!(
                                 "Профиль {}",
                                 editor.drafts.len() + 1
@@ -2643,7 +2643,7 @@ impl RemotePanel {
                         if ui
                             .add_enabled(
                                 !editor.drafts.is_empty(),
-                                Button::new("Удалить").fill(pal.surface),
+                                Button::new("Удалить"),
                             )
                             .clicked()
                         {
@@ -2765,7 +2765,7 @@ impl RemotePanel {
                                         ui.label(RichText::new("проверка…").color(pal.subtext));
                                     });
                                 } else if ui
-                                    .add(Button::new("Проверить подключение").fill(pal.surface))
+                                    .add(Button::new("Проверить подключение"))
                                     .clicked()
                                 {
                                     test = true;

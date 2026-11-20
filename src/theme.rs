@@ -295,6 +295,7 @@ pub fn apply(ctx: &egui::Context, p: &Palette, dark: bool, radius: u8, ui_size: 
     v.selection.bg_fill = p.selection;
     v.selection.stroke = Stroke::new(1.0, p.accent);
     v.text_cursor.stroke = Stroke::new(2.0, p.accent);
+    v.interact_cursor = Some(egui::CursorIcon::PointingHand);
 
     v.widgets.noninteractive.bg_fill = p.mantle;
     v.widgets.noninteractive.weak_bg_fill = p.mantle;
@@ -303,20 +304,21 @@ pub fn apply(ctx: &egui::Context, p: &Palette, dark: bool, radius: u8, ui_size: 
     v.widgets.noninteractive.corner_radius = radius;
 
     v.widgets.inactive.bg_fill = p.surface;
-    v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+    v.widgets.inactive.weak_bg_fill = p.surface;
     v.widgets.inactive.bg_stroke = Stroke::NONE;
     v.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text);
     v.widgets.inactive.corner_radius = radius;
 
     v.widgets.hovered.bg_fill = p.surface_hover;
-    v.widgets.hovered.weak_bg_fill = p.surface;
+    v.widgets.hovered.weak_bg_fill = blend(p.surface_hover, p.accent, 0.14);
     v.widgets.hovered.bg_stroke = Stroke::NONE;
     v.widgets.hovered.fg_stroke = Stroke::new(1.0, grip);
     v.widgets.hovered.corner_radius = radius;
     v.widgets.hovered.expansion = 0.0;
 
-    v.widgets.active.bg_fill = p.surface_hover;
-    v.widgets.active.weak_bg_fill = p.surface_hover;
+    let pressed = blend(p.surface_hover, p.accent, 0.28);
+    v.widgets.active.bg_fill = pressed;
+    v.widgets.active.weak_bg_fill = pressed;
     v.widgets.active.bg_stroke = Stroke::NONE;
     v.widgets.active.fg_stroke = Stroke::new(1.5, p.accent);
     v.widgets.active.corner_radius = radius;

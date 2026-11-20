@@ -1,4 +1,5 @@
 use super::*;
+use crate::widgets::Lit;
 
 #[derive(Default)]
 pub(super) struct Manager {
@@ -56,13 +57,13 @@ impl TrorApp {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Плагины").strong().size(15.0));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(Button::new("Перечитать").fill(pal.surface)).clicked() {
+                    if ui.add(Button::new("Перечитать")).clicked() {
                         reload = true;
                     }
-                    if ui.add(Button::new("Открыть папку").fill(pal.surface)).clicked() {
+                    if ui.add(Button::new("Открыть папку")).clicked() {
                         open_dir = dir.clone();
                     }
-                    if ui.add(crate::widgets::primary("Установить из zip…", pal)).clicked() {
+                    if ui.add(crate::widgets::primary("Установить из zip…", pal)).lit(ui).clicked() {
                         pick_zip = true;
                     }
                 });

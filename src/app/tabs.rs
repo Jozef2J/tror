@@ -178,6 +178,10 @@ impl TrorApp {
                 let focus = active && !modal_open && !self.search.open;
                 let size = self.settings.look.font_size;
                 editor.ui(ui, &mut self.docs[index], pal, size, focus);
+                if let Some(text) = editor.notice.take() {
+                    let now = ui.input(|i| i.time);
+                    self.notify(text, now);
+                }
                 if !active
                     && ui.ctx().memory(|m| {
                         m.focused()
@@ -261,10 +265,10 @@ impl TrorApp {
             ui.add_space(8.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(8.0);
-                if ui.add(Button::new("Очистить").fill(pal.surface)).clicked() {
+                if ui.add(Button::new("Очистить")).clicked() {
                     self.log.clear();
                 }
-                if ui.add(Button::new("Копировать всё").fill(pal.surface)).clicked() {
+                if ui.add(Button::new("Копировать всё")).clicked() {
                     let text: Vec<&str> = self.log.iter().map(|(t, _)| t.as_str()).collect();
                     ui.ctx().copy_text(text.join("\n"));
                 }

@@ -17,12 +17,15 @@ impl Floats {
 
 #[cfg(windows)]
 mod imp {
-    use std::sync::atomic::{AtomicIsize, Ordering};
-    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GWLP_HWNDPARENT, GetForegroundWindow, GetWindowTextW,
-        GetWindowThreadProcessId, SetWindowLongPtrW,
+        EnumWindows, GWLP_HWNDPARENT, GetForegroundWindow, GetWindowRect, GetWindowTextW,
+        GetWindowThreadProcessId, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
+        WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
     };
 
     static MAIN: AtomicIsize = AtomicIsize::new(0);
@@ -40,7 +43,90 @@ mod imp {
         let hwnd = unsafe { GetForegroundWindow() };
         if !hwnd.is_null() && ours(hwnd) {
             MAIN.store(hwnd as isize, Ordering::Relaxed);
+            unsafe { SetWindowSubclass(hwnd, Some(steady_dpi), 1, 0) };
         }
+    }
+
+    static MOVING: AtomicBool = AtomicBool::new(false);
+    static PENDING: AtomicBool = AtomicBool::new(false);
+    static START: AtomicU64 = AtomicU64::new(0);
+
+    fn rect(hwnd: HWND) -> RECT {
+        let mut r = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        unsafe { GetWindowRect(hwnd, &mut r) };
+        r
+    }
+
+    fn place(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                x,
+                y,
+                w,
+                h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        };
+    }
+
+    unsafe extern "system" fn steady_dpi(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _data: usize,
+    ) -> LRESULT {
+        match msg {
+            WM_ENTERSIZEMOVE => {
+                let r = rect(hwnd);
+                let dpi = unsafe { GetDpiForWindow(hwnd) } as u64;
+                let w = (r.right - r.left).max(0) as u64;
+                let h = (r.bottom - r.top).max(0) as u64;
+                START.store(dpi << 40 | w << 20 | h, Ordering::Relaxed);
+                MOVING.store(true, Ordering::Relaxed);
+                PENDING.store(false, Ordering::Relaxed);
+            }
+            WM_DPICHANGED if MOVING.load(Ordering::Relaxed) => {
+                let before = rect(hwnd);
+                let result = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                let after = rect(hwnd);
+                place(
+                    hwnd,
+                    after.left,
+                    after.top,
+                    before.right - before.left,
+                    before.bottom - before.top,
+                );
+                PENDING.store(true, Ordering::Relaxed);
+                return result;
+            }
+            WM_EXITSIZEMOVE => {
+                MOVING.store(false, Ordering::Relaxed);
+                let result = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                if PENDING.swap(false, Ordering::Relaxed) {
+                    let start = START.load(Ordering::Relaxed);
+                    let dpi = (start >> 40) as i64;
+                    let now = unsafe { GetDpiForWindow(hwnd) } as i64;
+                    if dpi > 0 && now > 0 && dpi != now {
+                        let w = ((start >> 20) & 0xFFFFF) as i64 * now / dpi;
+                        let h = (start & 0xFFFFF) as i64 * now / dpi;
+                        let r = rect(hwnd);
+                        place(hwnd, r.left, r.top, w as i32, h as i32);
+                    }
+                }
+                return result;
+            }
+            _ => {}
+        }
+        unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
     }
 
     pub fn cursor() -> Option<(f32, f32)> {

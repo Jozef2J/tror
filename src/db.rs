@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use crate::widgets::Lit;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -1100,7 +1101,7 @@ impl DbPanel {
             crate::widgets::wrapped_row(ui, 8.0, |ui| {
                 ui.label(RichText::new("Подключений к базам пока нет.").color(pal.subtext));
                 if ui
-                    .add(Button::new("Создать подключение").fill(pal.surface))
+                    .add(Button::new("Создать подключение"))
                     .clicked()
                 {
                     self.open_editor(store, true);
@@ -1181,7 +1182,7 @@ impl DbPanel {
         }
         crate::widgets::wrapped_row(ui, 8.0, |ui| {
             let label = if active { "Отключить" } else { "Подключить" };
-            if ui.add(Button::new(label).fill(pal.surface)).clicked() {
+            if ui.add(Button::new(label)).clicked() {
                 if active {
                     self.disconnect();
                     self.status = "Отключено".into();
@@ -1410,7 +1411,7 @@ impl DbPanel {
                 .add_enabled(
                     !self.busy,
                     crate::widgets::primary("Выполнить", pal),
-                )
+                ).lit(ui)
                 .clicked();
             if (run || (run_key && output.response.has_focus())) && !self.busy {
                 self.run(selected.unwrap_or_else(|| self.sql.clone()));
@@ -1478,7 +1479,7 @@ impl DbPanel {
                     if ui
                         .add(
                             crate::widgets::primary(format!("Применить изменения ({count})"), pal),
-                        )
+                        ).lit(ui)
                         .clicked()
                     {
                         apply = true;
@@ -1996,7 +1997,7 @@ impl DbPanel {
                 for (i, profile) in store.databases.iter().enumerate() {
                     let mut button = Button::new(profile.name.as_str());
                     if editor.index == Some(i) {
-                        button = button.fill(pal.surface);
+                        button = button.fill(pal.selection);
                     }
                     if ui.add(button).clicked() {
                         switch = Some(i);
@@ -2120,7 +2121,7 @@ impl DbPanel {
                     ui.spinner();
                     ui.label(RichText::new("проверка…").color(pal.subtext));
                 });
-            } else if ui.add(Button::new("Проверить подключение").fill(pal.surface)).clicked() {
+            } else if ui.add(Button::new("Проверить подключение")).clicked() {
                 test = true;
             }
             if let Some(result) = &editor.result {

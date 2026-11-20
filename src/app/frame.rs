@@ -351,10 +351,9 @@ impl eframe::App for TrorApp {
             .collect();
         dock::pins_first(&mut dock, &pinned);
         let pressed = ctx.input(|i| i.pointer.any_down());
-        if let Some(area) = dock.main_surface().root_node().and_then(|n| n.rect())
-            && area.is_finite()
-        {
-            dock::keep_sizes(&mut dock, &mut self.sizes, area.size(), pressed);
+        dock::keep_sizes(&mut dock, &mut self.sizes, pressed);
+        if std::mem::take(&mut self.sizes.changed) {
+            self.settings.panel_sizes = self.sizes.known.clone();
         }
         if !pressed {
             dock::enforce_min(&mut dock);
@@ -739,6 +738,31 @@ impl TrorApp {
             ProjectEvent::Transfer(paths, keep) => {
                 self.move_between_projects(paths, second, keep, now)
             }
+            ProjectEvent::Move(paths, dir, keep) => {
+                match crate::files::transfer(&paths, &dir, keep) {
+                    Ok(moved) => {
+                        if !keep {
+                            self.relocate(&moved);
+                        }
+                        self.notify(
+                            format!(
+                                "{} {} в {}",
+                                if keep {
+                                    "Скопировано:"
+                                } else {
+                                    "Перемещено:"
+                                },
+                                moved.len(),
+                                dir.display()
+                            ),
+                            now,
+                        );
+                    }
+                    Err(e) => self.notify(format!("Не удалось: {e}"), now),
+                }
+                self.project.reload();
+                self.project2.reload();
+            }
             ProjectEvent::Dropped(paths, pos) => {
                 let other = if second {
                     &self.project
@@ -774,22 +798,46 @@ impl TrorApp {
             return;
         };
         match crate::files::transfer(&paths, &dir, keep) {
-            Ok(n) => self.notify(
-                format!(
-                    "{} {n} в {}",
-                    if keep {
-                        "Скопировано:"
-                    } else {
-                        "Перемещено:"
-                    },
-                    dir.display()
-                ),
-                now,
-            ),
+            Ok(moved) => {
+                if !keep {
+                    self.relocate(&moved);
+                }
+                let n = moved.len();
+                self.notify(
+                    format!(
+                        "{} {n} в {}",
+                        if keep {
+                            "Скопировано:"
+                        } else {
+                            "Перемещено:"
+                        },
+                        dir.display()
+                    ),
+                    now,
+                )
+            }
             Err(e) => self.notify(format!("Не удалось: {e}"), now),
         }
         self.project.reload();
         self.project2.reload();
+    }
+
+    fn relocate(&mut self, moved: &[(PathBuf, PathBuf)]) {
+        for doc in &mut self.docs {
+            let Some(path) = doc.path.clone() else {
+                continue;
+            };
+            for (from, to) in moved {
+                if let Ok(rest) = path.strip_prefix(from) {
+                    doc.path = Some(if rest.as_os_str().is_empty() {
+                        to.clone()
+                    } else {
+                        to.join(rest)
+                    });
+                    break;
+                }
+            }
+        }
     }
 }
 

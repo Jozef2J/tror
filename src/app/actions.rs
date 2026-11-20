@@ -230,6 +230,10 @@ impl TrorApp {
             }
             Action::ResetLayout => {
                 self.dock = dock::new();
+                self.sizes = Default::default();
+                self.settings.panel_sizes.clear();
+                self.settings.homes.clear();
+                dock::set_homes(Vec::new());
                 self.focus_editor = true;
             }
             Action::Preview => {

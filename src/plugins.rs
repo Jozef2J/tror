@@ -238,7 +238,7 @@ pub fn peek_manifest(archive: &Path) -> Result<crate::wasm::Manifest, String> {
     serde_json::from_slice(&json).map_err(|e| format!("plugin.json: {e}"))
 }
 
-fn unzip(archive: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+pub(crate) fn unzip(archive: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     use std::io::Read;
     let data = std::fs::read(archive).map_err(|e| e.to_string())?;
     if data.len() > 64 << 20 {

@@ -187,7 +187,12 @@ pub(crate) fn dialog_button(ui: &mut Ui, pal: &Palette, text: &str, primary: boo
     } else {
         crate::widgets::secondary(text, pal)
     };
-    ui.add(button.min_size(egui::vec2(0.0, 28.0))).clicked()
+    let response = ui.add(button.min_size(egui::vec2(0.0, 28.0)));
+    if primary {
+        crate::widgets::Lit::lit(response, ui).clicked()
+    } else {
+        response.clicked()
+    }
 }
 
 pub(crate) fn window_header(ui: &mut Ui, pal: &Palette, title: &str, closable: bool) -> bool {
@@ -223,8 +228,17 @@ pub(crate) enum Icon {
 
 pub(crate) fn icon_button(ui: &mut Ui, pal: &Palette, icon: Icon) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.hovered() {
-        ui.painter().rect_filled(rect, 6.0, pal.surface);
+        ui.painter().rect_filled(
+            rect,
+            6.0,
+            if response.is_pointer_button_down_on() {
+                pal.surface_hover
+            } else {
+                pal.surface
+            },
+        );
     }
     let color = if response.hovered() {
         pal.text
@@ -384,6 +398,7 @@ impl TrorApp {
             .unwrap_or_default();
         settings.migrate();
         let plugins_off = settings.plugins_off.clone();
+        let panel_sizes = settings.panel_sizes.clone();
         crate::vault::set_in_file(settings.passwords_in_file);
         let mut dock = cc
             .storage
@@ -425,7 +440,10 @@ impl TrorApp {
             remotes: (0..hosts).map(|i| RemotePanel::new(i as u8)).collect(),
             project,
             project2,
-            sizes: Default::default(),
+            sizes: dock::Sizes {
+                known: panel_sizes,
+                ..Default::default()
+            },
             zoom_acc: 0.0,
             log: Vec::new(),
             console: ConsolePanel::new(),

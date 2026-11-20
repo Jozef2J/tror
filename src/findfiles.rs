@@ -7,6 +7,7 @@ use std::{
     },
 };
 
+use crate::widgets::Lit;
 use eframe::egui::{self, Button, Color32, RichText, ScrollArea, Sense, Ui};
 use regex::{Regex, RegexBuilder};
 
@@ -387,11 +388,7 @@ impl FindFiles {
                     .desired_width(crate::widgets::field_width(ui, 94.0)),
             );
             if ui
-                .add(
-                    Button::new("Выбрать…")
-                        .fill(pal.surface)
-                        .min_size(egui::vec2(88.0, FORM_ROW)),
-                )
+                .add(Button::new("Выбрать…").min_size(egui::vec2(88.0, FORM_ROW)))
                 .clicked()
             {
                 let mut dialog = rfd::FileDialog::new();
@@ -416,12 +413,9 @@ impl FindFiles {
             let ready = !self.query.is_empty() && !busy && root.is_some();
             go |= ui
                 .add_enabled(ready, crate::widgets::primary("Найти", pal).min_size(size))
+                .lit(ui)
                 .clicked();
-            if busy
-                && ui
-                    .add(Button::new("Остановить").fill(pal.surface).min_size(size))
-                    .clicked()
-            {
+            if busy && ui.add(Button::new("Остановить").min_size(size)).clicked() {
                 self.cancel();
                 self.note = "Остановлено".to_owned();
             }
@@ -435,21 +429,20 @@ impl FindFiles {
                         Button::new(RichText::new(label).color(Color32::WHITE))
                             .fill(Color32::from_rgb(0xc8, 0x3c, 0x3c)),
                     )
+                    .lit(ui)
                     .clicked()
                 {
                     self.confirm = false;
                     let dirty = self.dirty.clone();
                     self.start_replace(dirty, ui.ctx());
                 }
-                if ui.add(Button::new("Отмена").fill(pal.surface)).clicked() {
+                if ui.add(Button::new("Отмена")).clicked() {
                     self.confirm = false;
                 }
             } else if ui
                 .add_enabled(
                     fresh,
-                    Button::new("Заменить во всех найденных…")
-                        .fill(pal.surface)
-                        .min_size(size),
+                    Button::new("Заменить во всех найденных…").min_size(size),
                 )
                 .on_disabled_hover_text("Сначала выполните поиск")
                 .clicked()

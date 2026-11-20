@@ -160,6 +160,7 @@ pub struct Settings {
     pub keys: BTreeMap<String, String>,
     pub detached: Vec<crate::dock::Pane>,
     pub homes: Vec<(crate::dock::Pane, crate::dock::Home)>,
+    pub panel_sizes: Vec<(crate::dock::Pane, bool, f32)>,
     pub project: Option<PathBuf>,
     pub project2: Option<PathBuf>,
     pub recent_projects: Vec<PathBuf>,
@@ -204,6 +205,7 @@ impl Default for Settings {
             keys: BTreeMap::new(),
             detached: Vec::new(),
             homes: Vec::new(),
+            panel_sizes: Vec::new(),
             project: None,
             project2: None,
             recent_projects: Vec::new(),
@@ -336,7 +338,7 @@ fn font_row(ui: &mut Ui, pal: &Palette, label: &str, builtin: &str, font: &mut O
             .unwrap_or_else(|| format!("{builtin} (встроенный)"));
         ui.label(RichText::new(name).color(pal.subtext));
         if ui
-            .add(Button::new("Выбрать файл…").fill(pal.surface))
+            .add(Button::new("Выбрать файл…"))
             .clicked()
             && let Some(path) = rfd::FileDialog::new()
                 .add_filter("Шрифты", &["ttf", "otf", "ttc"])
@@ -676,7 +678,7 @@ fn files_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
                     for (tree, text) in [(true, "Дерево"), (false, "Список")] {
                         let mut button = Button::new(text);
                         if *value == tree {
-                            button = button.fill(pal.surface);
+                            button = button.fill(pal.selection);
                         }
                         if ui.add(button).clicked() {
                             *value = tree;
@@ -708,7 +710,7 @@ fn files_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
     );
     if settings.columns != crate::widgets::COLUMN_DEFAULTS
         && ui
-            .add(Button::new("Сбросить ширину колонок").fill(pal.surface))
+            .add(Button::new("Сбросить ширину колонок"))
             .clicked()
     {
         settings.columns = crate::widgets::COLUMN_DEFAULTS;
@@ -927,7 +929,6 @@ fn keys_section(ui: &mut Ui, pal: &Palette, keys: KeysEdit, note: &mut Option<St
                         pal.text
                     };
                     let button = Button::new(RichText::new(text).color(color))
-                        .fill(pal.surface)
                         .min_size(egui::vec2(150.0, 0.0));
                     if ui.add(button).clicked() {
                         *keys.capturing = if capturing { None } else { Some(index) };
@@ -979,7 +980,7 @@ fn body(
                     for (value, label) in [(true, "Тёмная"), (false, "Светлая")] {
                         let mut button = Button::new(label);
                         if look.dark == value {
-                            button = button.fill(pal.surface);
+                            button = button.fill(pal.selection);
                         }
                         if ui.add(button).clicked() {
                             look.dark = value;
@@ -1030,7 +1031,7 @@ fn body(
                     || look.log_dark != base.log_dark
                     || look.log_light != base.log_light;
                 if ui
-                    .add_enabled(custom, Button::new("Сбросить цветовую схему").fill(pal.surface))
+                    .add_enabled(custom, Button::new("Сбросить цветовую схему"))
                     .on_hover_text("Акцент, цвета интерфейса, подсветка кода и журнал — как после установки, для обеих тем")
                     .clicked()
                 {
@@ -1120,7 +1121,7 @@ fn body(
                     };
                     let custom = scheme.as_str() != default || !code.is_empty();
                     if ui
-                        .add_enabled(custom, Button::new("Сбросить").fill(pal.surface))
+                        .add_enabled(custom, Button::new("Сбросить"))
                         .on_hover_text(format!(
                             "Схема «{default}» без собственных цветов, только для {mode} темы"
                         ))
@@ -1220,7 +1221,7 @@ fn body(
         heading(ui, pal, "Оформление целиком", "");
         ui.horizontal(|ui| {
             if ui
-                .add(Button::new("Экспорт в файл…").fill(pal.surface))
+                .add(Button::new("Экспорт в файл…"))
                 .clicked()
                 && let Some(path) = rfd::FileDialog::new()
                     .set_file_name("tror-theme.json")
@@ -1235,7 +1236,7 @@ fn body(
                 });
             }
             if ui
-                .add(Button::new("Импорт из файла…").fill(pal.surface))
+                .add(Button::new("Импорт из файла…"))
                 .clicked()
                 && let Some(path) = rfd::FileDialog::new()
                     .add_filter("Оформление TrorPad", &["json"])
@@ -1256,7 +1257,7 @@ fn body(
                 });
             }
             if ui
-                .add(Button::new("Сбросить всё оформление").fill(pal.surface))
+                .add(Button::new("Сбросить всё оформление"))
                 .clicked()
             {
                 *look = Look {

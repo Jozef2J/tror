@@ -1,4 +1,5 @@
 use super::*;
+use crate::widgets::Lit;
 
 impl TrorApp {
     pub(super) fn show_popups(&mut self, ctx: &egui::Context, pal: &Palette) {
@@ -31,6 +32,7 @@ impl TrorApp {
                 .fixed_pos(rect.min)
                 .show(ctx, |ui| {
                     let (rect, response) = ui.allocate_exact_size(rect.size(), Sense::click());
+                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
                     let painter = ui.painter();
                     painter.rect(
                         rect,
@@ -84,8 +86,17 @@ impl TrorApp {
         hint: &str,
     ) -> bool {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 26.0), Sense::click());
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
         if response.hovered() {
-            ui.painter().rect_filled(rect, 7.0, pal.surface);
+            ui.painter().rect_filled(
+                rect,
+                7.0,
+                if response.is_pointer_button_down_on() {
+                    pal.surface_hover
+                } else {
+                    pal.surface
+                },
+            );
         }
         let color = if active {
             pal.accent
@@ -251,25 +262,20 @@ impl TrorApp {
             let size = egui::vec2(0.0, FORM_ROW);
             if ui
                 .add_enabled(ready, crate::widgets::primary("Найти", pal).min_size(size))
+                .lit(ui)
                 .on_hover_text("Найти далее (Enter, F3)")
                 .clicked()
             {
                 s.pending = Some(Pending::Next);
             }
             if ui
-                .add_enabled(
-                    ready,
-                    Button::new("Заменить").fill(pal.surface).min_size(size),
-                )
+                .add_enabled(ready, Button::new("Заменить").min_size(size))
                 .clicked()
             {
                 s.pending = Some(Pending::Replace);
             }
             if ui
-                .add_enabled(
-                    ready,
-                    Button::new("Заменить все").fill(pal.surface).min_size(size),
-                )
+                .add_enabled(ready, Button::new("Заменить все").min_size(size))
                 .clicked()
             {
                 s.pending = Some(Pending::ReplaceAll);
@@ -277,9 +283,7 @@ impl TrorApp {
             if ui
                 .add_enabled(
                     ready && !s.matches.is_empty(),
-                    Button::new("Удалить повторения")
-                        .fill(pal.surface)
-                        .min_size(size),
+                    Button::new("Удалить повторения").min_size(size),
                 )
                 .on_hover_text(
                     "Удаляет все найденные совпадения. Если совпадение занимает строку целиком, \
@@ -392,6 +396,7 @@ impl TrorApp {
     }
 
     pub(super) fn status_bar(&mut self, ui: &mut Ui, pal: &Palette) {
+        ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
         let now = ui.input(|i| i.time);
         let toast = self
             .toast
@@ -525,9 +530,7 @@ impl TrorApp {
             );
             ui.add_space(14.0);
             let button = |text: &str| {
-                Button::new(RichText::new(text).color(pal.text))
-                    .fill(pal.surface)
-                    .min_size(egui::vec2(200.0, 32.0))
+                Button::new(RichText::new(text).color(pal.text)).min_size(egui::vec2(200.0, 32.0))
             };
             if ui.add(button("Новый файл")).clicked() {
                 actions.push(Action::New);

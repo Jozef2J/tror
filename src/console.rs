@@ -101,8 +101,9 @@ where
 
 fn split_icon(ui: &mut Ui, pal: &Palette, split: Split, hint: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.hovered() {
-        ui.painter().rect_filled(rect, 5.0, pal.surface);
+        ui.painter().rect_filled(rect, 5.0, if response.is_pointer_button_down_on() { pal.surface_hover } else { pal.surface });
     }
     let color = if split != Split::Single {
         pal.accent
@@ -855,7 +856,7 @@ impl ConsolePanel {
                     order.sort_by_cached_key(|(_, p)| p.name.to_lowercase());
                     for (index, profile) in order {
                         let text = format!("{}  ·  {}", profile.name, profile.protocol.label());
-                        let chip = ui.add(Button::new(text).fill(pal.surface));
+                        let chip = ui.add(Button::new(text));
                         if chip.clicked() {
                             open = Some(profile.clone());
                         }
@@ -873,7 +874,7 @@ impl ConsolePanel {
                         .filter(|p| p.protocol == remote::Protocol::Sftp)
                     {
                         let text = format!("{}  ·  SFTP-профиль", host.name);
-                        if ui.add(Button::new(text).fill(pal.surface)).clicked() {
+                        if ui.add(Button::new(text)).clicked() {
                             open = Some(TermProfile::from_host(host));
                         }
                     }
@@ -1028,7 +1029,7 @@ impl ConsolePanel {
                     });
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if ui.add(Button::new("Добавить").fill(pal.surface)).clicked() {
+                        if ui.add(Button::new("Добавить")).clicked() {
                             editor.drafts.push(TermProfile {
                                 name: format!("Сервер {}", editor.drafts.len() + 1),
                                 ..Default::default()
@@ -1037,7 +1038,7 @@ impl ConsolePanel {
                             editor.result = None;
                         }
                         if ui
-                            .add_enabled(!editor.drafts.is_empty(), Button::new("Удалить").fill(pal.surface))
+                            .add_enabled(!editor.drafts.is_empty(), Button::new("Удалить"))
                             .clicked()
                         {
                             editor.drafts.remove(editor.index);
@@ -1135,7 +1136,7 @@ impl ConsolePanel {
                                         ui.spinner();
                                         ui.label(RichText::new("проверка…").color(pal.subtext));
                                     });
-                                } else if ui.add(Button::new("Проверить подключение").fill(pal.surface)).clicked() {
+                                } else if ui.add(Button::new("Проверить подключение")).clicked() {
                                     test = true;
                                 }
                                 if let Some(result) = &editor.result {
