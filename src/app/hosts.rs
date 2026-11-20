@@ -75,6 +75,10 @@ impl TrorApp {
                     }
                 }
                 PanelEvent::Toast(text) => self.notify(text, now),
+                PanelEvent::Console(profile) => {
+                    self.console.open(*profile, ctx);
+                    dock::show(&mut self.dock, Pane::Console, &self.settings.floats);
+                }
                 PanelEvent::Listed {
                     profile,
                     dir,

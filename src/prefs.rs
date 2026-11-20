@@ -370,6 +370,29 @@ const SECTIONS: [&str; 9] = [
     "Горячие клавиши",
 ];
 
+const KEYWORDS: [&str; 9] = [
+    "тема режим тёмная светлая акцент цвета интерфейса цветовая схема фон кнопки поля наведение",
+    "шрифт интерфейса кода размер текста межстрочный интервал масштаб окна скругление углов оформление экспорт импорт сбросить",
+    "подсветка кода синтаксис схема цвета ключевые слова строки комментарии",
+    "редактор перенос строк номера строк подсветка строки курсор мигающий парная скобка пробелы табуляция отступы ширина tab автодополнение подсказки параметров",
+    "вкладки сеанс восстановление закреплённые сохранение при выходе обновления панели",
+    "файлы хосты структура проект дерево список колонки размер дата пароли подключений хранить пароли",
+    "консоль строк истории сеанс журнал цвета журнала html twig",
+    "база данных строк результата sql запрос",
+    "горячие клавиши сочетание клавиш shortcut",
+];
+
+fn matches_query(index: usize, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty()
+        || SECTIONS[index].to_lowercase().contains(&query)
+        || query.split_whitespace().all(|word| {
+            let count = word.chars().count();
+            let stem: String = word.chars().take(if count > 4 { count - 1 } else { count }).collect();
+            KEYWORDS[index].contains(&stem)
+        })
+}
+
 pub fn ui(
     ui: &mut Ui,
     pal: &Palette,
@@ -379,6 +402,14 @@ pub fn ui(
     let mut note = None;
     let ctx = ui.ctx().clone();
     settings.section = settings.section.min(SECTIONS.len() - 1);
+    let query_id = egui::Id::unique("tror_prefs_query");
+    let mut query: String = ctx.data_mut(|d| d.get_temp(query_id)).unwrap_or_default();
+    let shown: Vec<usize> = (0..SECTIONS.len())
+        .filter(|i| matches_query(*i, &query))
+        .collect();
+    if !shown.is_empty() && !shown.contains(&settings.section) {
+        settings.section = shown[0];
+    }
     let wide = ui.available_width() >= 560.0;
     let mut page = |ui: &mut Ui, settings: &mut Settings| {
         ScrollArea::vertical()
@@ -428,20 +459,28 @@ pub fn ui(
                 egui::Layout::top_down_justified(egui::Align::Min),
                 |ui| {
                     ui.add_space(14.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut query)
+                            .hint_text("Поиск настроек")
+                            .margin(egui::Margin::symmetric(8, 5)),
+                    );
+                    ui.add_space(8.0);
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.spacing_mut().button_padding = egui::vec2(12.0, 6.0);
-                    for (index, name) in SECTIONS.iter().enumerate() {
+                    for &index in &shown {
                         let on = settings.section == index;
-                        let text =
-                            RichText::new(*name).color(if on { pal.text } else { pal.subtext });
-                        let button = Button::new(text).frame(true).fill(if on {
-                            pal.surface
-                        } else {
-                            Color32::TRANSPARENT
-                        });
+                        let text = RichText::new(SECTIONS[index])
+                            .color(if on { pal.text } else { pal.subtext });
+                        let mut button = Button::new(text).frame_when_inactive(on);
+                        if on {
+                            button = button.fill(pal.surface);
+                        }
                         if ui.add(button).clicked() {
                             settings.section = index;
                         }
+                    }
+                    if shown.is_empty() {
+                        ui.label(RichText::new("Ничего не найдено").color(pal.subtext));
                     }
                 },
             );
@@ -455,13 +494,19 @@ pub fn ui(
                 .width(220.0)
                 .selected_text(SECTIONS[settings.section])
                 .show_ui(ui, |ui| {
-                    for (index, name) in SECTIONS.iter().enumerate() {
-                        ui.selectable_value(&mut settings.section, index, *name);
+                    for &index in &shown {
+                        ui.selectable_value(&mut settings.section, index, SECTIONS[index]);
                     }
                 });
+            ui.add(
+                egui::TextEdit::singleline(&mut query)
+                    .hint_text("Поиск настроек")
+                    .desired_width(180.0),
+            );
         });
         page(ui, settings);
     }
+    ctx.data_mut(|d| d.insert_temp(query_id, query));
     note
 }
 

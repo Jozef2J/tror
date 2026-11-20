@@ -499,6 +499,12 @@ pub enum Cmd {
     },
     Mkdir(String),
     Rename(String, String),
+    Copy(String, String),
+    Archive {
+        dir: String,
+        names: Vec<String>,
+        zip: bool,
+    },
     Delete {
         path: String,
         dir: bool,
@@ -1279,12 +1285,16 @@ impl Backend {
     }
 
     fn extract(&mut self, path: &str, dest: Option<&str>) -> Result<(), String> {
-        let Backend::Sftp { session, .. } = self else {
-            return Err("распаковка доступна только по SFTP".into());
-        };
         let command = extract_command(path, dest).ok_or("неизвестный формат архива")?;
+        self.exec(&command, "распаковка")
+    }
+
+    fn exec(&mut self, command: &str, what: &str) -> Result<(), String> {
+        let Backend::Sftp { session, .. } = self else {
+            return Err(format!("{what}: доступно только по SFTP"));
+        };
         let mut channel = session.channel_session().map_err(|e| e.to_string())?;
-        channel.exec(&command).map_err(|e| e.to_string())?;
+        channel.exec(command).map_err(|e| e.to_string())?;
         let mut out = String::new();
         let _ = channel.read_to_string(&mut out);
         let mut err = String::new();
@@ -1373,6 +1383,11 @@ fn describe(cmd: &Cmd) -> String {
             if *recursive { " (recursive)" } else { "" }
         ),
         Cmd::Touch { path, mtime } => format!("[SFTP] setstat {path} mtime {mtime}"),
+        Cmd::Copy(from, to) => format!("[SSH] exec: cp -a {} {}", quote(from), quote(to)),
+        Cmd::Archive { dir, names, zip } => format!(
+            "[SSH] exec: {}",
+            crate::archive::remote_command(dir, names, *zip)
+        ),
         Cmd::Extract { path, dest } => format!(
             "[SSH] exec: {}",
             extract_command(path, dest.as_deref()).unwrap_or_default()
@@ -1480,6 +1495,14 @@ fn execute(
         Cmd::Touch { path, mtime } => {
             backend.touch(path, *mtime)?;
             (Event::Changed(parent(path)), "ok".into())
+        }
+        Cmd::Archive { dir, names, zip } => {
+            backend.exec(&crate::archive::remote_command(dir, names, *zip), "архивирование")?;
+            (Event::Changed(dir.clone()), "archived".into())
+        }
+        Cmd::Copy(from, to) => {
+            backend.exec(&format!("cp -a -- {} {}", quote(from), quote(to)), "копирование на сервере")?;
+            (Event::Changed(parent(to)), "copied".into())
         }
         Cmd::Extract { path, dest } => {
             backend.extract(path, dest.as_deref())?;
@@ -1716,7 +1739,7 @@ const BINARY: &[&str] = &[
     "doc", "docx", "xls", "xlsx",
 ];
 
-fn quote(text: &str) -> String {
+pub fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 

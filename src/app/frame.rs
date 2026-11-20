@@ -102,16 +102,86 @@ impl eframe::App for TrorApp {
         } else {
             None
         };
+        let pointer = ctx.input(|i| i.pointer.latest_pos());
+        let released = ctx.input(|i| i.pointer.any_released());
+        let held = ctx.input(|i| i.pointer.any_down());
+        let local_drag = self.project.dragging().is_some() || self.project2.dragging().is_some();
+        let inner = if local_drag {
+            pointer.and_then(|pos| {
+                self.remotes
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, r)| Some((i, r.drop_target(pos)?)))
+            })
+        } else {
+            None
+        };
         for (i, panel) in self.remotes.iter_mut().enumerate() {
             panel.external_hover = target
                 .as_ref()
                 .filter(|(t, _)| hovering && *t == i)
+                .or(inner.as_ref().filter(|(t, _)| *t == i))
                 .map(|(_, dir)| dir.clone());
+        }
+        let outside = window_left(&ctx);
+        if outside {
+            self.project.start_drag_out();
+            self.project2.start_drag_out();
+        }
+        self.project.external_hover = None;
+        self.project2.external_hover = None;
+        for index in 0..self.remotes.len() {
+            let Some(items) = self.remotes[index].dragging(&ctx) else {
+                continue;
+            };
+            if outside {
+                if cfg!(any(target_os = "windows", target_os = "macos"))
+                    && self.remotes[index].out_drag.is_none()
+                {
+                    self.remotes[index].prepare_drag_out(items);
+                }
+                continue;
+            }
+            let Some(pos) = pointer else {
+                continue;
+            };
+            for second in [false, true] {
+                let panel = if second {
+                    &mut self.project2
+                } else {
+                    &mut self.project
+                };
+                let Some(dir) = panel.drop_target(pos) else {
+                    continue;
+                };
+                if released {
+                    let now = ctx.input(|i| i.time);
+                    self.remotes[index].download_into(items.clone(), &dir);
+                    self.notify(format!("Скачивание в {}", dir.display()), now);
+                } else {
+                    panel.external_hover = Some(dir);
+                }
+                break;
+            }
+        }
+        for panel in &mut self.remotes {
+            if panel.out_drag.is_some()
+                && let Some(paths) = panel.drag_out_ready()
+            {
+                panel.out_drag = None;
+                if held {
+                    drag_out(frame, paths);
+                }
+            }
         }
         if hovering {
             ctx.request_repaint();
         }
         self.drop_hint = hovering.then(|| target.as_ref().map(|(i, dir)| (*i, dir.clone())));
+        if inner.is_some() {
+            self.drop_hint = Some(inner.clone());
+            ctx.request_repaint();
+        }
         if !dropped.is_empty() {
             if let Some((i, dir)) = target {
                 self.remotes[i].upload_local_to(dropped, &dir);
@@ -271,7 +341,12 @@ impl eframe::App for TrorApp {
             None => {}
         }
         self.update_ui(&ctx, &pal, now);
-        if let Some(paths) = self.project.drag_out.take() {
+        if let Some(paths) = self
+            .project
+            .drag_out
+            .take()
+            .or_else(|| self.project2.drag_out.take())
+        {
             drag_out(frame, paths);
         }
         if self.settings.autosave && now - self.recovery.last > 10.0 {
@@ -318,6 +393,7 @@ impl eframe::App for TrorApp {
         }
         self.refresh_tab_orders();
         let mut dock = std::mem::replace(&mut self.dock, DockState::new(Vec::new()));
+        dock::keep_sizes(&mut dock, &mut self.sizes, false);
         let style = dock::style(&pal, ui.style(), self.settings.look.radius);
         self.console_shown = false;
         self.settings_shown = false;
@@ -334,6 +410,7 @@ impl eframe::App for TrorApp {
                 .show_leaf_close_all_buttons(false)
                 .show_leaf_collapse_buttons(false)
                 .leaf_min_size(&|tabs: &[Pane]| dock::leaf_min(tabs) - egui::vec2(0.0, 34.0))
+                .leaf_rigid_size(&dock::leaf_rigid)
                 .show_inside(ui, &mut viewer);
         });
         if let Some((_, Pane::Doc(id))) = dock.find_active_focused()
@@ -776,7 +853,10 @@ impl TrorApp {
                     .iter_mut()
                     .find(|r| r.connected() && r.area().contains(pos))
                 {
-                    panel.upload_local(paths);
+                    match panel.drop_target(pos) {
+                        Some(dir) => panel.upload_local_to(paths, &dir),
+                        None => panel.upload_local(paths),
+                    }
                 }
             }
         }
@@ -839,6 +919,18 @@ impl TrorApp {
             }
         }
     }
+}
+
+fn window_left(ctx: &egui::Context) -> bool {
+    let size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
+    if let (Some((x, y)), Some(size)) = (owner::cursor(), size) {
+        let ppp = ctx.pixels_per_point();
+        return x < -2.0 || y < -2.0 || x > size.x * ppp + 2.0 || y > size.y * ppp + 2.0;
+    }
+    ctx.input(|i| i.pointer.any_down())
+        && ctx
+            .input(|i| i.pointer.latest_pos())
+            .is_none_or(|p| !ctx.content_rect().contains(p))
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]

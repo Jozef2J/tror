@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::widgets::Lit;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 
 use eframe::egui::{
@@ -29,6 +29,7 @@ pub enum PanelEvent {
         names: Vec<String>,
     },
     Toast(String),
+    Console(Box<remote::TermProfile>),
     Relay {
         target: u8,
         path: String,
@@ -55,6 +56,7 @@ enum Prompt {
     Rename { from: String, name: String },
     Delete(Vec<(String, bool)>),
     Extract(Vec<String>, String),
+    Move(Vec<(String, String)>),
 }
 
 struct AttrsDialog {
@@ -142,10 +144,13 @@ pub struct RemotePanel {
     anchor: Option<String>,
     busy: Option<String>,
     prompt: Option<Prompt>,
+    clip: Option<(Vec<String>, bool)>,
+    notes: Vec<PanelEvent>,
     attrs: Option<AttrsDialog>,
     host_key: Option<(String, bool)>,
     editor: Option<ProfileEditor>,
     save_to: HashMap<String, PathBuf>,
+    pub out_drag: Option<(PathBuf, Vec<PathBuf>)>,
     drop_zone: Option<Rect>,
     drop_dirs: Vec<(Rect, String)>,
     pub external_hover: Option<String>,
@@ -220,10 +225,13 @@ impl RemotePanel {
             anchor: None,
             busy: None,
             prompt: None,
+            clip: None,
+            notes: Vec::new(),
             attrs: None,
             host_key: None,
             editor: None,
             save_to: HashMap::new(),
+            out_drag: None,
             drop_zone: None,
             drop_dirs: Vec::new(),
             external_hover: None,
@@ -266,6 +274,53 @@ impl RemotePanel {
 
     pub fn drop_zone(&self) -> Option<Rect> {
         self.drop_zone.filter(|_| self.can_upload())
+    }
+
+    pub fn download_into(&mut self, items: Vec<(String, bool)>, folder: &Path) {
+        for (path, dir) in items {
+            if dir {
+                self.walks.insert(path.clone(), Walk::Download(folder.to_path_buf()));
+                let name = remote::file_name(&path).to_owned();
+                self.send(Cmd::Walk(path), format!("Чтение папки {name}…"));
+            } else {
+                let name = remote::file_name(&path).to_owned();
+                self.save_to.insert(path.clone(), folder.join(&name));
+                self.send(Cmd::Download(path), format!("Скачивание {name}…"));
+            }
+        }
+    }
+
+    pub fn dragging(&self, ctx: &egui::Context) -> Option<Vec<(String, bool)>> {
+        egui::DragAndDrop::payload::<Dragged>(ctx)
+            .filter(|d| d.panel == self.id)
+            .map(|d| d.paths.clone())
+    }
+
+    pub fn prepare_drag_out(&mut self, items: Vec<(String, bool)>) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let temp = std::env::temp_dir().join("trorpad-drag").join(stamp.to_string());
+        if std::fs::create_dir_all(&temp).is_err() {
+            return;
+        }
+        let tops = items
+            .iter()
+            .map(|(path, _)| temp.join(remote::file_name(path)))
+            .collect();
+        self.download_into(items, &temp);
+        self.out_drag = Some((temp, tops));
+    }
+
+    pub fn drag_out_ready(&self) -> Option<Vec<PathBuf>> {
+        let (temp, tops) = self.out_drag.as_ref()?;
+        let busy = self.save_to.values().any(|p| p.starts_with(temp))
+            || self
+                .walks
+                .values()
+                .any(|w| matches!(w, Walk::Download(f) if f.starts_with(temp)));
+        (!busy).then(|| tops.clone())
     }
 
     pub fn drop_target(&self, pos: egui::Pos2) -> Option<String> {
@@ -673,16 +728,12 @@ impl RemotePanel {
                 .selected
                 .min(self.store.profiles.len().saturating_sub(1));
         }
-        let mut out = Vec::new();
+        let mut out = std::mem::take(&mut self.notes);
         if let Some(editor) = &mut self.editor
             && let Some(rx) = &editor.probe
             && let Ok(result) = rx.try_recv()
         {
             editor.probe = None;
-            match &result {
-                Ok(text) => crate::trace::popup(format!("Подключение работает: {text}"), true),
-                Err(e) => crate::trace::popup(format!("Не удалось подключиться: {e}"), false),
-            }
             editor.result = Some(result);
         }
         self.poll_saver(&mut out);
@@ -1001,6 +1052,73 @@ impl RemotePanel {
         self.send(Cmd::Stat(first), "Чтение свойств…");
     }
 
+    fn paste(&mut self, dir: &str) {
+        let Some((paths, copy)) = self.clip.clone() else {
+            return;
+        };
+        for from in paths {
+            let name = remote::file_name(&from).to_owned();
+            if from == dir || dir.starts_with(&format!("{from}/")) {
+                self.notes.push(PanelEvent::Toast(format!(
+                    "Нельзя вставить «{name}» внутрь самой себя"
+                )));
+                continue;
+            }
+            if copy {
+                let target = if remote::parent(&from) == dir {
+                    let (stem, ext) = match name.rfind('.').filter(|&i| i > 0) {
+                        Some(i) => (&name[..i], &name[i..]),
+                        None => (name.as_str(), ""),
+                    };
+                    remote::join(dir, &format!("{stem} (копия){ext}"))
+                } else {
+                    remote::join(dir, &name)
+                };
+                self.send(Cmd::Copy(from, target), "Копирование…");
+            } else if remote::parent(&from) != dir && !dir.starts_with(&format!("{from}/")) && from != dir {
+                self.send(Cmd::Rename(from.clone(), remote::join(dir, &name)), "Перемещение…");
+            }
+        }
+        if !copy {
+            self.clip = None;
+        }
+    }
+
+    fn clip_items(&mut self, ui: &mut Ui, chosen: &[String], dir: Option<&str>) {
+        if !chosen.is_empty() {
+            if ui.button("Вырезать").clicked() {
+                self.clip = Some((chosen.to_vec(), false));
+            }
+            if ui.button("Копировать").clicked() {
+                self.clip = Some((chosen.to_vec(), true));
+            }
+        }
+        if let Some(dir) = dir
+            && self.clip.is_some()
+            && ui.button("Вставить").clicked()
+        {
+            self.paste(dir);
+        }
+    }
+
+    fn console_here(&mut self, dir: &str) {
+        let Some(name) = self.conn.as_ref().map(|c| c.profile.clone()) else {
+            return;
+        };
+        let Some(profile) = self.store.profiles.iter().find(|p| p.name == name) else {
+            return;
+        };
+        if profile.protocol != remote::Protocol::Sftp {
+            self.notes.push(PanelEvent::Toast(
+                "Консоль доступна для SFTP-профилей (по SSH)".into(),
+            ));
+            return;
+        }
+        let mut term = remote::TermProfile::from_host(profile);
+        term.startup = format!("cd {}", remote::quote(dir));
+        self.notes.push(PanelEvent::Console(Box::new(term)));
+    }
+
     fn menu_items(&mut self, ui: &mut Ui, dir: &str) {
         if ui.button("Новый файл…").clicked() {
             self.prompt = Some(Prompt::NewFile(dir.to_owned(), String::new()));
@@ -1162,7 +1280,11 @@ impl RemotePanel {
                     }
                     ui.separator();
                     let cwd = self.cwd.clone();
+                    self.clip_items(ui, &[], Some(&cwd));
                     self.menu_items(ui, &cwd);
+                    if ui.button("Открыть консоль здесь").clicked() {
+                        self.console_here(&cwd);
+                    }
                     ui.separator();
                     let mut tree = self.tree;
                     ui.horizontal(|ui| {
@@ -1880,7 +2002,39 @@ impl RemotePanel {
                                     self.send(Cmd::Extract { path: archive, dest }, busy);
                                 }
                             }
+                            let picked: Vec<String> = chosen.iter().map(|(p, _)| p.clone()).collect();
+                            self.clip_items(
+                                ui,
+                                &picked,
+                                (chosen.len() == 1 && is_dir).then_some(path.as_str()),
+                            );
+                            let parent = remote::parent(&picked[0]);
+                            if picked.iter().all(|p| remote::parent(p) == parent) {
+                                ui.menu_button("Архивировать", |ui| {
+                                    for (label, zip) in [("TAR.GZ", false), ("ZIP", true)] {
+                                        if ui.button(label).clicked() {
+                                            let names = picked
+                                                .iter()
+                                                .map(|p| remote::file_name(p).to_owned())
+                                                .collect();
+                                            self.send(
+                                                Cmd::Archive {
+                                                    dir: parent.clone(),
+                                                    names,
+                                                    zip,
+                                                },
+                                                "Архивирование…",
+                                            );
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            }
+                            ui.separator();
                             if chosen.len() == 1 && is_dir {
+                                if ui.button("Открыть консоль здесь").clicked() {
+                                    self.console_here(&path);
+                                }
                                 if ui.button("Новый файл здесь…").clicked() {
                                     self.prompt = Some(Prompt::NewFile(path.clone(), String::new()));
                                 }
@@ -1989,6 +2143,28 @@ impl RemotePanel {
                     i.consume_key(egui::Modifiers::NONE, egui::Key::F2),
                 )
             });
+            let (cut, copy, paste) = ui.input(|i| {
+                let mut found = (false, false, false);
+                for event in &i.events {
+                    match event {
+                        egui::Event::Cut => found.0 = true,
+                        egui::Event::Copy => found.1 = true,
+                        egui::Event::Paste(_) => found.2 = true,
+                        _ => {}
+                    }
+                }
+                found
+            });
+            if (cut || copy) && !chosen.is_empty() {
+                self.clip = Some((chosen.iter().map(|(p, _)| p.clone()).collect(), copy));
+            }
+            if paste && self.clip.is_some() {
+                let dir = match chosen.as_slice() {
+                    [(one, true)] => one.clone(),
+                    _ => self.cwd.clone(),
+                };
+                self.paste(&dir);
+            }
             if delete && !chosen.is_empty() {
                 self.prompt = Some(Prompt::Delete(chosen.clone()));
             } else if rename && chosen.len() == 1 {
@@ -2002,7 +2178,11 @@ impl RemotePanel {
         let cwd = self.cwd.clone();
         egui::Popup::context_menu(&blank).show(|ui| {
             ui.set_min_width(220.0);
+            self.clip_items(ui, &[], Some(&cwd));
             self.menu_items(ui, &cwd);
+            if ui.button("Открыть консоль здесь").clicked() {
+                self.console_here(&cwd);
+            }
             ui.separator();
             if ui.button("Обновить").clicked() {
                 self.list(cwd.clone());
@@ -2038,18 +2218,16 @@ impl RemotePanel {
             } else {
                 format!("объектов: {}", dragged.paths.len())
             };
-            ui.ctx()
-                .layer_painter(egui::LayerId::new(
-                    egui::Order::Tooltip,
-                    egui::Id::unique("tror_drag"),
-                ))
-                .text(
-                    pos + egui::vec2(14.0, 10.0),
-                    egui::Align2::LEFT_TOP,
-                    text,
-                    egui::FontId::proportional(12.5),
-                    pal.text,
-                );
+            let _ = pal;
+            egui::Area::new(egui::Id::unique("tror_drag"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(pos + egui::vec2(14.0, 10.0))
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(RichText::new(text).small());
+                    });
+                });
         }
         if let Some(path) = toggle {
             if !self.expanded.remove(&path) {
@@ -2069,8 +2247,8 @@ impl RemotePanel {
             let name = remote::file_name(&path).to_owned();
             self.send(Cmd::Download(path), format!("Скачивание {name}…"));
         }
-        for (from, to) in moves {
-            self.send(Cmd::Rename(from, to), "Перемещение…");
+        if !moves.is_empty() {
+            self.prompt = Some(Prompt::Move(moves));
         }
         for path in walk {
             let name = remote::file_name(&path).to_owned();
@@ -2481,6 +2659,27 @@ impl RemotePanel {
                     Some(dest),
                     "Распаковать",
                 ),
+                Prompt::Move(moves) => {
+                    let dir = moves
+                        .first()
+                        .map(|(_, to)| remote::parent(to))
+                        .unwrap_or_default();
+                    if moves.len() == 1 {
+                        ui.label(format!(
+                            "Переместить «{}» в папку «{}»?",
+                            remote::file_name(&moves[0].0),
+                            remote::file_name(&dir)
+                        ));
+                    } else {
+                        ui.label(format!(
+                            "Переместить выбранные объекты ({}) в папку «{}»?",
+                            moves.len(),
+                            remote::file_name(&dir)
+                        ));
+                    }
+                    ui.label(RichText::new(dir.clone()).small().color(pal.subtext));
+                    (String::new(), None, "Переместить")
+                }
                 Prompt::Delete(items) => {
                     let folders = items.iter().filter(|(_, dir)| *dir).count();
                     if items.len() == 1 {
@@ -2584,6 +2783,11 @@ impl RemotePanel {
                         self.send(Cmd::Rename(from, to), "Переименование…");
                     }
                 }
+                Some(Prompt::Move(moves)) => {
+                    for (from, to) in moves {
+                        self.send(Cmd::Rename(from, to), "Перемещение…");
+                    }
+                }
                 Some(Prompt::Delete(items)) => {
                     for (path, dir) in items {
                         self.marked.remove(&path);
@@ -2614,223 +2818,229 @@ impl RemotePanel {
             ui.set_width(640.0);
             ui.label(RichText::new("Профили подключений").strong());
             ui.add_space(8.0);
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_width(180.0);
-                    ScrollArea::vertical().max_height(270.0).show(ui, |ui| {
-                        for (i, profile) in editor.drafts.iter().enumerate() {
-                            let name = if profile.name.trim().is_empty() {
-                                "без имени"
-                            } else {
-                                profile.name.as_str()
-                            };
-                            if ui.selectable_label(i == editor.index, name).clicked() {
-                                editor.index = i;
+            let limit = (ui.ctx().content_rect().height() - 200.0).max(200.0);
+            ScrollArea::vertical()
+                .id_salt("tror_profile_scroll")
+                .max_height(limit)
+                .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(180.0);
+                        ScrollArea::vertical().max_height(270.0).show(ui, |ui| {
+                            for (i, profile) in editor.drafts.iter().enumerate() {
+                                let name = if profile.name.trim().is_empty() {
+                                    "без имени"
+                                } else {
+                                    profile.name.as_str()
+                                };
+                                if ui.selectable_label(i == editor.index, name).clicked() {
+                                    editor.index = i;
+                                    editor.result = None;
+                                }
+                            }
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(Button::new("Добавить")).clicked() {
+                                editor.drafts.push(Profile::new(format!(
+                                    "Профиль {}",
+                                    editor.drafts.len() + 1
+                                )));
+                                editor.index = editor.drafts.len() - 1;
                                 editor.result = None;
                             }
-                        }
+                            if ui
+                                .add_enabled(
+                                    !editor.drafts.is_empty(),
+                                    Button::new("Удалить"),
+                                )
+                                .clicked()
+                            {
+                                editor.drafts.remove(editor.index);
+                                editor.index = editor.index.saturating_sub(1);
+                            }
+                        });
                     });
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui.add(Button::new("Добавить")).clicked() {
-                            editor.drafts.push(Profile::new(format!(
-                                "Профиль {}",
-                                editor.drafts.len() + 1
-                            )));
-                            editor.index = editor.drafts.len() - 1;
-                            editor.result = None;
-                        }
-                        if ui
-                            .add_enabled(
-                                !editor.drafts.is_empty(),
-                                Button::new("Удалить"),
-                            )
-                            .clicked()
-                        {
-                            editor.drafts.remove(editor.index);
-                            editor.index = editor.index.saturating_sub(1);
-                        }
-                    });
-                });
-                ui.add_space(10.0);
-                ui.vertical(|ui| {
-                    let Some(p) = editor.drafts.get_mut(editor.index) else {
-                        ui.label(RichText::new("Добавьте профиль.").color(pal.subtext));
-                        return;
-                    };
-                    egui::Grid::new("tror_profile_form")
-                        .num_columns(2)
-                        .spacing([10.0, 8.0])
-                        .show(ui, |ui| {
-                            let wide = 320.0;
-                            ui.label("Название");
-                            ui.add(TextEdit::singleline(&mut p.name).desired_width(wide));
-                            ui.end_row();
-                            ui.label("Протокол");
-                            ui.horizontal_wrapped(|ui| {
-                                ui.set_max_width(wide);
-                                for protocol in Protocol::ALL {
-                                    if ui
-                                        .selectable_label(p.protocol == protocol, protocol.label())
-                                        .clicked()
-                                        && p.protocol != protocol
-                                    {
-                                        if p.port == p.protocol.default_port() {
-                                            p.port = protocol.default_port();
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        let Some(p) = editor.drafts.get_mut(editor.index) else {
+                            ui.label(RichText::new("Добавьте профиль.").color(pal.subtext));
+                            return;
+                        };
+                        egui::Grid::new("tror_profile_form")
+                            .num_columns(2)
+                            .spacing([10.0, 8.0])
+                            .show(ui, |ui| {
+                                let wide = 320.0;
+                                ui.label("Название");
+                                ui.add(TextEdit::singleline(&mut p.name).desired_width(wide));
+                                ui.end_row();
+                                ui.label("Протокол");
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.set_max_width(wide);
+                                    for protocol in Protocol::ALL {
+                                        if ui
+                                            .selectable_label(p.protocol == protocol, protocol.label())
+                                            .clicked()
+                                            && p.protocol != protocol
+                                        {
+                                            if p.port == p.protocol.default_port() {
+                                                p.port = protocol.default_port();
+                                            }
+                                            p.protocol = protocol;
                                         }
-                                        p.protocol = protocol;
-                                    }
-                                }
-                            });
-                            ui.end_row();
-                            ui.label("Сервер");
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    TextEdit::singleline(&mut p.host)
-                                        .hint_text("example.org")
-                                        .desired_width(wide - 70.0),
-                                );
-                                widgets::port_field(ui, &mut p.port, 60.0)
-                                    .on_hover_text("Порт");
-                            });
-                            ui.end_row();
-                            ui.label("Пользователь");
-                            ui.add(TextEdit::singleline(&mut p.user).desired_width(wide));
-                            ui.end_row();
-                            ui.label("Пароль");
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    TextEdit::singleline(&mut p.password)
-                                        .password(!editor.reveal)
-                                        .desired_width(wide - 88.0),
-                                );
-                                let label = if editor.reveal { "Скрыть" } else { "Показать" };
-                                if ui
-                                    .add_sized([80.0, 22.0], Button::new(label))
-                                    .clicked()
-                                {
-                                    editor.reveal = !editor.reveal;
-                                }
-                            });
-                            ui.end_row();
-                            if p.protocol == Protocol::Sftp {
-                                ui.label("Файл ключа");
-                                ui.horizontal(|ui| {
-                                    ui.add(
-                                        TextEdit::singleline(&mut p.key_file)
-                                            .hint_text("необязательно")
-                                            .desired_width(wide - 78.0),
-                                    );
-                                    if ui.button("Обзор…").clicked()
-                                        && let Some(file) = rfd::FileDialog::new().pick_file()
-                                    {
-                                        p.key_file = file.display().to_string();
                                     }
                                 });
                                 ui.end_row();
-                                if !p.key_file.trim().is_empty() {
-                                    ui.label("");
-                                    match remote::key_kind(&p.key_file) {
-                                        Ok(kind) => ui.label(
-                                            RichText::new(format!("ключ: {kind}"))
-                                                .small()
-                                                .color(pal.subtext),
-                                        ),
-                                        Err(e) => {
-                                            ui.label(RichText::new(e).small().color(pal.warn))
-                                        }
-                                    };
-                                    ui.end_row();
-                                    ui.label("Парольная фраза");
+                                ui.label("Сервер");
+                                ui.horizontal(|ui| {
                                     ui.add(
-                                        TextEdit::singleline(&mut p.passphrase)
-                                            .password(!editor.reveal)
-                                            .hint_text("если ключ защищён")
-                                            .desired_width(wide),
+                                        TextEdit::singleline(&mut p.host)
+                                            .hint_text("example.org")
+                                            .desired_width(wide - 70.0),
                                     );
+                                    widgets::port_field(ui, &mut p.port, 60.0)
+                                        .on_hover_text("Порт");
+                                });
+                                ui.end_row();
+                                ui.label("Пользователь");
+                                ui.add(TextEdit::singleline(&mut p.user).desired_width(wide));
+                                ui.end_row();
+                                ui.label("Пароль");
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        TextEdit::singleline(&mut p.password)
+                                            .password(!editor.reveal)
+                                            .desired_width(wide - 88.0),
+                                    );
+                                    let label = if editor.reveal { "Скрыть" } else { "Показать" };
+                                    if ui
+                                        .add_sized([80.0, 22.0], Button::new(label))
+                                        .clicked()
+                                    {
+                                        editor.reveal = !editor.reveal;
+                                    }
+                                });
+                                ui.end_row();
+                                if p.protocol == Protocol::Sftp {
+                                    ui.label("Файл ключа");
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            TextEdit::singleline(&mut p.key_file)
+                                                .hint_text("необязательно")
+                                                .desired_width(wide - 78.0),
+                                        );
+                                        if ui.button("Обзор…").clicked()
+                                            && let Some(file) = rfd::FileDialog::new().pick_file()
+                                        {
+                                            p.key_file = file.display().to_string();
+                                        }
+                                    });
+                                    ui.end_row();
+                                    if !p.key_file.trim().is_empty() {
+                                        ui.label("");
+                                        match remote::key_kind(&p.key_file) {
+                                            Ok(kind) => ui.label(
+                                                RichText::new(format!("ключ: {kind}"))
+                                                    .small()
+                                                    .color(pal.subtext),
+                                            ),
+                                            Err(e) => {
+                                                ui.label(RichText::new(e).small().color(pal.warn))
+                                            }
+                                        };
+                                        ui.end_row();
+                                        ui.label("Парольная фраза");
+                                        ui.add(
+                                            TextEdit::singleline(&mut p.passphrase)
+                                                .password(!editor.reveal)
+                                                .hint_text("если ключ защищён")
+                                                .desired_width(wide),
+                                        );
+                                        ui.end_row();
+                                    }
+                                }
+                                if p.protocol.tls() {
+                                    ui.label("Сертификат");
+                                    ui.checkbox(&mut p.insecure_tls, "не проверять (самоподписанный)");
                                     ui.end_row();
                                 }
-                            }
-                            if p.protocol.tls() {
-                                ui.label("Сертификат");
-                                ui.checkbox(&mut p.insecure_tls, "не проверять (самоподписанный)");
+                                ui.label("");
+                                ui.vertical(|ui| {
+                                    ui.set_max_width(wide);
+                                    if editor.probe.is_some() {
+                                        ui.horizontal(|ui| {
+                                            ui.spinner();
+                                            ui.label(RichText::new("проверка…").color(pal.subtext));
+                                        });
+                                    } else if ui
+                                        .add(Button::new("Проверить подключение"))
+                                        .clicked()
+                                    {
+                                        test = true;
+                                    }
+                                    if let Some(result) = &editor.result {
+                                        let (text, color) = match result {
+                                            Ok(text) => (format!("Работает: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
+                                            Err(e) => (format!("Ошибка: {e}"), pal.warn),
+                                        };
+                                        ui.label(RichText::new(text).small().color(color));
+                                    }
+                                });
                                 ui.end_row();
-                            }
-                            ui.label("");
-                            ui.vertical(|ui| {
-                                ui.set_max_width(wide);
-                                if editor.probe.is_some() {
-                                    ui.horizontal(|ui| {
-                                        ui.spinner();
-                                        ui.label(RichText::new("проверка…").color(pal.subtext));
-                                    });
-                                } else if ui
-                                    .add(Button::new("Проверить подключение"))
-                                    .clicked()
-                                {
-                                    test = true;
-                                }
-                                if let Some(result) = &editor.result {
-                                    let (text, color) = match result {
-                                        Ok(text) => (format!("Работает: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
-                                        Err(e) => (format!("Ошибка: {e}"), pal.warn),
-                                    };
-                                    ui.label(RichText::new(text).small().color(color));
+                                ui.label("Начальная папка");
+                                ui.add(
+                                    TextEdit::singleline(&mut p.directory)
+                                        .hint_text("домашняя папка")
+                                        .desired_width(wide),
+                                );
+                                ui.end_row();
+                                ui.label("Адрес сайта");
+                                ui.add(
+                                    TextEdit::singleline(&mut p.url)
+                                        .hint_text("https://example.ru — для предпросмотра (F12)")
+                                        .desired_width(wide),
+                                );
+                                ui.end_row();
+                                if p.protocol == Protocol::Sftp {
+                                    ui.label("");
+                                    ui.label(RichText::new("Консоль по этому профилю").color(pal.subtext).small());
+                                    ui.end_row();
+                                    crate::console::appearance_rows(
+                                        ui,
+                                        pal,
+                                        &mut p.term_theme,
+                                        &mut p.term_font,
+                                        &mut p.term_font_size,
+                                        wide,
+                                    );
                                 }
                             });
-                            ui.end_row();
-                            ui.label("Начальная папка");
-                            ui.add(
-                                TextEdit::singleline(&mut p.directory)
-                                    .hint_text("домашняя папка")
-                                    .desired_width(wide),
-                            );
-                            ui.end_row();
-                            ui.label("Адрес сайта");
-                            ui.add(
-                                TextEdit::singleline(&mut p.url)
-                                    .hint_text("https://example.ru — для предпросмотра (F12)")
-                                    .desired_width(wide),
-                            );
-                            ui.end_row();
-                            if p.protocol == Protocol::Sftp {
-                                ui.label("");
-                                ui.label(RichText::new("Консоль по этому профилю").color(pal.subtext).small());
-                                ui.end_row();
-                                crate::console::appearance_rows(
-                                    ui,
-                                    pal,
-                                    &mut p.term_theme,
-                                    &mut p.term_font,
-                                    &mut p.term_font_size,
-                                    wide,
-                                );
-                            }
-                        });
-                    ui.add_space(4.0);
-                    let (text, color) = match p.protocol {
-                        Protocol::Sftp => (
-                            "Вход по паролю, по ключу (RSA, ECDSA, Ed25519) или через ssh-agent, если не заданы ни пароль, ни ключ. Если у ключа нет отдельной парольной фразы, используется поле «Пароль».",
-                            pal.subtext,
-                        ),
-                        Protocol::Ftp => ("FTP передаёт пароль и файлы без шифрования.", pal.warn),
-                        _ if p.insecure_tls => (
-                            "Соединение шифруется, но подлинность сервера не проверяется — \
-                             включайте только для своего сервера с самоподписанным сертификатом.",
-                            pal.warn,
-                        ),
-                        Protocol::Ftps => (
-                            "FTPS с явным TLS (AUTH TLS, обычно порт 21): шифруются и команды, и данные.",
-                            pal.subtext,
-                        ),
-                        Protocol::FtpsImplicit => (
-                            "Неявный FTPS (обычно порт 990): TLS включается сразу при соединении. Старый способ — выбирайте его, только если хостинг не поддерживает явный FTPS.",
-                            pal.subtext,
-                        ),
-                    };
-                    ui.label(RichText::new(text).color(color).small());
+                        ui.add_space(4.0);
+                        let (text, color) = match p.protocol {
+                            Protocol::Sftp => (
+                                "Вход по паролю, по ключу (RSA, ECDSA, Ed25519) или через ssh-agent, если не заданы ни пароль, ни ключ. Если у ключа нет отдельной парольной фразы, используется поле «Пароль».",
+                                pal.subtext,
+                            ),
+                            Protocol::Ftp => ("FTP передаёт пароль и файлы без шифрования.", pal.warn),
+                            _ if p.insecure_tls => (
+                                "Соединение шифруется, но подлинность сервера не проверяется — \
+                                 включайте только для своего сервера с самоподписанным сертификатом.",
+                                pal.warn,
+                            ),
+                            Protocol::Ftps => (
+                                "FTPS с явным TLS (AUTH TLS, обычно порт 21): шифруются и команды, и данные.",
+                                pal.subtext,
+                            ),
+                            Protocol::FtpsImplicit => (
+                                "Неявный FTPS (обычно порт 990): TLS включается сразу при соединении. Старый способ — выбирайте его, только если хостинг не поддерживает явный FTPS.",
+                                pal.subtext,
+                            ),
+                        };
+                        ui.label(RichText::new(text).color(color).small());
+                    });
                 });
-            });
+                });
             ui.add_space(10.0);
             ui.label(
                 RichText::new(format!(

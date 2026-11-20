@@ -637,7 +637,9 @@ pub fn stepper(
             .unwrap_or_else(|| shown.clone());
         let field = ui.add(
             TextEdit::singleline(&mut text)
-                .desired_width(46.0)
+                .desired_width(
+                    (format!("{:.*}", decimals, max).len() as f32 * 8.0 + 14.0).max(46.0),
+                )
                 .align(egui::Align2::CENTER_CENTER),
         );
         if field.has_focus() {

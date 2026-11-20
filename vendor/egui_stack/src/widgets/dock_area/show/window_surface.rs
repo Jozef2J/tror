@@ -176,6 +176,58 @@ impl<Tab> DockArea<'_, Tab> {
         self.node_min_size(surface, NodeIndex::root()) + padding
     }
 
+    pub(super) fn node_rigid_size(
+        &self,
+        surface: SurfaceIndex,
+        node: NodeIndex,
+        top: bool,
+    ) -> Vec2 {
+        let least = self.node_min_size(surface, node);
+        let gap = self.style.as_ref().unwrap().separator.width;
+        let tree = &self.dock_state[surface];
+        match &tree[node] {
+            Node::Leaf(leaf) if !top && !leaf.collapsed => {
+                let rigid = self.leaf_rigid_size.map_or(Vec2::ZERO, |f| f(&leaf.tabs));
+                least.max(rigid)
+            }
+            Node::Linear(linear) if self.has_flex(surface, node) => {
+                let sizes: Vec<Vec2> = linear
+                    .children()
+                    .iter()
+                    .map(|&child| self.node_rigid_size(surface, child, false))
+                    .collect();
+                let widest = sizes.iter().fold(Vec2::ZERO, |max, size| max.max(*size));
+                let count = sizes.len() as f32;
+                let need = match linear.dir {
+                    LinearDir::Horizontal => vec2(
+                        sizes.iter().map(|s| s.x).sum::<f32>() + gap * (count - 1.0).max(0.0),
+                        widest.y,
+                    ),
+                    LinearDir::Vertical => vec2(
+                        widest.x,
+                        sizes.iter().map(|s| s.y).sum::<f32>() + gap * (count - 1.0).max(0.0),
+                    ),
+                };
+                least.max(need)
+            }
+            _ => least,
+        }
+    }
+
+    fn has_flex(&self, surface: SurfaceIndex, node: NodeIndex) -> bool {
+        let Some(rigid) = self.leaf_rigid_size else {
+            return false;
+        };
+        match &self.dock_state[surface][node] {
+            Node::Leaf(leaf) => rigid(&leaf.tabs) == Vec2::ZERO,
+            Node::Linear(linear) => linear
+                .children()
+                .iter()
+                .any(|&child| self.has_flex(surface, child)),
+            _ => false,
+        }
+    }
+
     pub(super) fn node_min_size(&self, surface: SurfaceIndex, node: NodeIndex) -> Vec2 {
         let style = self.style.as_ref().unwrap();
         let gap = style.separator.width;

@@ -327,10 +327,6 @@ impl ConsolePanel {
             && let Ok(result) = rx.try_recv()
         {
             editor.probe = None;
-            match &result {
-                Ok(text) => crate::trace::popup(format!("Подключение работает: {text}"), true),
-                Err(e) => crate::trace::popup(format!("Не удалось подключиться: {e}"), false),
-            }
             editor.result = Some(result);
         }
         notes
@@ -1011,155 +1007,161 @@ impl ConsolePanel {
             ui.set_width(660.0);
             ui.label(RichText::new("Подключения консоли").strong());
             ui.add_space(8.0);
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_width(170.0);
-                    ScrollArea::vertical().max_height(330.0).show(ui, |ui| {
-                        for (i, profile) in editor.drafts.iter().enumerate() {
-                            let name = if profile.name.trim().is_empty() {
-                                "без имени".to_owned()
-                            } else {
-                                format!("{}  ·  {}", profile.name, profile.protocol.label())
-                            };
-                            if ui.selectable_label(i == editor.index, name).clicked() {
-                                editor.index = i;
+            let limit = (ui.ctx().content_rect().height() - 200.0).max(200.0);
+            ScrollArea::vertical()
+                .id_salt("tror_profile_scroll")
+                .max_height(limit)
+                .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(170.0);
+                        ScrollArea::vertical().max_height(330.0).show(ui, |ui| {
+                            for (i, profile) in editor.drafts.iter().enumerate() {
+                                let name = if profile.name.trim().is_empty() {
+                                    "без имени".to_owned()
+                                } else {
+                                    format!("{}  ·  {}", profile.name, profile.protocol.label())
+                                };
+                                if ui.selectable_label(i == editor.index, name).clicked() {
+                                    editor.index = i;
+                                    editor.result = None;
+                                }
+                            }
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(Button::new("Добавить")).clicked() {
+                                editor.drafts.push(TermProfile {
+                                    name: format!("Сервер {}", editor.drafts.len() + 1),
+                                    ..Default::default()
+                                });
+                                editor.index = editor.drafts.len() - 1;
                                 editor.result = None;
                             }
-                        }
+                            if ui
+                                .add_enabled(!editor.drafts.is_empty(), Button::new("Удалить"))
+                                .clicked()
+                            {
+                                editor.drafts.remove(editor.index);
+                                editor.index = editor.index.saturating_sub(1);
+                            }
+                        });
                     });
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui.add(Button::new("Добавить")).clicked() {
-                            editor.drafts.push(TermProfile {
-                                name: format!("Сервер {}", editor.drafts.len() + 1),
-                                ..Default::default()
-                            });
-                            editor.index = editor.drafts.len() - 1;
-                            editor.result = None;
-                        }
-                        if ui
-                            .add_enabled(!editor.drafts.is_empty(), Button::new("Удалить"))
-                            .clicked()
-                        {
-                            editor.drafts.remove(editor.index);
-                            editor.index = editor.index.saturating_sub(1);
-                        }
-                    });
-                });
-                ui.add_space(10.0);
-                ui.vertical(|ui| {
-                    let Some(p) = editor.drafts.get_mut(editor.index) else {
-                        ui.label(RichText::new("Добавьте подключение.").color(pal.subtext));
-                        return;
-                    };
-                    egui::Grid::new("tror_term_form")
-                        .num_columns(2)
-                        .spacing([10.0, 7.0])
-                        .show(ui, |ui| {
-                            let wide = 320.0;
-                            ui.label("Название");
-                            ui.add(TextEdit::singleline(&mut p.name).desired_width(wide));
-                            ui.end_row();
-                            ui.label("Протокол");
-                            ui.horizontal(|ui| {
-                                for protocol in TermProtocol::ALL {
-                                    if ui.selectable_label(p.protocol == protocol, protocol.label()).clicked()
-                                        && p.protocol != protocol
-                                    {
-                                        if p.port == p.protocol.default_port() {
-                                            p.port = protocol.default_port();
-                                        }
-                                        p.protocol = protocol;
-                                    }
-                                }
-                            });
-                            ui.end_row();
-                            ui.label("Сервер");
-                            ui.horizontal(|ui| {
-                                ui.add(TextEdit::singleline(&mut p.host).hint_text("example.org").desired_width(wide - 70.0));
-                                port_field(ui, &mut p.port, 60.0);
-                            });
-                            ui.end_row();
-                            ui.label("Пользователь");
-                            ui.add(TextEdit::singleline(&mut p.user).desired_width(wide));
-                            ui.end_row();
-                            ui.label("Пароль");
-                            ui.horizontal(|ui| {
-                                ui.add(TextEdit::singleline(&mut p.password).password(!editor.reveal).desired_width(wide - 88.0));
-                                let label = if editor.reveal { "Скрыть" } else { "Показать" };
-                                if ui.add_sized([80.0, 22.0], Button::new(label)).clicked() {
-                                    editor.reveal = !editor.reveal;
-                                }
-                            });
-                            ui.end_row();
-                            if p.protocol != TermProtocol::Telnet {
-                                ui.label("Файл ключа");
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        let Some(p) = editor.drafts.get_mut(editor.index) else {
+                            ui.label(RichText::new("Добавьте подключение.").color(pal.subtext));
+                            return;
+                        };
+                        egui::Grid::new("tror_term_form")
+                            .num_columns(2)
+                            .spacing([10.0, 7.0])
+                            .show(ui, |ui| {
+                                let wide = 320.0;
+                                ui.label("Название");
+                                ui.add(TextEdit::singleline(&mut p.name).desired_width(wide));
+                                ui.end_row();
+                                ui.label("Протокол");
                                 ui.horizontal(|ui| {
-                                    ui.add(TextEdit::singleline(&mut p.key_file).hint_text("RSA, ECDSA, Ed25519").desired_width(wide - 78.0));
-                                    if ui.button("Обзор…").clicked()
-                                        && let Some(file) = rfd::FileDialog::new().pick_file()
-                                    {
-                                        p.key_file = file.display().to_string();
+                                    for protocol in TermProtocol::ALL {
+                                        if ui.selectable_label(p.protocol == protocol, protocol.label()).clicked()
+                                            && p.protocol != protocol
+                                        {
+                                            if p.port == p.protocol.default_port() {
+                                                p.port = protocol.default_port();
+                                            }
+                                            p.protocol = protocol;
+                                        }
                                     }
                                 });
                                 ui.end_row();
-                                if !p.key_file.trim().is_empty() {
-                                    ui.label("");
-                                    match remote::key_kind(&p.key_file) {
-                                        Ok(kind) => ui.label(RichText::new(format!("ключ: {kind}")).small().color(pal.subtext)),
-                                        Err(e) => ui.label(RichText::new(e).small().color(pal.warn)),
-                                    };
-                                    ui.end_row();
-                                    ui.label("Парольная фраза");
-                                    ui.add(TextEdit::singleline(&mut p.passphrase).password(!editor.reveal).hint_text("если ключ защищён").desired_width(wide));
-                                    ui.end_row();
-                                }
-                            }
-                            if p.protocol == TermProtocol::Mosh {
-                                ui.label("mosh-server");
-                                ui.add(TextEdit::singleline(&mut p.mosh_server).hint_text("mosh-server").desired_width(wide));
+                                ui.label("Сервер");
+                                ui.horizontal(|ui| {
+                                    ui.add(TextEdit::singleline(&mut p.host).hint_text("example.org").desired_width(wide - 70.0));
+                                    port_field(ui, &mut p.port, 60.0);
+                                });
                                 ui.end_row();
-                                ui.label("Порты UDP");
-                                ui.add(TextEdit::singleline(&mut p.mosh_ports).hint_text("60000:61000").desired_width(wide));
+                                ui.label("Пользователь");
+                                ui.add(TextEdit::singleline(&mut p.user).desired_width(wide));
                                 ui.end_row();
-                            }
-                            if p.protocol == TermProtocol::Ssh {
-                                ui.label("Команда при входе");
-                                ui.add(TextEdit::singleline(&mut p.startup).hint_text("например: cd /var/www && ls").desired_width(wide));
+                                ui.label("Пароль");
+                                ui.horizontal(|ui| {
+                                    ui.add(TextEdit::singleline(&mut p.password).password(!editor.reveal).desired_width(wide - 88.0));
+                                    let label = if editor.reveal { "Скрыть" } else { "Показать" };
+                                    if ui.add_sized([80.0, 22.0], Button::new(label)).clicked() {
+                                        editor.reveal = !editor.reveal;
+                                    }
+                                });
                                 ui.end_row();
-                            }
-                            ui.label("");
-                            ui.vertical(|ui| {
-                                ui.set_max_width(wide);
-                                if editor.probe.is_some() {
+                                if p.protocol != TermProtocol::Telnet {
+                                    ui.label("Файл ключа");
                                     ui.horizontal(|ui| {
-                                        ui.spinner();
-                                        ui.label(RichText::new("проверка…").color(pal.subtext));
+                                        ui.add(TextEdit::singleline(&mut p.key_file).hint_text("RSA, ECDSA, Ed25519").desired_width(wide - 78.0));
+                                        if ui.button("Обзор…").clicked()
+                                            && let Some(file) = rfd::FileDialog::new().pick_file()
+                                        {
+                                            p.key_file = file.display().to_string();
+                                        }
                                     });
-                                } else if ui.add(Button::new("Проверить подключение")).clicked() {
-                                    test = true;
+                                    ui.end_row();
+                                    if !p.key_file.trim().is_empty() {
+                                        ui.label("");
+                                        match remote::key_kind(&p.key_file) {
+                                            Ok(kind) => ui.label(RichText::new(format!("ключ: {kind}")).small().color(pal.subtext)),
+                                            Err(e) => ui.label(RichText::new(e).small().color(pal.warn)),
+                                        };
+                                        ui.end_row();
+                                        ui.label("Парольная фраза");
+                                        ui.add(TextEdit::singleline(&mut p.passphrase).password(!editor.reveal).hint_text("если ключ защищён").desired_width(wide));
+                                        ui.end_row();
+                                    }
                                 }
-                                if let Some(result) = &editor.result {
-                                    let (text, color) = match result {
-                                        Ok(text) => (format!("Работает: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
-                                        Err(e) => (format!("Ошибка: {e}"), pal.warn),
-                                    };
-                                    ui.label(RichText::new(text).small().color(color));
+                                if p.protocol == TermProtocol::Mosh {
+                                    ui.label("mosh-server");
+                                    ui.add(TextEdit::singleline(&mut p.mosh_server).hint_text("mosh-server").desired_width(wide));
+                                    ui.end_row();
+                                    ui.label("Порты UDP");
+                                    ui.add(TextEdit::singleline(&mut p.mosh_ports).hint_text("60000:61000").desired_width(wide));
+                                    ui.end_row();
                                 }
+                                if p.protocol == TermProtocol::Ssh {
+                                    ui.label("Команда при входе");
+                                    ui.add(TextEdit::singleline(&mut p.startup).hint_text("например: cd /var/www && ls").desired_width(wide));
+                                    ui.end_row();
+                                }
+                                ui.label("");
+                                ui.vertical(|ui| {
+                                    ui.set_max_width(wide);
+                                    if editor.probe.is_some() {
+                                        ui.horizontal(|ui| {
+                                            ui.spinner();
+                                            ui.label(RichText::new("проверка…").color(pal.subtext));
+                                        });
+                                    } else if ui.add(Button::new("Проверить подключение")).clicked() {
+                                        test = true;
+                                    }
+                                    if let Some(result) = &editor.result {
+                                        let (text, color) = match result {
+                                            Ok(text) => (format!("Работает: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
+                                            Err(e) => (format!("Ошибка: {e}"), pal.warn),
+                                        };
+                                        ui.label(RichText::new(text).small().color(color));
+                                    }
+                                });
+                                ui.end_row();
+                                appearance_rows(ui, pal, &mut p.theme, &mut p.font, &mut p.font_size, wide);
                             });
-                            ui.end_row();
-                            appearance_rows(ui, pal, &mut p.theme, &mut p.font, &mut p.font_size, wide);
-                        });
-                    ui.add_space(4.0);
-                    let note = match p.protocol {
-                        TermProtocol::Ssh => "Вход по паролю, по ключу (RSA, ECDSA, Ed25519) или через ssh-agent, если не заданы ни пароль, ни ключ.",
-                        TermProtocol::Telnet => "Telnet передаёт всё, включая пароль, без шифрования — используйте его для сетевого оборудования в своей сети. Имя и пароль, если указаны, вводятся сами в ответ на приглашение входа.",
-                        TermProtocol::Mosh => "Mosh входит по SSH, запускает на сервере mosh-server и дальше работает по UDP: сеанс переживает обрывы, смену сети и сон ноутбука. На сервере должен быть установлен mosh, а порты UDP 60000–61000 — открыты.",
-                    };
-                    let color = if p.protocol == TermProtocol::Telnet { pal.warn } else { pal.subtext };
-                    ui.label(RichText::new(note).small().color(color));
+                        ui.add_space(4.0);
+                        let note = match p.protocol {
+                            TermProtocol::Ssh => "Вход по паролю, по ключу (RSA, ECDSA, Ed25519) или через ssh-agent, если не заданы ни пароль, ни ключ.",
+                            TermProtocol::Telnet => "Telnet передаёт всё, включая пароль, без шифрования — используйте его для сетевого оборудования в своей сети. Имя и пароль, если указаны, вводятся сами в ответ на приглашение входа.",
+                            TermProtocol::Mosh => "Mosh входит по SSH, запускает на сервере mosh-server и дальше работает по UDP: сеанс переживает обрывы, смену сети и сон ноутбука. На сервере должен быть установлен mosh, а порты UDP 60000–61000 — открыты.",
+                        };
+                        let color = if p.protocol == TermProtocol::Telnet { pal.warn } else { pal.subtext };
+                        ui.label(RichText::new(note).small().color(color));
+                    });
                 });
-            });
+                });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if dialog_button(ui, pal, "Сохранить", true) {

@@ -750,7 +750,7 @@ impl<Tab> DockArea<'_, Tab> {
         let least = match (&tree[path.node], separator_of) {
             (Node::Linear(linear), SeparatorOf::Linear(index)) => {
                 let pair = [linear.children()[index], linear.children()[index + 1]];
-                Some(pair.map(|child| self.node_min_size(path.surface, child)))
+                Some(pair.map(|child| self.node_rigid_size(path.surface, child, true)))
             }
             _ => None,
         };

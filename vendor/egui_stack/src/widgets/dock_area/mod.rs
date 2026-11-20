@@ -53,6 +53,7 @@ pub struct DockArea<'tree, Tab> {
     allowed_splits: AllowedSplits,
     window_bounds: Option<Rect>,
     leaf_min_size: Option<&'tree dyn Fn(&[Tab]) -> Vec2>,
+    leaf_rigid_size: Option<&'tree dyn Fn(&[Tab]) -> Vec2>,
 
     /// Set when the area shows one dock of a [`DockSpace`](crate::DockSpace).
     space: Option<SpaceDock<'tree>>,
@@ -145,6 +146,7 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
             tab_hover_rect: None,
             window_bounds: None,
             leaf_min_size: None,
+            leaf_rigid_size: None,
             show_window_close_buttons: true,
             show_window_collapse_buttons: true,
             show_leaf_close_all_buttons: true,
@@ -392,6 +394,12 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
     /// The least size of a leaf's body for its tabs, kept by floating windows.
     pub fn leaf_min_size(mut self, min: &'tree dyn Fn(&[Tab]) -> Vec2) -> Self {
         self.leaf_min_size = Some(min);
+        self
+    }
+
+    /// The size a leaf keeps while a separator that is not next to it moves.
+    pub fn leaf_rigid_size(mut self, rigid: &'tree dyn Fn(&[Tab]) -> Vec2) -> Self {
+        self.leaf_rigid_size = Some(rigid);
         self
     }
 

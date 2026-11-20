@@ -182,6 +182,31 @@ pub struct Home {
 }
 
 thread_local! {
+    static KNOWN: std::cell::RefCell<Vec<(Pane, bool, f32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn known_px(pane: Pane, horizontal: bool) -> Option<f32> {
+    KNOWN.with_borrow(|k| {
+        k.iter()
+            .find(|(p, h, _)| *p == pane && *h == horizontal)
+            .map(|(_, _, px)| *px)
+    })
+}
+
+pub fn leaf_rigid(tabs: &[Pane]) -> egui::Vec2 {
+    if tabs.is_empty() || !tabs.iter().all(steady) {
+        return egui::Vec2::ZERO;
+    }
+    let min = leaf_min(tabs) - egui::vec2(0.0, 34.0);
+    let first = tabs[0];
+    egui::vec2(
+        known_px(first, true).unwrap_or(min.x).max(min.x),
+        known_px(first, false).unwrap_or(min.y).max(min.y),
+    )
+    .max(egui::vec2(1.0, 1.0))
+}
+
+thread_local! {
     static HOMES: std::cell::RefCell<Vec<(Pane, Home)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -320,7 +345,17 @@ fn go_home(dock: &mut DockState<Pane>, pane: Pane) -> bool {
             None => break,
         }
     }
-    let keep = (1.0 - home.share).clamp(0.05, 0.95);
+    let horizontal = matches!(home.how, 1 | 2);
+    let span = tree[node]
+        .rect()
+        .filter(|r| r.is_finite())
+        .map(|r| if horizontal { r.width() } else { r.height() })
+        .unwrap_or(0.0);
+    let share = match known_px(pane, horizontal) {
+        Some(px) if span > px + 100.0 => px / span,
+        _ => home.share,
+    };
+    let keep = (1.0 - share).clamp(0.05, 0.95);
     match home.how {
         1 => tree.split_left(node, keep, vec![pane]),
         2 => tree.split_right(node, keep, vec![pane]),
@@ -387,12 +422,19 @@ pub fn keep_sizes(dock: &mut DockState<Pane>, sizes: &mut Sizes, dragging: bool)
                 }
                 fixed += updated[*i];
             }
-            if fixed > total * 0.8 {
-                let scale = total * 0.8 / fixed;
+            let flex_need: f32 = children
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !sides.iter().any(|(s, _)| s == i))
+                .map(|(_, c)| node_min(tree, *c, horizontal))
+                .sum();
+            let room = ((span - flex_need) / span * total).max(total * 0.1);
+            if fixed > room {
+                let scale = room / fixed;
                 for (i, _) in &sides {
                     updated[*i] *= scale;
                 }
-                fixed = total * 0.8;
+                fixed = room;
             }
             let flex: f32 = (0..children.len())
                 .filter(|i| !sides.iter().any(|(s, _)| s == i))
@@ -423,6 +465,7 @@ pub fn keep_sizes(dock: &mut DockState<Pane>, sizes: &mut Sizes, dragging: bool)
         }
     }
     sizes.seen = seen;
+    KNOWN.with_borrow_mut(|k| k.clone_from(&sizes.known));
 }
 
 pub fn show(dock: &mut DockState<Pane>, pane: Pane, floats: &Floats) {
@@ -831,11 +874,15 @@ mod tests {
         let project = width(&dock, Pane::Project);
         assert!((width(&dock, Pane::Db) - db).abs() < 1.0, "{db} -> {}", width(&dock, Pane::Db));
         frame(&mut dock, &mut sizes, false);
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 800.0));
         hide(&mut dock, Pane::Db);
+        keep_sizes(&mut dock, &mut sizes, false);
+        layout(dock.main_surface_mut(), NodeIndex::root(), area);
+        assert!((width(&dock, Pane::Project) - project).abs() < 1.0, "{project} -> {}", width(&dock, Pane::Project));
         frame(&mut dock, &mut sizes, false);
-        assert!((width(&dock, Pane::Project) - project).abs() < 1.0);
         show(&mut dock, Pane::Db, &Vec::new());
-        frame(&mut dock, &mut sizes, false);
+        keep_sizes(&mut dock, &mut sizes, false);
+        layout(dock.main_surface_mut(), NodeIndex::root(), area);
         assert!((width(&dock, Pane::Db) - db).abs() < 1.0, "{db} -> {}", width(&dock, Pane::Db));
         assert!((width(&dock, Pane::Project) - project).abs() < 1.0);
     }

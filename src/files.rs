@@ -123,10 +123,14 @@ pub struct ProjectPanel {
     pub drag_out: Option<Vec<PathBuf>>,
     pub peer: Option<String>,
     pub area: egui::Rect,
+    pub external_hover: Option<PathBuf>,
+    drop_dirs: Vec<(Rect, PathBuf)>,
+    drop_dir: PathBuf,
     dragging: Option<Vec<PathBuf>>,
     dragged_out: bool,
     anchor: Option<PathBuf>,
     clip: Option<(Vec<PathBuf>, bool)>,
+    archiving: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     prompt: Option<Prompt>,
     attrs: Option<Attrs>,
     out: Vec<ProjectEvent>,
@@ -227,14 +231,45 @@ impl ProjectPanel {
             drag_out: None,
             peer: None,
             area: egui::Rect::NOTHING,
+            external_hover: None,
+            drop_dirs: Vec::new(),
+            drop_dir: PathBuf::new(),
             dragging: None,
             dragged_out: false,
             anchor: None,
             clip: None,
+            archiving: None,
             prompt: None,
             attrs: None,
             out: Vec::new(),
         }
+    }
+
+    pub fn dragging(&self) -> Option<&[PathBuf]> {
+        self.dragging.as_deref().filter(|_| !self.dragged_out)
+    }
+
+    pub fn start_drag_out(&mut self) {
+        if let Some(paths) = self.dragging.clone()
+            && !self.dragged_out
+        {
+            self.dragged_out = true;
+            self.drag_out = Some(paths);
+        }
+    }
+
+    pub fn drop_target(&self, pos: egui::Pos2) -> Option<PathBuf> {
+        self.root.as_ref()?;
+        if !self.area.contains(pos) {
+            return None;
+        }
+        Some(
+            self.drop_dirs
+                .iter()
+                .find(|(rect, _)| rect.contains(pos))
+                .map(|(_, dir)| dir.clone())
+                .unwrap_or_else(|| self.drop_dir.clone()),
+        )
     }
 
     pub fn modal_open(&self) -> bool {
@@ -395,6 +430,16 @@ impl ProjectPanel {
     }
 
     pub fn ui(&mut self, ui: &mut Ui, pal: &Palette, recent: &[PathBuf]) {
+        if let Some(rx) = &self.archiving
+            && let Ok(result) = rx.try_recv()
+        {
+            self.archiving = None;
+            self.out.push(ProjectEvent::Toast(match result {
+                Ok(path) => format!("Архив создан: {}", path.display()),
+                Err(e) => format!("Не удалось создать архив: {e}"),
+            }));
+            self.reload();
+        }
         ui.take_available_width();
         ui.add_space(8.0);
         let Some(root) = self.root.clone() else {
@@ -550,6 +595,9 @@ impl ProjectPanel {
         };
         let pointer = ui.ctx().pointer_latest_pos();
         let mut target: Option<PathBuf> = None;
+        self.drop_dirs.clear();
+        self.drop_dir = dir.clone();
+        let external = self.external_hover.clone();
         let mut released: Option<(Vec<PathBuf>, egui::Pos2)> = None;
         let wide = crate::widgets::rows_width(
             ui,
@@ -618,7 +666,12 @@ impl ProjectPanel {
                     } else if response.hovered() {
                         painter.rect_filled(rect, 5.0, pal.crust);
                     }
-                    if over && is_dir && self.dragging.is_some() {
+                    if is_dir && row.entry.is_some() {
+                        self.drop_dirs.push((rect.intersect(view), row.path.clone()));
+                    }
+                    if (over && is_dir && self.dragging.is_some())
+                        || (is_dir && external.as_ref() == Some(&row.path))
+                    {
                         painter.rect_stroke(
                             rect.shrink(1.0),
                             5.0,
@@ -769,6 +822,28 @@ impl ProjectPanel {
                                     chosen.iter().map(|(p, _)| p.clone()).collect(),
                                 ));
                             }
+                            let parent = chosen.first().and_then(|(p, _)| p.parent().map(Path::to_path_buf));
+                            if self.archiving.is_none()
+                                && chosen.iter().all(|(p, _)| p.parent().map(Path::to_path_buf) == parent)
+                            {
+                                ui.menu_button("Архивировать", |ui| {
+                                    for format in crate::archive::formats() {
+                                        if ui.button(format.label()).clicked() {
+                                            let paths: Vec<PathBuf> =
+                                                chosen.iter().map(|(p, _)| p.clone()).collect();
+                                            let (tx, rx) = std::sync::mpsc::channel();
+                                            let ctx = ui.ctx().clone();
+                                            std::thread::spawn(move || {
+                                                let _ = tx.send(crate::archive::create(&paths, format));
+                                                ctx.request_repaint();
+                                            });
+                                            self.archiving = Some(rx);
+                                            self.out.push(ProjectEvent::Toast("Архивирование…".into()));
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            }
                             ui.separator();
                             if ui.button("Копировать путь").clicked() {
                                 let text: Vec<String> =
@@ -820,6 +895,14 @@ impl ProjectPanel {
                 }
             });
         let _ = area;
+        if external.as_ref() == Some(&dir) {
+            ui.painter().rect_stroke(
+                outer.shrink(2.0),
+                6.0,
+                egui::Stroke::new(1.5, pal.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
         if (self.dragging.is_some() || released.is_some())
             && target.is_none()
             && pointer.is_some_and(|p| outer.contains(p))
