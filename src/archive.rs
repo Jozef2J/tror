@@ -224,12 +224,24 @@ fn tar_header(name: &str, size: u64, dir: bool, kind: u8) -> [u8; 512] {
     octal(&mut h[136..148], mtime);
     h[148..156].copy_from_slice(b"        ");
     h[156] = kind;
-    h[257..263].copy_from_slice(b"ustar ");
-    h[263..265].copy_from_slice(b" \0");
+    h[257..263].copy_from_slice(b"ustar\0");
+    h[263..265].copy_from_slice(b"00");
     let sum: u32 = h.iter().map(|b| *b as u32).sum();
     let text = format!("{sum:06o}\0 ");
     h[148..156].copy_from_slice(text.as_bytes());
     h
+}
+
+fn pax_record(key: &str, value: &str) -> String {
+    let body = format!(" {key}={value}\n");
+    let mut len = body.len() + 1;
+    loop {
+        let next = len.to_string().len() + body.len();
+        if next == len {
+            return format!("{len}{body}");
+        }
+        len = next;
+    }
 }
 
 fn tar_gz(paths: &[PathBuf], to: &Path) -> Result<(), String> {
@@ -241,12 +253,12 @@ fn tar_gz(paths: &[PathBuf], to: &Path) -> Result<(), String> {
     );
     let err = |e: std::io::Error| e.to_string();
     for (path, name, dir) in items {
-        if name.len() > 100 {
-            let long = format!("{name}\0");
-            out.write_all(&tar_header("././@LongLink", long.len() as u64, false, b'L'))
+        if name.len() > 100 || !name.is_ascii() {
+            let record = pax_record("path", &name);
+            out.write_all(&tar_header("PaxHeader", record.len() as u64, false, b'x'))
                 .map_err(err)?;
-            out.write_all(long.as_bytes()).map_err(err)?;
-            out.write_all(&vec![0u8; (512 - long.len() % 512) % 512])
+            out.write_all(record.as_bytes()).map_err(err)?;
+            out.write_all(&vec![0u8; (512 - record.len() % 512) % 512])
                 .map_err(err)?;
         }
         if dir {
