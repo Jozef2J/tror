@@ -17,10 +17,9 @@ impl Floats {
 
 #[cfg(windows)]
 mod imp {
-    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GWLP_HWNDPARENT, GetForegroundWindow, GetWindowRect, GetWindowTextW,
@@ -48,8 +47,7 @@ mod imp {
     }
 
     static MOVING: AtomicBool = AtomicBool::new(false);
-    static PENDING: AtomicBool = AtomicBool::new(false);
-    static START: AtomicU64 = AtomicU64::new(0);
+    static RECENT: std::sync::Mutex<Vec<std::time::Instant>> = std::sync::Mutex::new(Vec::new());
 
     fn rect(hwnd: HWND) -> RECT {
         let mut r = RECT {
@@ -62,18 +60,28 @@ mod imp {
         r
     }
 
-    fn place(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
+    fn place(hwnd: HWND, r: &RECT) {
         unsafe {
             SetWindowPos(
                 hwnd,
                 std::ptr::null_mut(),
-                x,
-                y,
-                w,
-                h,
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             )
         };
+    }
+
+    fn storm() -> bool {
+        let now = std::time::Instant::now();
+        let Ok(mut recent) = RECENT.lock() else {
+            return false;
+        };
+        recent.retain(|t| now.duration_since(*t).as_millis() < 1000);
+        recent.push(now);
+        recent.len() > 3
     }
 
     unsafe extern "system" fn steady_dpi(
@@ -85,43 +93,42 @@ mod imp {
         _data: usize,
     ) -> LRESULT {
         match msg {
-            WM_ENTERSIZEMOVE => {
-                let r = rect(hwnd);
-                let dpi = unsafe { GetDpiForWindow(hwnd) } as u64;
-                let w = (r.right - r.left).max(0) as u64;
-                let h = (r.bottom - r.top).max(0) as u64;
-                START.store(dpi << 40 | w << 20 | h, Ordering::Relaxed);
-                MOVING.store(true, Ordering::Relaxed);
-                PENDING.store(false, Ordering::Relaxed);
-            }
-            WM_DPICHANGED if MOVING.load(Ordering::Relaxed) => {
+            WM_ENTERSIZEMOVE => MOVING.store(true, Ordering::Relaxed),
+            WM_EXITSIZEMOVE => MOVING.store(false, Ordering::Relaxed),
+            WM_DPICHANGED => {
                 let before = rect(hwnd);
+                let suggested = unsafe { *(lparam as *const RECT) };
+                let moving = MOVING.load(Ordering::Relaxed);
+                let storm = storm();
                 let result = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
-                let after = rect(hwnd);
-                place(
-                    hwnd,
-                    after.left,
-                    after.top,
-                    before.right - before.left,
-                    before.bottom - before.top,
+                let keep = moving || storm;
+                place(hwnd, if keep { &before } else { &suggested });
+                crate::trace::line(
+                    format!(
+                        "[DPI] {} dpi, {}: окно {}×{} в ({}, {})",
+                        wparam & 0xFFFF,
+                        if storm {
+                            "частая смена — геометрия сохранена"
+                        } else if moving {
+                            "перетаскивание — геометрия сохранена"
+                        } else {
+                            "прямоугольник Windows"
+                        },
+                        if keep {
+                            before.right - before.left
+                        } else {
+                            suggested.right - suggested.left
+                        },
+                        if keep {
+                            before.bottom - before.top
+                        } else {
+                            suggested.bottom - suggested.top
+                        },
+                        if keep { before.left } else { suggested.left },
+                        if keep { before.top } else { suggested.top },
+                    ),
+                    false,
                 );
-                PENDING.store(true, Ordering::Relaxed);
-                return result;
-            }
-            WM_EXITSIZEMOVE => {
-                MOVING.store(false, Ordering::Relaxed);
-                let result = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
-                if PENDING.swap(false, Ordering::Relaxed) {
-                    let start = START.load(Ordering::Relaxed);
-                    let dpi = (start >> 40) as i64;
-                    let now = unsafe { GetDpiForWindow(hwnd) } as i64;
-                    if dpi > 0 && now > 0 && dpi != now {
-                        let w = ((start >> 20) & 0xFFFFF) as i64 * now / dpi;
-                        let h = (start & 0xFFFFF) as i64 * now / dpi;
-                        let r = rect(hwnd);
-                        place(hwnd, r.left, r.top, w as i32, h as i32);
-                    }
-                }
                 return result;
             }
             _ => {}

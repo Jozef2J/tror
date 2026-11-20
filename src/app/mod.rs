@@ -86,6 +86,7 @@ enum Action {
     OpenSecondFolder,
     AddHosts,
     OpenPath(PathBuf),
+    OpenProject(PathBuf),
     Save,
     SaveAs,
     SaveAll,

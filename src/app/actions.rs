@@ -60,6 +60,14 @@ impl TrorApp {
                 }
             }
             Action::OpenPath(path) => self.open_path(&path, now),
+            Action::OpenProject(path) => {
+                if path.is_dir() {
+                    self.project.set_root(path);
+                    dock::show(&mut self.dock, Pane::Project, &self.settings.floats);
+                } else {
+                    self.notify(format!("Папка не найдена: {}", path.display()), now);
+                }
+            }
             Action::Save => {
                 self.save(self.active, now);
             }

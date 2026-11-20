@@ -516,31 +516,112 @@ impl TrorApp {
     pub(super) fn welcome(&self, ui: &mut Ui, pal: &Palette, actions: &mut Vec<Action>) {
         let rect = ui.available_rect_before_wrap();
         ui.painter().rect_filled(rect, 0.0, pal.base);
-        ui.vertical_centered(|ui| {
-            ui.add_space((rect.height() * 0.3).max(20.0));
-            if let Some(logo) = &self.logo {
-                ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(96.0, 96.0)));
-                ui.add_space(6.0);
-            }
-            ui.label(RichText::new("TrorPad").size(34.0).color(pal.faint));
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("Перетащите файлы сюда или начните с пустой вкладки")
-                    .color(pal.subtext),
-            );
-            ui.add_space(14.0);
-            let button = |text: &str| {
-                Button::new(RichText::new(text).color(pal.text)).min_size(egui::vec2(200.0, 32.0))
-            };
-            if ui.add(button("Новый файл")).clicked() {
-                actions.push(Action::New);
-            }
-            if ui.add(button("Открыть…")).clicked() {
-                actions.push(Action::Open);
-            }
-            if ui.add(button("Открыть папку…")).clicked() {
-                actions.push(Action::OpenFolder);
-            }
-        });
+        let files: Vec<PathBuf> = self.settings.recent.iter().take(6).cloned().collect();
+        let folders: Vec<PathBuf> = self
+            .settings
+            .recent_projects
+            .iter()
+            .take(4)
+            .cloned()
+            .collect();
+        let logo = rect.height() >= 460.0;
+        let list_rows = files.len() + folders.len();
+        let lists = list_rows as f32 * 26.0
+            + if files.is_empty() { 0.0 } else { 34.0 }
+            + if folders.is_empty() { 0.0 } else { 34.0 };
+        let content = if logo { 102.0 } else { 0.0 } + 44.0 + 24.0 + 14.0 + 3.0 * 38.0 + lists;
+        egui::ScrollArea::vertical()
+            .id_salt("tror_welcome")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(
+                        ((rect.height() - content) / 2.0).clamp(12.0, rect.height() * 0.3),
+                    );
+                    if logo && let Some(image) = &self.logo {
+                        ui.add(egui::Image::new(image).fit_to_exact_size(egui::vec2(96.0, 96.0)));
+                        ui.add_space(6.0);
+                    }
+                    ui.label(RichText::new("TrorPad").size(34.0).color(pal.faint));
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Перетащите файлы сюда или начните с пустой вкладки")
+                            .color(pal.subtext),
+                    );
+                    ui.add_space(14.0);
+                    let button = |text: &str| {
+                        Button::new(RichText::new(text).color(pal.text))
+                            .min_size(egui::vec2(200.0, 32.0))
+                    };
+                    if ui.add(button("Новый файл")).clicked() {
+                        actions.push(Action::New);
+                    }
+                    if ui.add(button("Открыть…")).clicked() {
+                        actions.push(Action::Open);
+                    }
+                    if ui.add(button("Открыть папку…")).clicked() {
+                        actions.push(Action::OpenFolder);
+                    }
+                    let recent = |ui: &mut Ui,
+                                  title: &str,
+                                  paths: &[PathBuf],
+                                  folder: bool,
+                                  actions: &mut Vec<Action>| {
+                        if paths.is_empty() {
+                            return;
+                        }
+                        ui.add_space(18.0);
+                        ui.label(RichText::new(title).small().color(pal.faint));
+                        ui.add_space(4.0);
+                        for path in paths {
+                            let name = path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| path.display().to_string());
+                            let parent = path
+                                .parent()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default();
+                            let mut job = egui::text::LayoutJob::default();
+                            job.append(
+                                &name,
+                                0.0,
+                                egui::TextFormat::simple(
+                                    egui::FontId::proportional(13.5),
+                                    pal.text,
+                                ),
+                            );
+                            job.append(
+                                &parent,
+                                10.0,
+                                egui::TextFormat::simple(
+                                    egui::FontId::proportional(12.0),
+                                    pal.faint,
+                                ),
+                            );
+                            job.wrap.max_width = 420.0;
+                            job.wrap.max_rows = 1;
+                            job.wrap.break_anywhere = true;
+                            let response = ui
+                                .add(
+                                    Button::new(job)
+                                        .frame_when_inactive(false)
+                                        .min_size(egui::vec2(420.0, 24.0)),
+                                )
+                                .on_hover_text(path.display().to_string());
+                            if response.clicked() {
+                                actions.push(if folder {
+                                    Action::OpenProject(path.clone())
+                                } else {
+                                    Action::OpenPath(path.clone())
+                                });
+                            }
+                        }
+                    };
+                    recent(ui, "НЕДАВНИЕ ФАЙЛЫ", &files, false, actions);
+                    recent(ui, "НЕДАВНИЕ ПАПКИ", &folders, true, actions);
+                    ui.add_space(12.0);
+                });
+            });
     }
 }
