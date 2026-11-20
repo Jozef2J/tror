@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&text.1), "текст".repeat(100));
         let tar = create(std::slice::from_ref(&folder), Format::TarGz).unwrap();
         assert!(folder.join("index.php").exists());
-        if which("tar").is_some() {
+        if cfg!(not(windows)) && which("tar").is_some() {
             let out = root.join("out");
             std::fs::create_dir_all(&out).unwrap();
             let status = Command::new("tar")
