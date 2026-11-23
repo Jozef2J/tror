@@ -898,4 +898,11 @@ pub const EN: &[(&str, &str)] = &[
     ("Печать", "Print"),
     ("Печать…", "Print…"),
     ("Открыто для печати в браузере", "Opened for printing in the browser"),
+    ("Запрос", "Query"),
+    ("значение в любом столбце", "a value in any column"),
+    ("Значение целиком", "Whole value"),
+    ("Схема", "Schema"),
+    ("База", "Database"),
+    ("все таблицы", "all tables"),
+    ("Открыть найденные строки", "Open the rows found"),
 ];

@@ -3,9 +3,7 @@ use crate::widgets::Lit;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 
-use eframe::egui::{
-    self, Button, Color32, ComboBox, Key, Rect, RichText, ScrollArea, Sense, TextEdit, Ui,
-};
+use eframe::egui::{self, Button, ComboBox, Key, Rect, RichText, ScrollArea, Sense, TextEdit, Ui};
 
 use crate::app::{dialog, dialog_button, size_label};
 use crate::remote::{self, Attrs, Cmd, Connection, Entry, Event, Profile, Protocol, Store};
@@ -1829,7 +1827,7 @@ impl RemotePanel {
             self.start_search(&ctx);
         }
         let mut open = None;
-        let row_h = 20.0;
+        let row_h = crate::widgets::RESULT_ROW;
         ui.spacing_mut().item_spacing.y = 0.0;
         let base = if self.search_root.trim().is_empty() {
             self.cwd.clone()
@@ -1862,7 +1860,7 @@ impl RemotePanel {
                         None => shown.to_owned(),
                     };
                     let placed = painter.text(
-                        egui::pos2(rect.left() + 10.0, rect.center().y),
+                        egui::pos2(rect.left() + 6.0, rect.center().y),
                         egui::Align2::LEFT_CENTER,
                         label,
                         egui::FontId::proportional(12.5),
@@ -2684,7 +2682,7 @@ impl RemotePanel {
                     go = ui
                         .add_enabled(
                             total > 0,
-                            crate::widgets::primary(label, pal),
+                            crate::widgets::primary(label, pal).min_size(crate::widgets::ACTION),
                         ).lit(ui)
                         .clicked();
                     close = crate::app::dialog_button(ui, pal, tr!("Отмена"), false);
@@ -2958,18 +2956,18 @@ impl RemotePanel {
                 ui.horizontal(|ui| {
                     if finished.is_none() {
                         let label = if self.paused { tr!("Продолжить") } else { tr!("Остановить") };
-                        if ui.add(crate::widgets::primary(label, pal)).lit(ui).clicked() {
+                        if ui.add(crate::widgets::primary(label, pal).min_size(crate::widgets::ACTION)).lit(ui).clicked() {
                             action = Some(0);
                         }
-                        if ui.add(crate::widgets::secondary(tr!("Отменить"), pal)).clicked() {
+                        if ui.add(crate::widgets::secondary(tr!("Отменить"), pal).min_size(crate::widgets::ACTION)).clicked() {
                             action = Some(1);
                         }
-                        if ui.add(crate::widgets::secondary(tr!("Скрыть"), pal)).clicked() {
+                        if ui.add(crate::widgets::secondary(tr!("Скрыть"), pal).min_size(crate::widgets::ACTION)).clicked() {
                             action = Some(2);
                         }
                     } else {
                         if failed > 0
-                            && ui.add(crate::widgets::primary(tr!("Повторить"), pal)).lit(ui).clicked()
+                            && ui.add(crate::widgets::primary(tr!("Повторить"), pal).min_size(crate::widgets::ACTION)).lit(ui).clicked()
                         {
                             action = Some(3);
                         }
@@ -3048,15 +3046,15 @@ impl RemotePanel {
             if changed {
                 ui.label(
                     RichText::new(tr!("Ключ сервера изменился"))
-                        .color(pal.warn)
-                        .strong(),
+                        .size(crate::widgets::TITLE)
+                        .color(pal.warn),
                 );
                 ui.label(
                     tr!("Сохранённый ключ этого сервера отличается от присланного. Так бывает после \
                      переустановки сервера, но так же выглядит перехват соединения."),
                 );
             } else {
-                ui.label(RichText::new(tr!("Новый сервер")).strong());
+                crate::widgets::title(ui, pal, tr!("Новый сервер"));
                 ui.label(
                     tr!("К этому серверу вы подключаетесь впервые. Отпечаток его ключа (SHA-256):"),
                 );
@@ -3109,7 +3107,7 @@ impl RemotePanel {
             } else {
                 tf!("Свойства выбранных объектов ({})", "Properties of the selected items ({})", state.items.len())
             };
-            ui.label(RichText::new(title).strong());
+            crate::widgets::title(ui, pal, title);
             ui.add_space(6.0);
             if !state.loaded {
                 ui.horizontal(|ui| {
@@ -3321,7 +3319,12 @@ impl RemotePanel {
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if dialog_button(ui, pal, action, true) {
+                let ok = if action == tr!("Удалить") {
+                    crate::app::danger_button(ui, pal, action)
+                } else {
+                    dialog_button(ui, pal, action, true)
+                };
+                if ok {
                     confirmed = true;
                 }
                 if dialog_button(ui, pal, tr!("Отмена"), false) {
@@ -3418,7 +3421,7 @@ impl RemotePanel {
             .unwrap_or_default();
         let modal = dialog(("tror_profiles", self.id), pal).show(ctx, |ui| {
             ui.set_width(640.0);
-            ui.label(RichText::new(tr!("Профили подключений")).strong());
+            crate::widgets::title(ui, pal, tr!("Профили подключений"));
             ui.add_space(8.0);
             let limit = (ui.ctx().content_rect().height() - 200.0).max(200.0);
             ScrollArea::vertical()
@@ -3582,7 +3585,7 @@ impl RemotePanel {
                                     }
                                     if let Some(result) = &editor.result {
                                         let (text, color) = match result {
-                                            Ok(text) => (tf!("Работает: {text}", "Works: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
+                                            Ok(text) => (tf!("Работает: {text}", "Works: {text}"), crate::widgets::ok_color(ui)),
                                             Err(e) => (tf!("Ошибка: {e}", "Error: {e}"), pal.warn),
                                         };
                                         ui.label(RichText::new(text).small().color(color));

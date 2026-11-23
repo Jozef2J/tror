@@ -136,7 +136,66 @@ enum Cmd {
     Tables(String),
     Batch(Vec<String>, String, Option<Source>),
     Import(Vec<String>),
+    Search(Find),
 }
+
+#[derive(Clone, Default)]
+struct Find {
+    schema: String,
+    table: Option<String>,
+    needle: String,
+    case: bool,
+    exact: bool,
+}
+
+impl Find {
+    fn condition(&self, kind: DbKind, columns: &[String]) -> String {
+        let pattern = if self.exact {
+            self.needle.clone()
+        } else {
+            let escaped = self
+                .needle
+                .replace('!', "!!")
+                .replace('%', "!%")
+                .replace('_', "!_");
+            format!("%{escaped}%")
+        };
+        let value = kind.literal(Some(&pattern));
+        columns
+            .iter()
+            .map(|c| {
+                let name = kind.quote(c);
+                let text = match kind {
+                    DbKind::MySql => format!("CAST({name} AS CHAR)"),
+                    DbKind::Postgres => format!("{name}::text"),
+                    DbKind::Sqlite => format!("CAST({name} AS TEXT)"),
+                };
+                match (self.exact, self.case, kind) {
+                    (true, true, DbKind::MySql) => format!("BINARY {text} = {value}"),
+                    (true, false, _) => format!("LOWER({text}) = LOWER({value})"),
+                    (true, true, _) => format!("{text} = {value}"),
+                    (false, true, DbKind::MySql) => {
+                        format!("{text} LIKE BINARY {value} ESCAPE '!'")
+                    }
+                    (false, false, DbKind::Postgres) => format!("{text} ILIKE {value} ESCAPE '!'"),
+                    (false, true, DbKind::Sqlite) => {
+                        format!(
+                            "({text} LIKE {value} ESCAPE '!' AND INSTR({text}, {}) > 0)",
+                            kind.literal(Some(&self.needle))
+                        )
+                    }
+                    (false, false, DbKind::MySql) => {
+                        format!("LOWER({text}) LIKE LOWER({value}) ESCAPE '!'")
+                    }
+                    _ => format!("{text} LIKE {value} ESCAPE '!'"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    }
+}
+
+type Hits = Vec<(String, u64, String)>;
 
 enum Event {
     Connected(String),
@@ -144,6 +203,7 @@ enum Event {
     Tables(String, Vec<String>),
     Result(Table, Option<Source>, Vec<String>),
     Imported(usize, u64),
+    Found(Hits, usize),
     Error(String),
     Closed(String),
 }
@@ -722,6 +782,49 @@ fn serve(profile: DbProfile, ssh: Ssh, cmds: Receiver<Cmd>, events: Sender<Event
                     Event::Imported(statements.len(), affected)
                 })
             }
+            Cmd::Search(find) => {
+                trace::client(format!("[DB] search in {}", find.schema));
+                let kind = engine.kind();
+                let tables = match &find.table {
+                    Some(table) => Ok(vec![table.clone()]),
+                    None => engine.tables(&find.schema),
+                };
+                tables.map(|tables| {
+                    let mut found = Vec::new();
+                    for table in &tables {
+                        let full = match kind {
+                            DbKind::Sqlite => kind.quote(table),
+                            _ => format!("{}.{}", kind.quote(&find.schema), kind.quote(table)),
+                        };
+                        let Ok(columns) = engine.query(&format!("SELECT * FROM {full} LIMIT 0"))
+                        else {
+                            continue;
+                        };
+                        if columns.columns.is_empty() {
+                            continue;
+                        }
+                        let condition = find.condition(kind, &columns.columns);
+                        let count = engine
+                            .query(&format!("SELECT COUNT(*) FROM {full} WHERE {condition}"))
+                            .ok()
+                            .and_then(|t| t.rows.first()?.first()?.as_deref()?.parse::<u64>().ok())
+                            .unwrap_or(0);
+                        if count > 0 {
+                            found.push((
+                                table.clone(),
+                                count,
+                                format!("SELECT * FROM {full} WHERE {condition} LIMIT 200"),
+                            ));
+                        }
+                    }
+                    trace::server(format!(
+                        "[DB] found in {} of {} tables",
+                        found.len(),
+                        tables.len()
+                    ));
+                    Event::Found(found, tables.len())
+                })
+            }
             Cmd::Batch(statements, refresh, source) => engine.batch(&statements).and_then(|affected| {
                 trace::server(format!("[DB] committed, {affected} rows affected"));
                 let table = engine.query(&refresh)?;
@@ -797,6 +900,10 @@ pub struct DbPanel {
     profile: String,
     history: Option<History>,
     import: Option<(String, Vec<String>)>,
+    searching: bool,
+    mode_search: bool,
+    find: Find,
+    found: Option<(Hits, usize)>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -1156,6 +1263,12 @@ impl DbPanel {
         self.send(Cmd::Query(sql, source));
     }
 
+    fn run_on(&mut self, sql: String, source: Option<Source>) {
+        self.status.clear();
+        self.last_sql = sql.clone();
+        self.send(Cmd::Query(sql, source));
+    }
+
     fn connect(&mut self, store: &Store, ctx: &egui::Context) {
         let Some(profile) = store.databases.get(self.selected).cloned() else {
             return;
@@ -1282,6 +1395,24 @@ impl DbPanel {
                     self.source = source;
                     self.edits = Edits::default();
                     self.result = Some(table);
+                }
+                Event::Found(found, total) => {
+                    let hits: u64 = found.iter().map(|f| f.1).sum();
+                    self.status = if found.is_empty() {
+                        tf!(
+                            "Ничего не найдено, таблиц просмотрено: {total}",
+                            "Nothing found, tables checked: {total}"
+                        )
+                    } else {
+                        tf!(
+                            "Найдено строк: {hits}, таблиц: {} из {total}",
+                            "Rows found: {hits}, tables: {} of {total}",
+                            found.len()
+                        )
+                    };
+                    self.error = false;
+                    self.found = Some((found, total));
+                    self.searching = false;
                 }
                 Event::Imported(count, affected) => {
                     self.status = tf!(
@@ -1622,7 +1753,186 @@ impl DbPanel {
         }
     }
 
+    fn search_view(&mut self, ui: &mut Ui, pal: &Palette) {
+        use crate::widgets::{FORM_ROW, form_field, form_row, toggle};
+        let mut start = false;
+        ui.spacing_mut().item_spacing.y = 8.0;
+        form_row(ui, pal, tr!("Найти"), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let width = crate::widgets::field_width(ui, 2.0 * 32.0 + 8.0);
+            let field = ui.add(
+                form_field(&mut self.find.needle, tr!("значение в любом столбце"))
+                    .desired_width(width),
+            );
+            if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                start = true;
+            }
+            ui.add_space(6.0);
+            toggle(ui, pal, &mut self.find.case, "Aa", tr!("Учитывать регистр"));
+            toggle(ui, pal, &mut self.find.exact, "=", tr!("Значение целиком"));
+        });
+        let what = match self.kind {
+            DbKind::Postgres => tr!("Схема"),
+            _ => tr!("База"),
+        };
+        let schemas: Vec<String> = self.schemas.iter().map(|s| s.name.clone()).collect();
+        if self.find.schema.is_empty() || !schemas.contains(&self.find.schema) {
+            self.find.schema = if schemas.contains(&self.current) {
+                self.current.clone()
+            } else {
+                schemas.first().cloned().unwrap_or_default()
+            };
+        }
+        let tables: Vec<String> = self
+            .schemas
+            .iter()
+            .find(|s| s.name == self.find.schema)
+            .and_then(|s| s.tables.clone())
+            .unwrap_or_default();
+        let mut load = None;
+        form_row(ui, pal, what, |ui| {
+            egui::ComboBox::from_id_salt("tror_db_find_schema")
+                .width(crate::widgets::field_width(ui, 2.0 * 32.0 + 8.0))
+                .selected_text(&self.find.schema)
+                .show_ui(ui, |ui| {
+                    for name in &schemas {
+                        if ui
+                            .selectable_label(self.find.schema == *name, name)
+                            .clicked()
+                        {
+                            self.find.schema = name.clone();
+                            self.find.table = None;
+                        }
+                    }
+                });
+        });
+        form_row(ui, pal, tr!("Таблица"), |ui| {
+            let all = tr!("все таблицы");
+            let response = egui::ComboBox::from_id_salt("tror_db_find_table")
+                .width(crate::widgets::field_width(ui, 2.0 * 32.0 + 8.0))
+                .selected_text(self.find.table.as_deref().unwrap_or(all))
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(self.find.table.is_none(), all)
+                        .clicked()
+                    {
+                        self.find.table = None;
+                    }
+                    for name in &tables {
+                        if ui
+                            .selectable_label(self.find.table.as_deref() == Some(name), name)
+                            .clicked()
+                        {
+                            self.find.table = Some(name.clone());
+                        }
+                    }
+                });
+            if response.response.clicked() && tables.is_empty() {
+                load = Some(self.find.schema.clone());
+            }
+        });
+        if let Some(schema) = load {
+            self.send(Cmd::Tables(schema));
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let size = egui::vec2(0.0, FORM_ROW);
+            if ui
+                .add_enabled(
+                    !self.find.needle.is_empty() && !self.busy && !self.find.schema.is_empty(),
+                    crate::widgets::primary(tr!("Найти"), pal).min_size(size),
+                )
+                .lit(ui)
+                .clicked()
+            {
+                start = true;
+            }
+            if self.busy && self.searching {
+                ui.spinner();
+            }
+        });
+        if start && !self.busy && !self.find.needle.is_empty() {
+            self.found = None;
+            self.searching = true;
+            self.status = tr!("Поиск…").into();
+            self.error = false;
+            self.send(Cmd::Search(self.find.clone()));
+        }
+        let Some((found, _)) = &self.found else {
+            return;
+        };
+        if found.is_empty() {
+            return;
+        }
+        ui.add_space(4.0);
+        ui.separator();
+        let mut open = None;
+        let row_h = crate::widgets::RESULT_ROW;
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ScrollArea::vertical()
+            .id_salt("tror_db_found")
+            .auto_shrink([false, true])
+            .show_rows(ui, row_h, found.len(), |ui, rows| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for row in rows {
+                    let (table, count, sql) = &found[row];
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_h),
+                        Sense::click(),
+                    );
+                    let painter = ui.painter_at(rect);
+                    if response.hovered() {
+                        painter.rect_filled(rect, 4.0, pal.crust);
+                    }
+                    let placed = painter.text(
+                        egui::pos2(rect.left() + 6.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        table,
+                        egui::FontId::proportional(12.5),
+                        pal.accent,
+                    );
+                    painter.text(
+                        egui::pos2(placed.right() + 12.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        tf!("строк: {count}", "rows: {count}"),
+                        egui::FontId::proportional(12.0),
+                        pal.subtext,
+                    );
+                    if response
+                        .on_hover_text(tr!("Открыть найденные строки"))
+                        .clicked()
+                    {
+                        open = Some((table.clone(), sql.clone()));
+                    }
+                }
+            });
+        if let Some((table, sql)) = open {
+            let schema = self.find.schema.clone();
+            self.searching = false;
+            self.mode_search = false;
+            self.sql = sql.clone();
+            self.current = schema.clone();
+            self.run_on(sql, Some(Source { schema, table }));
+        }
+    }
+
     fn main(&mut self, ui: &mut Ui, pal: &Palette, font_size: f32) {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            crate::widgets::segmented(
+                ui,
+                pal,
+                &mut self.mode_search,
+                &[(false, tr!("Запрос")), (true, tr!("Поиск"))],
+                96.0,
+            );
+        });
+        ui.add_space(6.0);
+        if self.mode_search {
+            self.search_view(ui, pal);
+            return;
+        }
         let font = FontId::monospace(font_size - 1.0);
         let run_key = ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
         let output = TextEdit::multiline(&mut self.sql)
@@ -2252,11 +2562,7 @@ impl DbPanel {
         }
         let modal = dialog("tror_db_editor", pal).show(ctx, |ui| {
             ui.set_width(460.0);
-            ui.label(
-                RichText::new(tr!("Подключение к базе данных"))
-                    .family(crate::theme::medium())
-                    .size(16.0),
-            );
+            crate::widgets::title(ui, pal, tr!("Подключение к базе данных"));
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 for (i, profile) in store.databases.iter().enumerate() {
@@ -2391,7 +2697,7 @@ impl DbPanel {
             }
             if let Some(result) = &editor.result {
                 let (text, color) = match result {
-                    Ok(text) => (tf!("Работает: {text}", "Works: {text}"), egui::Color32::from_rgb(0x3f, 0xc2, 0x6e)),
+                    Ok(text) => (tf!("Работает: {text}", "Works: {text}"), crate::widgets::ok_color(ui)),
                     Err(e) => (tf!("Ошибка: {e}", "Error: {e}"), pal.warn),
                 };
                 ui.label(RichText::new(text).small().color(color));
@@ -2516,7 +2822,7 @@ impl DbPanel {
         let mut cancel = false;
         let modal = dialog("tror_db_import", pal).show(ctx, |ui| {
             ui.set_width(560.0);
-            ui.label(RichText::new(tf!("Импорт: {name}", "Import: {name}")).strong());
+            crate::widgets::title(ui, pal, tf!("Импорт: {name}", "Import: {name}"));
             ui.label(
                 RichText::new(tf!(
                     "Запросов: {}. Они выполнятся в одной транзакции: при ошибке ничего не изменится.",
@@ -2566,7 +2872,7 @@ impl DbPanel {
         let mut cancel = false;
         let modal = dialog("tror_db_apply", pal).show(ctx, |ui| {
             ui.set_width(560.0);
-            ui.label(RichText::new(tr!("Применить изменения")).strong());
+            crate::widgets::title(ui, pal, tr!("Применить изменения"));
             ui.label(
                 RichText::new(tr!("Будут выполнены запросы, в одной транзакции:"))
                     .color(pal.subtext)
@@ -2926,5 +3232,32 @@ mod history_tests {
         assert_eq!(count.rows[0][1].as_deref(), Some("1"));
         drop(engine);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn search_conditions_per_engine() {
+        let cols = vec!["a".to_owned(), "b".to_owned()];
+        let find = |case, exact| Find {
+            needle: "50%_x".into(),
+            case,
+            exact,
+            ..Default::default()
+        };
+        assert_eq!(
+            find(false, false).condition(DbKind::MySql, &cols),
+            "LOWER(CAST(`a` AS CHAR)) LIKE LOWER('%50!%!_x%') ESCAPE '!' OR LOWER(CAST(`b` AS CHAR)) LIKE LOWER('%50!%!_x%') ESCAPE '!'"
+        );
+        assert_eq!(
+            find(true, false).condition(DbKind::Postgres, &cols[..1]),
+            "\"a\"::text LIKE '%50!%!_x%' ESCAPE '!'"
+        );
+        assert_eq!(
+            find(false, false).condition(DbKind::Postgres, &cols[..1]),
+            "\"a\"::text ILIKE '%50!%!_x%' ESCAPE '!'"
+        );
+        assert_eq!(
+            find(true, true).condition(DbKind::MySql, &cols[..1]),
+            "BINARY CAST(`a` AS CHAR) = '50%_x'"
+        );
     }
 }

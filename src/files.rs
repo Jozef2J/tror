@@ -1052,7 +1052,8 @@ impl ProjectPanel {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default()
                 ))
-                .strong(),
+                .size(crate::widgets::TITLE)
+                .color(pal.text),
             );
             ui.add_space(6.0);
             egui::Grid::new("tror_local_attrs_info")
@@ -1155,7 +1156,12 @@ impl ProjectPanel {
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if dialog_button(ui, pal, action, true) {
+                let ok = if action == tr!("Удалить") {
+                    crate::app::danger_button(ui, pal, action)
+                } else {
+                    dialog_button(ui, pal, action, true)
+                };
+                if ok {
                     confirmed = true;
                 }
                 if dialog_button(ui, pal, tr!("Отмена"), false) {

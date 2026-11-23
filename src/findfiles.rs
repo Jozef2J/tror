@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::widgets::Lit;
-use eframe::egui::{self, Button, Color32, RichText, ScrollArea, Sense, Ui};
+use eframe::egui::{self, Button, RichText, ScrollArea, Sense, Ui};
 use regex::{Regex, RegexBuilder};
 
 use crate::{document::Document, theme::Palette};
@@ -700,10 +700,7 @@ impl FindFiles {
                     )
                 };
                 if ui
-                    .add(
-                        Button::new(RichText::new(label).color(Color32::WHITE))
-                            .fill(Color32::from_rgb(0xc8, 0x3c, 0x3c)),
-                    )
+                    .add(crate::widgets::danger(label, pal).min_size(crate::widgets::ACTION))
                     .lit(ui)
                     .clicked()
                 {
@@ -782,7 +779,7 @@ impl FindFiles {
             ui.separator();
         }
         ui.spacing_mut().item_spacing.y = 0.0;
-        let row_h = 22.0;
+        let row_h = crate::widgets::RESULT_ROW;
         let tall = (self.hits.len() as f32 * row_h).min(crate::widgets::RESULTS);
         ScrollArea::vertical()
             .id_salt("tror_find_files_hits")

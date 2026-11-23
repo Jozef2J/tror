@@ -199,7 +199,7 @@ impl TrorApp {
         let mut go = false;
         let modal = dialog("tror_rename_tab", pal).show(ctx, |ui| {
             ui.set_width(340.0);
-            ui.label(tr!("Новое имя файла"));
+            crate::widgets::title(ui, pal, tr!("Новое имя файла"));
             ui.add_space(4.0);
             let field = ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY));
             if !field.has_focus() && !ui.input(|i| i.pointer.any_down()) {
@@ -384,7 +384,7 @@ impl TrorApp {
         let mut go = false;
         let modal = dialog("tror_goto", pal).show(ctx, |ui| {
             ui.set_width(260.0);
-            ui.label(tr!("Перейти к строке"));
+            crate::widgets::title(ui, pal, tr!("Перейти к строке"));
             ui.add_space(4.0);
             let field = ui.add(
                 TextEdit::singleline(input)

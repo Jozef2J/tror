@@ -359,7 +359,7 @@ impl TrorApp {
         ui.add_space(6.0);
         ui.separator();
         let current = matches.partition_point(|m| m.0 < doc.sel.0.min(doc.sel.1));
-        let row_h = 22.0;
+        let row_h = crate::widgets::RESULT_ROW;
         let mut pick = None;
         ui.spacing_mut().item_spacing.y = 0.0;
         let tall = (matches.len() as f32 * row_h).min(crate::widgets::RESULTS);

@@ -4784,7 +4784,7 @@ dependencies = [
 
 [[package]]
 name = "trorpad"
-version = "0.26.7"
+version = "0.26.8"
 dependencies = [
  "aes",
  "apple-native-keyring-store",

@@ -523,7 +523,7 @@ impl ConsolePanel {
                             };
                             ui.painter().rect_filled(rect, 6.0, fill);
                             let dot = if session.connected {
-                                Color32::from_rgb(0x3f, 0xc2, 0x6e)
+                                crate::widgets::ok_color(ui)
                             } else if session.shell.is_some() {
                                 pal.warn
                             } else {
@@ -984,15 +984,15 @@ impl ConsolePanel {
             if changed {
                 ui.label(
                     RichText::new(tf!("Ключ сервера «{title}» изменился", "The key of server \"{title}\" has changed"))
-                        .color(pal.warn)
-                        .strong(),
+                        .size(crate::widgets::TITLE)
+                        .color(pal.warn),
                 );
                 ui.label(
                     tr!("Сохранённый ключ этого сервера отличается от присланного. Так бывает после \
                      переустановки сервера, но так же выглядит перехват соединения."),
                 );
             } else {
-                ui.label(RichText::new(tf!("Новый сервер «{title}»", "New server \"{title}\"")).strong());
+                crate::widgets::title(ui, pal, tf!("Новый сервер «{title}»", "New server \"{title}\""));
                 ui.label(
                     tr!("К этому серверу вы подключаетесь впервые. Отпечаток его ключа (SHA-256):"),
                 );
@@ -1044,7 +1044,7 @@ impl ConsolePanel {
         let mut test = false;
         let modal = dialog("tror_console_profiles", pal).show(ctx, |ui| {
             ui.set_width(660.0);
-            ui.label(RichText::new(tr!("Подключения консоли")).strong());
+            crate::widgets::title(ui, pal, tr!("Подключения консоли"));
             ui.add_space(8.0);
             let limit = (ui.ctx().content_rect().height() - 200.0).max(200.0);
             ScrollArea::vertical()
@@ -1181,7 +1181,7 @@ impl ConsolePanel {
                                     }
                                     if let Some(result) = &editor.result {
                                         let (text, color) = match result {
-                                            Ok(text) => (tf!("Работает: {text}", "Works: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
+                                            Ok(text) => (tf!("Работает: {text}", "Works: {text}"), crate::widgets::ok_color(ui)),
                                             Err(e) => (tf!("Ошибка: {e}", "Error: {e}"), pal.warn),
                                         };
                                         ui.label(RichText::new(text).small().color(color));

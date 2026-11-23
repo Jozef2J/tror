@@ -57,7 +57,7 @@ impl TrorApp {
         let modal = dialog("tror_plugin_manager", pal).show(ctx, |ui| {
             ui.set_width(620.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(tr!("Плагины")).strong().size(15.0));
+                crate::widgets::title(ui, pal, tr!("Плагины"));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.add(Button::new(tr!("Перечитать"))).clicked() {
                         reload = true;
@@ -179,7 +179,7 @@ impl TrorApp {
                                         (false, _) => RichText::new(tr!("Выключен")).color(pal.subtext),
                                         (true, Some(w)) => match &w.broken {
                                             Some(reason) => RichText::new(tf!("Остановлен: {reason}", "Stopped: {reason}")).color(pal.warn),
-                                            None => RichText::new(tr!("Работает")).color(pal.accent),
+                                            None => RichText::new(tr!("Работает")).color(crate::widgets::ok_color(ui)),
                                         },
                                         (true, None) => RichText::new(tr!("Не загружен — см. журнал программы")).color(pal.warn),
                                     };

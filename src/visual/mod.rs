@@ -998,13 +998,13 @@ impl Visual {
             };
             match dialog {
                 Dialog::Link { href, blank } => {
-                    ui.label(RichText::new(tr!("Ссылка")).strong());
+                    crate::widgets::title(ui, pal, tr!("Ссылка"));
                     ui.add_space(6.0);
                     row(ui, tr!("Адрес"), href);
                     ui.checkbox(blank, tr!("Открывать в новом окне"));
                 }
                 Dialog::Image { src, alt, width, height, .. } => {
-                    ui.label(RichText::new(tr!("Изображение")).strong());
+                    crate::widgets::title(ui, pal, tr!("Изображение"));
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.add_sized([110.0, 24.0], egui::Label::new(tr!("Адрес")));
@@ -1027,7 +1027,7 @@ impl Visual {
                     row(ui, tr!("Высота"), height);
                 }
                 Dialog::Table { rows, cols, header, width, border } => {
-                    ui.label(RichText::new(tr!("Таблица")).strong());
+                    crate::widgets::title(ui, pal, tr!("Таблица"));
                     ui.add_space(6.0);
                     row(ui, tr!("Строк"), rows);
                     row(ui, tr!("Столбцов"), cols);
@@ -1036,7 +1036,7 @@ impl Visual {
                     ui.checkbox(header, tr!("Первая строка — заголовок"));
                 }
                 Dialog::Anchor(name) => {
-                    ui.label(RichText::new(tr!("Якорь")).strong());
+                    crate::widgets::title(ui, pal, tr!("Якорь"));
                     ui.add_space(6.0);
                     row(ui, tr!("Имя"), name);
                 }

@@ -10,6 +10,28 @@ pub fn secondary(text: impl Into<String>, _pal: &Palette) -> egui::Button<'stati
     egui::Button::new(text.into())
 }
 
+pub const DANGER: Color32 = Color32::from_rgb(0xc8, 0x3c, 0x3c);
+
+pub fn danger(text: impl Into<String>, _pal: &Palette) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text.into()).color(Color32::WHITE)).fill(DANGER)
+}
+
+pub const ACTION: egui::Vec2 = egui::vec2(0.0, FORM_ROW);
+pub const RESULT_ROW: f32 = 22.0;
+pub const TITLE: f32 = 15.5;
+
+pub fn ok_color(ui: &Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(0x3f, 0xc2, 0x6e)
+    } else {
+        Color32::from_rgb(0x1e, 0x88, 0x45)
+    }
+}
+
+pub fn title(ui: &mut Ui, pal: &Palette, text: impl Into<String>) -> egui::Response {
+    ui.label(RichText::new(text.into()).size(TITLE).color(pal.text))
+}
+
 pub trait Lit {
     fn lit(self, ui: &Ui) -> Self;
 }
@@ -1227,22 +1249,25 @@ pub fn profile_dialogs(
             ui.set_width(340.0);
             match &mut ask {
                 ProfileAsk::Rename(index, name) => {
-                    ui.label(
-                        RichText::new(tr!("Переименовать профиль"))
-                            .size(15.5)
-                            .color(pal.text),
-                    );
+                    title(ui, pal, tr!("Переименовать профиль"));
                     ui.add_space(8.0);
                     let field = ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY));
                     field.request_focus();
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        let ok = ui.add(primary(tr!("Переименовать"), pal)).clicked() || enter;
+                        let ok = ui
+                            .add(primary(tr!("Переименовать"), pal).min_size(ACTION))
+                            .lit(ui)
+                            .clicked()
+                            || enter;
                         if ok && !name.trim().is_empty() {
                             action = Some(ProfileAction::Rename(*index, name.trim().to_owned()));
                         }
-                        if ui.add(secondary(tr!("Отмена"), pal)).clicked() {
+                        if ui
+                            .add(secondary(tr!("Отмена"), pal).min_size(ACTION))
+                            .clicked()
+                        {
                             done = true;
                         }
                     });
@@ -1265,16 +1290,16 @@ pub fn profile_dialogs(
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui
-                            .add(
-                                egui::Button::new(RichText::new(tr!("Удалить")).color(pal.base))
-                                    .fill(pal.warn),
-                            )
+                            .add(danger(tr!("Удалить"), pal).min_size(ACTION))
                             .lit(ui)
                             .clicked()
                         {
                             action = Some(ProfileAction::Delete(*index));
                         }
-                        if ui.add(secondary(tr!("Отмена"), pal)).clicked() {
+                        if ui
+                            .add(secondary(tr!("Отмена"), pal).min_size(ACTION))
+                            .clicked()
+                        {
                             done = true;
                         }
                     });

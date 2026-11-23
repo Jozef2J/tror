@@ -323,7 +323,11 @@ fn color_field(ui: &mut Ui, key: &str, color: &mut [u8; 3]) -> bool {
 
 fn heading(ui: &mut Ui, pal: &Palette, text: &str, hint: &str) {
     ui.add_space(18.0);
-    ui.label(RichText::new(text).family(theme::medium()).size(15.5));
+    ui.label(
+        RichText::new(text)
+            .family(theme::medium())
+            .size(crate::widgets::TITLE),
+    );
     if !hint.is_empty() {
         ui.label(RichText::new(hint).small().color(pal.faint));
     }

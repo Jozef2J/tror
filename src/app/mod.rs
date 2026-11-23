@@ -191,13 +191,18 @@ pub(crate) fn size_label(bytes: usize) -> String {
     }
 }
 
+pub(crate) fn danger_button(ui: &mut Ui, pal: &Palette, text: &str) -> bool {
+    let response = ui.add(crate::widgets::danger(text, pal).min_size(crate::widgets::ACTION));
+    crate::widgets::Lit::lit(response, ui).clicked()
+}
+
 pub(crate) fn dialog_button(ui: &mut Ui, pal: &Palette, text: &str, primary: bool) -> bool {
     let button = if primary {
         crate::widgets::primary(text, pal)
     } else {
         crate::widgets::secondary(text, pal)
     };
-    let response = ui.add(button.min_size(egui::vec2(0.0, 28.0)));
+    let response = ui.add(button.min_size(crate::widgets::ACTION));
     if primary {
         crate::widgets::Lit::lit(response, ui).clicked()
     } else {
@@ -208,7 +213,7 @@ pub(crate) fn dialog_button(ui: &mut Ui, pal: &Palette, text: &str, primary: boo
 pub(crate) fn window_header(ui: &mut Ui, pal: &Palette, title: &str, closable: bool) -> bool {
     let mut close = false;
     ui.horizontal(|ui| {
-        ui.label(RichText::new(title).size(15.5).color(pal.text));
+        crate::widgets::title(ui, pal, title);
         if closable {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 close = icon_button(ui, pal, Icon::Close).clicked();

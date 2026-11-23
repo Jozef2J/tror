@@ -49,7 +49,7 @@ fn render(ui: &mut Ui, pal: &Palette, salt: u64, node: &mut Value, out: &mut Vec
         "heading" => {
             ui.label(
                 RichText::new(text_of(node, "text"))
-                    .size(15.5)
+                    .size(crate::widgets::TITLE)
                     .color(pal.text),
             );
         }
