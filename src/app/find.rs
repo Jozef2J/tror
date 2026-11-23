@@ -217,7 +217,7 @@ impl TrorApp {
                 } else {
                     self.project2.root.clone()
                 };
-                if let Some(out) = self.find_files.body(ui, pal, root.as_deref()) {
+                if let Some(out) = self.find_files.body(ui, pal, root.as_deref(), &self.docs) {
                     self.find_out = Some(out);
                 }
             }

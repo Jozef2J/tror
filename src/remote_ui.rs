@@ -108,7 +108,10 @@ impl Transfer {
 }
 
 struct Batch {
-    folder: PathBuf,
+    folder: Option<PathBuf>,
+    target: String,
+    downloads: bool,
+    uploads: bool,
     start: std::time::Instant,
     files: usize,
     done: usize,
@@ -124,9 +127,12 @@ struct Batch {
 }
 
 impl Batch {
-    fn new(folder: &Path) -> Batch {
+    fn new() -> Batch {
         Batch {
-            folder: folder.to_path_buf(),
+            folder: None,
+            target: String::new(),
+            downloads: false,
+            uploads: false,
             start: std::time::Instant::now(),
             files: 0,
             done: 0,
@@ -146,6 +152,14 @@ impl Batch {
         self.files += 1;
         self.total += size;
         self.sizes.insert(path, size);
+    }
+
+    fn noun(&self) -> &'static str {
+        match (self.downloads, self.uploads) {
+            (true, false) => tr!("Скачивание с сервера"),
+            (false, true) => tr!("Загрузка на сервер"),
+            _ => tr!("Передача файлов"),
+        }
     }
 
     fn idle(&self) -> bool {
@@ -182,6 +196,7 @@ pub struct RemotePanel {
     walks: HashMap<String, Walk>,
     sync: Option<crate::sync::Dialog>,
     sync_times: HashMap<PathBuf, u64>,
+    no_times: bool,
     pending: usize,
     progress: Option<(u64, u64)>,
     store_seen: u64,
@@ -249,6 +264,7 @@ impl RemotePanel {
             walks: HashMap::new(),
             sync: None,
             sync_times: HashMap::new(),
+            no_times: false,
             pending: 0,
             progress: None,
             store_seen: Store::generation(),
@@ -351,20 +367,31 @@ impl RemotePanel {
             .map_or(0, |e| e.size)
     }
 
+    fn batch(&mut self) -> &mut Batch {
+        if self.batch.as_ref().is_none_or(|b| b.finished.is_some()) {
+            self.batch = Some(Batch::new());
+        }
+        let batch = self.batch.as_mut().expect("batch");
+        batch.open = true;
+        batch
+    }
+
     pub fn download_into(&mut self, items: Vec<(String, bool)>, folder: &Path) {
-        if self.batch.as_ref().is_none_or(|b| b.finished.is_some() || b.folder != folder) {
-            if let Some(old) = self.batch.take()
-                && old.finished.is_none()
-            {
-                self.batch = Some(old);
-            } else {
-                let what = match items.as_slice() {
-                    [(path, _)] => remote::file_name(path).to_owned(),
-                    _ => tf!("объектов: {}", "items: {}", items.len()),
-                };
-                self.push_log(tf!("Скачивание начато: {what} → {}", "Download started: {what} → {}", folder.display()), false);
-                self.batch = Some(Batch::new(folder));
-            }
+        let what = match items.as_slice() {
+            [(path, _)] => remote::file_name(path).to_owned(),
+            _ => tf!("объектов: {}", "items: {}", items.len()),
+        };
+        self.push_log(
+            tf!("Скачивание начато: {what} → {}", "Download started: {what} → {}", folder.display()),
+            false,
+        );
+        let batch = self.batch();
+        batch.downloads = true;
+        if batch.folder.is_none() && !batch.uploads {
+            batch.folder = Some(folder.to_path_buf());
+            batch.target = folder.display().to_string();
+        } else if batch.folder.as_deref() != Some(folder) {
+            batch.folder = None;
         }
         for (path, dir) in &items {
             let size = if *dir { 0 } else { self.entry_size(path) };
@@ -374,7 +401,6 @@ impl RemotePanel {
                 } else {
                     batch.add(path.clone(), size);
                 }
-                batch.open = true;
             }
         }
         for (path, dir) in items {
@@ -675,10 +701,29 @@ impl RemotePanel {
             }
         }
         files.sort_by(|a, b| a.1.cmp(&b.1));
+        if files.is_empty() {
+            return;
+        }
+        let what = match files.as_slice() {
+            [(_, relative)] => relative.clone(),
+            _ => tf!("файлов: {}", "files: {}", files.len()),
+        };
+        self.push_log(tf!("Загрузка начата: {what} → {dir}", "Upload started: {what} → {dir}"), false);
+        let batch = self.batch();
+        batch.uploads = true;
+        if batch.target.is_empty() || batch.downloads {
+            batch.target = dir.to_owned();
+        }
+        if batch.downloads {
+            batch.folder = None;
+        }
         for (local, relative) in files {
             match std::fs::read(&local) {
                 Ok(data) => {
                     let path = remote::join(dir, &relative);
+                    if let Some(batch) = &mut self.batch {
+                        batch.add(path.clone(), data.len() as u64);
+                    }
                     self.send(
                         Cmd::Upload {
                             path,
@@ -892,6 +937,7 @@ impl RemotePanel {
                 }
                 Event::Connected { home, fingerprint } => {
                     self.connected = true;
+                    self.no_times = false;
                     self.pending = 0;
                     if let (Some(print), Some(p)) =
                         (fingerprint, self.store.profiles.get(self.selected))
@@ -967,6 +1013,11 @@ impl RemotePanel {
                     match self.save_to.remove(&path) {
                         Some(local) if in_batch => {
                             let result = std::fs::write(&local, data);
+                            if result.is_ok()
+                                && let Some(mtime) = self.sync_times.remove(&local)
+                            {
+                                crate::sync::set_mtime(&local, mtime);
+                            }
                             if let Some(batch) = &mut self.batch {
                                 match &result {
                                     Ok(()) => {
@@ -1020,6 +1071,17 @@ impl RemotePanel {
                     self.finished();
                     self.settle(&path, None);
                     let dir = remote::parent(&path);
+                    if doc.is_none()
+                        && let Some(batch) = &mut self.batch
+                        && let Some(size) = batch.sizes.remove(&path)
+                    {
+                        batch.done += 1;
+                        batch.bytes += size;
+                        if self.pending == 0 || dir != self.cwd {
+                            self.refresh_dir(&dir);
+                        }
+                        continue;
+                    }
                     match doc {
                         Some(doc) => out.push(PanelEvent::Uploaded { doc, path }),
                         None => out.push(PanelEvent::Toast(tf!("Загружено: {}", "Uploaded: {}",
@@ -1031,6 +1093,17 @@ impl RemotePanel {
                     }
                 }
                 Event::Progress { done, total } => self.progress = Some((done, total)),
+                Event::NoTimes(path) => {
+                    self.finished();
+                    self.settle(&path, None);
+                    if !self.no_times {
+                        self.no_times = true;
+                        self.push_log(
+                            tr!("Сервер не поддерживает установку времени файлов (MFMT): при синхронизации сравнение по времени выключено").to_owned(),
+                            true,
+                        );
+                    }
+                }
                 Event::Walked { root, files, times } => {
                     self.finished();
                     let name = remote::file_name(&root).to_owned();
@@ -1058,7 +1131,11 @@ impl RemotePanel {
                                 remote_root: root.clone(),
                                 local_root: folder,
                                 mode: crate::sync::Mode::Both,
-                                by_time: true,
+                                by_time: !self.no_times,
+                                remove: false,
+                                include: String::new(),
+                                exclude: String::new(),
+                                no_times: self.no_times,
                             });
                         }
                         Some(Walk::Size) => {
@@ -1122,7 +1199,7 @@ impl RemotePanel {
                 Event::Changed(dir) => {
                     self.finished();
                     self.settle(&dir, None);
-                    if dir != self.cwd {
+                    if dir != self.cwd && self.batch.as_ref().is_none_or(|b| b.finished.is_some()) {
                         self.push_log(tf!("Изменён каталог {dir}", "Folder changed {dir}"), false);
                     }
                     self.refresh_dir(&dir);
@@ -2452,13 +2529,52 @@ impl RemotePanel {
                     &mut dialog.by_time,
                     tr!("При одинаковом размере сравнивать время изменения"),
                 );
+                if dialog.no_times {
+                    ui.label(
+                        RichText::new(tr!(
+                            "Сервер не умеет ставить время файлам (нет команды MFMT), поэтому сравнение по времени выключено: иначе одни и те же файлы копировались бы каждый раз."
+                        ))
+                        .small()
+                        .color(pal.warn),
+                    );
+                }
+                let one_way = dialog.mode != Mode::Both;
+                ui.add_enabled(
+                    one_way,
+                    egui::Checkbox::new(
+                        &mut dialog.remove,
+                        if dialog.mode == Mode::Down {
+                            tr!("Удалять на компьютере файлы, которых нет на сервере")
+                        } else {
+                            tr!("Удалять на сервере файлы, которых нет на компьютере")
+                        },
+                    ),
+                );
+                egui::Grid::new("tror_sync_filter").num_columns(2).show(ui, |ui| {
+                    ui.label(RichText::new(tr!("Только")).color(pal.subtext));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut dialog.include)
+                            .desired_width(360.0)
+                            .hint_text(tr!("все файлы; или маски через запятую: *.php, *.css")),
+                    );
+                    ui.end_row();
+                    ui.label(RichText::new(tr!("Кроме")).color(pal.subtext));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut dialog.exclude)
+                            .desired_width(360.0)
+                            .hint_text(tr!("папки и маски через запятую: bitrix/cache, *.log")),
+                    );
+                    ui.end_row();
+                });
                 ui.label(
-                    RichText::new(
+                    RichText::new(if one_way && dialog.remove {
+                        tr!("Лишние файлы на стороне назначения будут удалены без возможности восстановления.")
+                    } else {
                         tr!("Ничего не удаляется: файлы, которых нет на одной стороне, копируются на неё. \
-                         Файлы с тем же именем перезаписываются."),
-                    )
+                         Файлы с тем же именем перезаписываются.")
+                    })
                     .small()
-                    .color(pal.faint),
+                    .color(if one_way && dialog.remove { pal.warn } else { pal.faint }),
                 );
                 ui.add_space(6.0);
                 let bytes = |steps: &[crate::sync::Step]| {
@@ -2472,11 +2588,35 @@ impl RemotePanel {
                     plan.same
                 ));
                 ui.separator();
-                let rows: Vec<(bool, &crate::sync::Step)> = plan
+                if !plan.remove_remote.is_empty() || !plan.remove_local.is_empty() {
+                    ui.label(
+                        RichText::new(tf!(
+                            "Будет удалено: на сервере {}, на компьютере {}",
+                            "To be deleted: on the server {}, on the computer {}",
+                            plan.remove_remote.len(),
+                            plan.remove_local.len()
+                        ))
+                        .color(pal.warn),
+                    );
+                }
+                let removals: Vec<crate::sync::Step> = plan
+                    .remove_remote
+                    .iter()
+                    .chain(&plan.remove_local)
+                    .map(|r| crate::sync::Step {
+                        relative: r.clone(),
+                        size: 0,
+                        mtime: None,
+                        fresh: false,
+                    })
+                    .collect();
+                let remote_removals = plan.remove_remote.len();
+                let rows: Vec<(u8, &crate::sync::Step)> = plan
                     .up
                     .iter()
-                    .map(|s| (true, s))
-                    .chain(plan.down.iter().map(|s| (false, s)))
+                    .map(|s| (0, s))
+                    .chain(plan.down.iter().map(|s| (1, s)))
+                    .chain(removals.iter().enumerate().map(|(i, s)| (if i < remote_removals { 2 } else { 3 }, s)))
                     .collect();
                 ui.scope(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
@@ -2491,11 +2631,14 @@ impl RemotePanel {
                                 );
                                 let painter = ui.painter_at(rect);
                                 let what = match (up, step.fresh) {
-                                    (true, true) => tr!("→ сервер, новый"),
-                                    (true, false) => tr!("→ сервер, заменить"),
-                                    (false, true) => tr!("← компьютер, новый"),
-                                    (false, false) => tr!("← компьютер, заменить"),
+                                    (0, true) => tr!("→ сервер, новый"),
+                                    (0, false) => tr!("→ сервер, заменить"),
+                                    (1, true) => tr!("← компьютер, новый"),
+                                    (1, false) => tr!("← компьютер, заменить"),
+                                    (2, _) => tr!("× удалить на сервере"),
+                                    _ => tr!("× удалить на компьютере"),
                                 };
+                                let removal = *up >= 2;
                                 painter.text(
                                     egui::pos2(rect.left() + 4.0, rect.center().y),
                                     egui::Align2::LEFT_CENTER,
@@ -2503,6 +2646,16 @@ impl RemotePanel {
                                     egui::FontId::proportional(12.0),
                                     if step.fresh { pal.subtext } else { pal.warn },
                                 );
+                                if removal {
+                                    painter.text(
+                                        egui::pos2(rect.left() + 170.0, rect.center().y),
+                                        egui::Align2::LEFT_CENTER,
+                                        &step.relative,
+                                        egui::FontId::proportional(12.5),
+                                        pal.warn,
+                                    );
+                                    continue;
+                                }
                                 painter.text(
                                     egui::pos2(rect.left() + 170.0, rect.center().y),
                                     egui::Align2::LEFT_CENTER,
@@ -2522,7 +2675,7 @@ impl RemotePanel {
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    let total = plan.up.len() + plan.down.len();
+                    let total = plan.up.len() + plan.down.len() + plan.remove_remote.len() + plan.remove_local.len();
                     let label = if total == 0 {
                         tr!("Всё уже совпадает").to_owned()
                     } else {
@@ -2541,6 +2694,48 @@ impl RemotePanel {
             let Some(dialog) = self.sync.take() else {
                 return;
             };
+            let count = plan.up.len() + plan.down.len();
+            if count > 0 {
+                self.push_log(
+                    tf!(
+                        "Синхронизация начата: {} ↔ {}, файлов: {count}",
+                        "Sync started: {} ↔ {}, files: {count}",
+                        dialog.local_root.display(),
+                        dialog.remote_root
+                    ),
+                    false,
+                );
+                let batch = self.batch();
+                batch.downloads |= !plan.down.is_empty();
+                batch.uploads |= !plan.up.is_empty();
+                batch.target = dialog.remote_root.clone();
+                batch.folder = Some(dialog.local_root.clone());
+                for step in plan.down.iter().chain(&plan.up) {
+                    batch.add(remote::join(&dialog.remote_root, &step.relative), step.size);
+                }
+            }
+            for relative in &plan.remove_local {
+                if let Some(local) = crate::sync::local_path(&dialog.local_root, relative)
+                    && let Err(e) = std::fs::remove_file(&local)
+                {
+                    self.push_log(tf!("Не удалось удалить {relative}: {e}", "Could not delete {relative}: {e}"), true);
+                }
+            }
+            for relative in &plan.remove_remote {
+                let path = remote::join(&dialog.remote_root, relative);
+                self.send(Cmd::Delete { path, dir: false }, tf!("Удаление {relative}…", "Deleting {relative}…"));
+            }
+            if !plan.remove_local.is_empty() || !plan.remove_remote.is_empty() {
+                self.push_log(
+                    tf!(
+                        "Синхронизация: удалено на компьютере {}, на сервере {}",
+                        "Sync: deleted on the computer {}, on the server {}",
+                        plan.remove_local.len(),
+                        plan.remove_remote.len()
+                    ),
+                    false,
+                );
+            }
             for step in &plan.down {
                 let Some(local) = crate::sync::local_path(&dialog.local_root, &step.relative) else {
                     self.push_log(tf!("Пропущено небезопасное имя: {}", "Skipped an unsafe name: {}", step.relative), true);
@@ -2572,7 +2767,9 @@ impl RemotePanel {
                             },
                             tf!("Синхронизация: {}…", "Sync: {}…", step.relative),
                         );
-                        if let Some(mtime) = step.mtime {
+                        if let Some(mtime) = step.mtime
+                            && !self.no_times
+                        {
                             self.send(Cmd::Touch { path, mtime }, String::new());
                         }
                     }
@@ -2605,14 +2802,15 @@ impl RemotePanel {
             size_label(batch.bytes as usize),
             duration_label(spent)
         );
+        let what = batch.noun();
         let (text, error) = if lost {
-            (tf!("Скачивание прервано: соединение закрыто ({summary})", "Download interrupted: connection closed ({summary})"), true)
+            (tf!("{what}: прервано, соединение закрыто ({summary})", "{what}: interrupted, connection closed ({summary})"), true)
         } else if batch.cancelled {
-            (tf!("Скачивание отменено: {summary}", "Download cancelled: {summary}"), false)
+            (tf!("{what}: отменено ({summary})", "{what}: cancelled ({summary})"), false)
         } else if failed > 0 {
-            (tf!("Скачивание завершено с ошибками ({failed}): {summary}", "Download finished with errors ({failed}): {summary}"), true)
+            (tf!("{what}: завершено с ошибками ({failed}), {summary}", "{what}: finished with errors ({failed}), {summary}"), true)
         } else {
-            (tf!("Скачивание завершено: {summary}", "Download finished: {summary}"), false)
+            (tf!("{what}: завершено, {summary}", "{what}: finished, {summary}"), false)
         };
         let open = batch.open;
         self.push_log(text.clone(), error);
@@ -2635,7 +2833,7 @@ impl RemotePanel {
         let roots: Vec<String> = self
             .walks
             .iter()
-            .filter(|(_, w)| matches!(w, Walk::Download(f) if *f == batch.folder))
+            .filter(|(_, w)| matches!(w, Walk::Download(_)))
             .map(|(r, _)| r.clone())
             .collect();
         for root in roots {
@@ -2687,10 +2885,13 @@ impl RemotePanel {
         };
         let walking = batch.walking > 0;
         let folder = batch.folder.clone();
+        let target = batch.target.clone();
+        let remote_dir = (batch.uploads && !batch.downloads).then(|| target.clone());
+        let title = batch.noun();
         let (files, done, total) = (batch.files, batch.done, batch.total);
         let mut action = None;
         let mut open = true;
-        egui::Window::new(tr!("Скачивание с сервера"))
+        egui::Window::new(title)
             .id(egui::Id::unique(("tror_download", self.id)))
             .collapsible(false)
             .resizable(false)
@@ -2708,7 +2909,7 @@ impl RemotePanel {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 ui.add(
                     egui::Label::new(
-                        RichText::new(tf!("В папку: {}", "To folder: {}", folder.display())).color(pal.subtext),
+                        RichText::new(tf!("Куда: {target}", "To: {target}")).color(pal.subtext),
                     )
                     .truncate(),
                 );
@@ -2772,7 +2973,9 @@ impl RemotePanel {
                         {
                             action = Some(3);
                         }
-                        if ui.add(crate::widgets::secondary(tr!("Открыть папку"), pal)).clicked() {
+                        if (folder.is_some() || remote_dir.is_some())
+                            && ui.add(crate::widgets::secondary(tr!("Открыть папку"), pal)).clicked()
+                        {
                             action = Some(4);
                         }
                         if ui.add(crate::widgets::secondary(tr!("Закрыть"), pal)).clicked() {
@@ -2804,7 +3007,11 @@ impl RemotePanel {
                 self.retry_failed();
             }
             Some(4) => {
-                let _ = crate::preview::open_folder(&folder);
+                if let Some(folder) = &folder {
+                    let _ = crate::preview::open_folder(folder);
+                } else if let Some(dir) = remote_dir {
+                    self.list(dir);
+                }
             }
             Some(5) => self.batch = None,
             _ => {}

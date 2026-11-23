@@ -1,8 +1,10 @@
 [package]
 name = "trorpad"
-version = "0.26.5"
+version = "0.26.6"
 description = "TrorPad — a fast, compact code editor with SFTP/FTP, SSH console and database tools"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Jozef2J/tror"
 
 [dependencies]
 arboard = { version = "3.6", default-features = false }

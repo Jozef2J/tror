@@ -616,6 +616,7 @@ pub enum Event {
         server: Vec<u8>,
     },
     Changed(String),
+    NoTimes(String),
     Progress {
         done: u64,
         total: u64,
@@ -1597,10 +1598,11 @@ fn execute(
             backend.chmod(path, *mode, *recursive, *dirs, *files, &mut changed)?;
             (Event::Changed(parent(path)), format!("{changed} changed"))
         }
-        Cmd::Touch { path, mtime } => {
-            backend.touch(path, *mtime)?;
-            (Event::Changed(parent(path)), "ok".into())
-        }
+        Cmd::Touch { path, mtime } => match backend.touch(path, *mtime) {
+            Ok(()) => (Event::Changed(parent(path)), "ok".into()),
+            Err(e) if matches!(backend, Backend::Ftp(_)) => (Event::NoTimes(path.clone()), format!("MFMT: {e}")),
+            Err(e) => return Err(e),
+        },
         Cmd::Archive { dir, names, zip } => {
             backend.exec(&crate::archive::remote_command(dir, names, *zip), tr!("архивирование"))?;
             (Event::Changed(dir.clone()), "archived".into())
@@ -1747,7 +1749,7 @@ fn serve(
         if matches!(cmd, Cmd::TrustHost(_)) {
             continue;
         }
-        let quiet = matches!(cmd, Cmd::Download(_));
+        let quiet = matches!(cmd, Cmd::Download(_) | Cmd::Upload { doc: None, .. } | Cmd::Touch { .. });
         if sftp && !quiet {
             trace::client(describe(&cmd));
         }

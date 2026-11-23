@@ -343,6 +343,35 @@ impl eframe::App for TrorApp {
                     doc.goto_line(line);
                 }
             }
+            Some(crate::findfiles::Out::OpenDoc(id, line)) => {
+                if let Some(index) = self.docs.iter().position(|d| d.id == id) {
+                    self.active = index;
+                    dock::show(&mut self.dock, Pane::Doc(id), &self.settings.floats);
+                    self.docs[index].goto_line(line);
+                }
+            }
+            Some(crate::findfiles::Out::ReplaceTabs(re, with, literal)) => {
+                let mut total = 0;
+                for doc in &mut self.docs {
+                    let text = doc.rope.to_string();
+                    let count = re.find_iter(&text).filter(|m| !m.is_empty()).count();
+                    if count == 0 {
+                        continue;
+                    }
+                    let changed = if literal {
+                        re.replace_all(&text, regex::NoExpand(&with))
+                    } else {
+                        re.replace_all(&text, with.as_str())
+                    };
+                    let end = doc.len();
+                    doc.replace(0..end, &changed, crate::document::EditKind::Other);
+                    total += count;
+                }
+                self.notify(
+                    tf!("Заменено во вкладках: {total}", "Replaced in tabs: {total}"),
+                    now,
+                );
+            }
             Some(crate::findfiles::Out::Changed) => {
                 for doc in self
                     .docs

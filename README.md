@@ -56,6 +56,17 @@ cargo test
 - Plugins only get the permissions you grant them. Plugins never receive passwords.
 - TrorPad collects no telemetry. See the [privacy policy](PRIVACY.md).
 
+## License
+
+TrorPad and the plugin SDK are licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you explicitly state otherwise, any contribution you submit for inclusion in this project, as defined in the Apache-2.0 license, is dual-licensed as above, without any additional terms or conditions.
+
+The name "TrorPad" and the logo are not covered by these licenses.
+
 ## Privacy
 
 TrorPad is free software that works on your computer. It does not collect, send or sell any personal data. The full text is in [PRIVACY.md](PRIVACY.md).

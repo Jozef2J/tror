@@ -131,3 +131,7 @@ The SDK hides this, but any language that compiles to WebAssembly can implement 
 - It imports `call(ptr, len) -> answer_len` and `take(ptr)` from the module `trorpad`.
 - Messages are JSON `{"method", "params"}`; answers are `{"ok": value}` or `{"error": text}`.
 - Host → plugin: `initialize {api, app}`, `command {id}`, `event {name, ...}` with `answer {id, value, index?}`, `panel_open {panel}`, `panel {panel, id, value}`, `settings`, `saved`/`opened {path}`, `changed`, `activeChanged`.
+
+## License
+
+Licensed under either of Apache License, Version 2.0 or MIT license, at your option. Plugins you write with the SDK can use any license you like; when you distribute a plugin, keep the SDK license notice with it.

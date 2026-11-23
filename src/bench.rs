@@ -68,7 +68,7 @@ pub fn run() -> i32 {
     };
     add(
         "Regex search in 25 MB",
-        1200.0,
+        600.0,
         time(3, || {
             let mut search = SearchState::default();
             search.query = r"Товар \d+7\b".into();
@@ -94,7 +94,7 @@ pub fn run() -> i32 {
     let rope = ropey::Rope::from_str(&php);
     add(
         "Highlight 5,000 lines of PHP",
-        5000.0,
+        2500.0,
         time(3, || {
             let mut hl = Highlighter::default();
             hl.process(&syn, &rope, "PHP", 1, 0..5_000, None)
@@ -109,7 +109,7 @@ pub fn run() -> i32 {
     html.push_str("</body></html>");
     add(
         "Visual editor: parse and write 2 MB of HTML",
-        1500.0,
+        400.0,
         time(3, || {
             let parsed = crate::visual::model::parse(&html);
             crate::visual::model::serialize(&parsed).len()

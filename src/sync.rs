@@ -24,6 +24,73 @@ pub struct Plan {
     pub up: Vec<Step>,
     pub down: Vec<Step>,
     pub same: usize,
+    pub remove_remote: Vec<String>,
+    pub remove_local: Vec<String>,
+}
+
+#[derive(Default, Clone, PartialEq, Debug)]
+pub struct Filter {
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+pub fn glob(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
+}
+
+impl Filter {
+    pub fn parse(include: &str, exclude: &str) -> Filter {
+        let split = |text: &str| -> Vec<String> {
+            text.split([',', ';'])
+                .map(|m| m.trim().trim_matches('/').to_owned())
+                .filter(|m| !m.is_empty())
+                .collect()
+        };
+        Filter {
+            include: split(include),
+            exclude: split(exclude),
+        }
+    }
+
+    pub fn wanted(&self, relative: &str) -> bool {
+        let name = relative.rsplit('/').next().unwrap_or(relative);
+        let hit = |mask: &str| {
+            if mask.contains('/') {
+                relative == mask
+                    || relative.starts_with(&format!("{mask}/"))
+                    || glob(mask, relative)
+            } else {
+                glob(mask, name) || relative.split('/').any(|part| glob(mask, part))
+            }
+        };
+        if self.exclude.iter().any(|m| hit(m)) {
+            return false;
+        }
+        self.include.is_empty()
+            || self
+                .include
+                .iter()
+                .any(|m| glob(m, name) || glob(m, relative))
+    }
 }
 
 pub type Files = BTreeMap<String, (u64, Option<u64>)>;
@@ -60,7 +127,14 @@ pub fn local_files(root: &Path) -> Files {
     out
 }
 
-pub fn plan(local: &Files, remote: &Files, mode: Mode, by_time: bool) -> Plan {
+pub fn plan(
+    local: &Files,
+    remote: &Files,
+    mode: Mode,
+    by_time: bool,
+    filter: &Filter,
+    remove: bool,
+) -> Plan {
     let mut plan = Plan::default();
     let step = |relative: &str, (size, mtime): (u64, Option<u64>), fresh| Step {
         relative: relative.to_owned(),
@@ -69,7 +143,11 @@ pub fn plan(local: &Files, remote: &Files, mode: Mode, by_time: bool) -> Plan {
         fresh,
     };
     for (name, here) in local {
+        if !filter.wanted(name) {
+            continue;
+        }
         match remote.get(name) {
+            None if mode == Mode::Down && remove => plan.remove_local.push(name.clone()),
             None if mode != Mode::Down => plan.up.push(step(name, *here, true)),
             None => {}
             Some(there) => {
@@ -96,11 +174,14 @@ pub fn plan(local: &Files, remote: &Files, mode: Mode, by_time: bool) -> Plan {
             }
         }
     }
-    if mode != Mode::Up {
-        for (name, there) in remote {
-            if !local.contains_key(name) {
-                plan.down.push(step(name, *there, true));
-            }
+    for (name, there) in remote {
+        if local.contains_key(name) || !filter.wanted(name) {
+            continue;
+        }
+        if mode != Mode::Up {
+            plan.down.push(step(name, *there, true));
+        } else if remove {
+            plan.remove_remote.push(name.clone());
         }
     }
     plan
@@ -113,11 +194,24 @@ pub struct Dialog {
     pub remote: Files,
     pub mode: Mode,
     pub by_time: bool,
+    pub remove: bool,
+    pub include: String,
+    pub exclude: String,
+    pub no_times: bool,
 }
 
 impl Dialog {
     pub fn plan(&self) -> Plan {
-        plan(&self.local, &self.remote, self.mode, self.by_time)
+        let remove = self.remove && self.mode != Mode::Both;
+        let filter = Filter::parse(&self.include, &self.exclude);
+        plan(
+            &self.local,
+            &self.remote,
+            self.mode,
+            self.by_time,
+            &filter,
+            remove,
+        )
     }
 }
 
@@ -162,15 +256,15 @@ mod tests {
             ("sub/only-there.js", 9, 100),
             ("same.css", 7, 101),
         ]);
-        let both = plan(&local, &remote, Mode::Both, true);
+        let both = plan(&local, &remote, Mode::Both, true, &Filter::default(), false);
         let names = |steps: &[Step]| steps.iter().map(|s| s.relative.clone()).collect::<Vec<_>>();
         assert_eq!(names(&both.up), ["b.php", "only-here.js"]);
         assert_eq!(names(&both.down), ["a.php", "sub/only-there.js"]);
         assert_eq!(both.same, 1);
-        let up = plan(&local, &remote, Mode::Up, true);
+        let up = plan(&local, &remote, Mode::Up, true, &Filter::default(), false);
         assert_eq!(names(&up.up), ["a.php", "b.php", "only-here.js"]);
         assert!(up.down.is_empty());
-        let down = plan(&local, &remote, Mode::Down, true);
+        let down = plan(&local, &remote, Mode::Down, true, &Filter::default(), false);
         assert!(down.up.is_empty());
         assert_eq!(names(&down.down), ["a.php", "b.php", "sub/only-there.js"]);
     }
@@ -199,7 +293,62 @@ mod tests {
     fn equal_size_with_other_time_counts_only_when_asked() {
         let local = files(&[("x", 10, 100)]);
         let remote = files(&[("x", 10, 900)]);
-        assert_eq!(plan(&local, &remote, Mode::Both, false).same, 1);
-        assert_eq!(plan(&local, &remote, Mode::Both, true).down.len(), 1);
+        assert_eq!(
+            plan(
+                &local,
+                &remote,
+                Mode::Both,
+                false,
+                &Filter::default(),
+                false
+            )
+            .same,
+            1
+        );
+        assert_eq!(
+            plan(&local, &remote, Mode::Both, true, &Filter::default(), false)
+                .down
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn filter_and_removal() {
+        let files = |names: &[&str]| -> Files {
+            names
+                .iter()
+                .map(|n| (n.to_string(), (1, Some(10))))
+                .collect()
+        };
+        let local = files(&[
+            "a.php",
+            "b.css",
+            "cache/x.php",
+            "img/logo.png",
+            "only-here.php",
+        ]);
+        let remote = files(&["a.php", "old.php", "cache/y.php", "img/z.png"]);
+        let filter = Filter::parse("*.php, *.css", "cache");
+        let up = plan(&local, &remote, Mode::Up, true, &filter, true);
+        let names: Vec<_> = up.up.iter().map(|s| s.relative.as_str()).collect();
+        assert_eq!(names, ["b.css", "only-here.php"]);
+        assert_eq!(up.remove_remote, ["old.php"]);
+        let down = plan(&local, &remote, Mode::Down, true, &filter, true);
+        assert_eq!(
+            down.down
+                .iter()
+                .map(|s| s.relative.as_str())
+                .collect::<Vec<_>>(),
+            ["old.php"]
+        );
+        assert_eq!(down.remove_local, ["b.css", "only-here.php"]);
+        let keep = plan(&local, &remote, Mode::Up, true, &filter, false);
+        assert!(keep.remove_remote.is_empty());
+        assert!(
+            glob("*.min.js", "app.min.js") && !glob("*.min.js", "app.js") && glob("?.txt", "a.txt")
+        );
+        assert!(Filter::parse("", "bitrix/cache").wanted("bitrix/x.php"));
+        assert!(!Filter::parse("", "bitrix/cache").wanted("bitrix/cache/a.php"));
     }
 }

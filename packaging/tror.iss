@@ -73,6 +73,8 @@ Type: files; Name: "{autodesktop}\Tror.lnk"
 
 [Files]
 Source: "..\target\release\trorpad.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE-MIT"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE-APACHE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\TrorPad"; Filename: "{app}\trorpad.exe"
