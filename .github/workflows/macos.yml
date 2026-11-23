@@ -41,8 +41,8 @@ jobs:
   macos:
     needs: check
     if: needs.check.outputs.needed == 'true'
-    timeout-minutes: 45
-    runs-on: macos-26
+    timeout-minutes: 90
+    runs-on: macos-15-intel
     permissions:
       contents: write
     env:
