@@ -32,7 +32,7 @@ ropey = { version = "1", default-features = false, features = ["simd"] }
 rusqlite = { version = "0.42.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-sha2 = "0.10"
+sha2 = "0.11"
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
 similar = "3.2.1"
 ssh2 = { version = "0.9.7", features = ["vendored-openssl"] }
