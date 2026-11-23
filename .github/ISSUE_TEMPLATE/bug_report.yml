@@ -1,0 +1,49 @@
+name: Bug report / Ошибка
+description: Something does not work as expected / Что-то работает не так
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version / Версия
+      description: Start screen or Settings → General / Стартовый экран или Настройки → Общие
+      placeholder: "0.27.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: System / Система
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps / Шаги
+      description: What did you do? / Что вы сделали?
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual result / Ожидалось и получилось
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log / Журнал
+      description: Lines from the "Log" panel, without passwords and host names / Строки из панели «Журнал» без паролей и имён серверов
+      render: text
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots / Скриншоты

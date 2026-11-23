@@ -179,8 +179,15 @@ impl eframe::App for TrorApp {
                 && let Some(paths) = panel.drag_out_ready()
             {
                 panel.out_drag = None;
+                let done = panel.drag_done.clone();
                 if held {
-                    drag_out(frame, paths);
+                    let ctx = ctx.clone();
+                    drag_out(frame, paths, move |dropped| {
+                        *done.lock().unwrap_or_else(|e| e.into_inner()) = Some(dropped);
+                        ctx.request_repaint();
+                    });
+                } else {
+                    *done.lock().unwrap_or_else(|e| e.into_inner()) = Some(false);
                 }
             }
         }
@@ -391,7 +398,7 @@ impl eframe::App for TrorApp {
             .take()
             .or_else(|| self.project2.drag_out.take())
         {
-            drag_out(frame, paths);
+            drag_out(frame, paths, |_| {});
         }
         if self.settings.autosave && now - self.recovery.last > 10.0 {
             self.recovery.last = now;
@@ -981,13 +988,13 @@ fn window_left(ctx: &egui::Context) -> bool {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn drag_out(frame: &eframe::Frame, paths: Vec<PathBuf>) {
+fn drag_out(frame: &eframe::Frame, paths: Vec<PathBuf>, done: impl Fn(bool) + Send + 'static) {
     let icon = drag_icon(paths.len());
     if let Err(e) = drag::start_drag(
         frame,
         drag::DragItem::Files(paths),
         drag::Image::Raw(icon),
-        |_, _| {},
+        move |result, _| done(matches!(result, drag::DragResult::Dropped)),
         drag::Options::default(),
     ) {
         crate::trace::popup(
@@ -1001,7 +1008,9 @@ fn drag_out(frame: &eframe::Frame, paths: Vec<PathBuf>) {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn drag_out(_frame: &eframe::Frame, _paths: Vec<PathBuf>) {}
+fn drag_out(_frame: &eframe::Frame, _paths: Vec<PathBuf>, done: impl Fn(bool) + Send + 'static) {
+    done(false);
+}
 
 #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 fn drag_icon(count: usize) -> Vec<u8> {

@@ -33,7 +33,7 @@ mod hosts;
 mod look;
 mod menu;
 mod modals;
-mod owner;
+pub(crate) mod owner;
 mod plugin_manager;
 mod plugin_run;
 mod plugin_ui;

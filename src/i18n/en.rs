@@ -905,4 +905,9 @@ pub const EN: &[(&str, &str)] = &[
     ("База", "Database"),
     ("все таблицы", "all tables"),
     ("Открыть найденные строки", "Open the rows found"),
+    ("Профили баз данных", "Database profiles"),
+    ("для перетаскивания", "for dragging"),
+    ("Файлы перенесены", "Files moved"),
+    ("Перетаскивание отменено", "Dragging cancelled"),
+    ("✓ Готово — отпустите файлы в нужном месте", "✓ Done — drop the files where you need them"),
 ];

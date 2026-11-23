@@ -854,8 +854,8 @@ struct Schema {
 }
 
 struct Editor {
-    profile: DbProfile,
-    index: Option<usize>,
+    drafts: Vec<DbProfile>,
+    index: usize,
     show_password: bool,
     probe: Option<Receiver<Result<String, String>>>,
     result: Option<Result<String, String>>,
@@ -2513,25 +2513,24 @@ impl DbPanel {
     }
 
     fn open_editor(&mut self, store: &Store, new: bool) {
-        self.editor = Some(if new || store.databases.is_empty() {
-            Editor {
-                profile: DbProfile {
-                    name: tf!("База {}", "Database {}", store.databases.len() + 1),
-                    ..Default::default()
-                },
-                index: None,
-                show_password: false,
-                probe: None,
-                result: None,
-            }
+        let mut drafts = store.databases.clone();
+        if new || drafts.is_empty() {
+            drafts.push(DbProfile {
+                name: tf!("База {}", "Database {}", drafts.len() + 1),
+                ..Default::default()
+            });
+        }
+        let index = if new {
+            drafts.len() - 1
         } else {
-            Editor {
-                profile: store.databases[self.selected].clone(),
-                index: Some(self.selected),
-                show_password: false,
-                probe: None,
-                result: None,
-            }
+            self.selected.min(drafts.len() - 1)
+        };
+        self.editor = Some(Editor {
+            drafts,
+            index,
+            show_password: false,
+            probe: None,
+            result: None,
         });
     }
 
@@ -2543,9 +2542,6 @@ impl DbPanel {
         };
         let mut done = false;
         let mut save = false;
-        let mut delete = false;
-        let mut switch = None;
-        let mut create = false;
         let mut test = false;
         if let Some(rx) = &editor.probe
             && let Ok(result) = rx.try_recv()
@@ -2561,203 +2557,231 @@ impl DbPanel {
             editor.probe = None;
         }
         let modal = dialog("tror_db_editor", pal).show(ctx, |ui| {
-            ui.set_width(460.0);
-            crate::widgets::title(ui, pal, tr!("Подключение к базе данных"));
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                for (i, profile) in store.databases.iter().enumerate() {
-                    let mut button = Button::new(profile.name.as_str());
-                    if editor.index == Some(i) {
-                        button = button.fill(pal.selection);
-                    }
-                    if ui.add(button).clicked() {
-                        switch = Some(i);
-                    }
-                }
-                if ui.button(tr!("+ Новое")).clicked() {
-                    create = true;
-                }
-            });
+            ui.set_width(640.0);
+            crate::widgets::title(ui, pal, tr!("Профили баз данных"));
             ui.add_space(8.0);
-            let p = &mut editor.profile;
-            egui::Grid::new("tror_db_editor_grid")
-                .num_columns(2)
-                .spacing([14.0, 8.0])
-                .show(ui, |ui| {
-                    let wide = 300.0;
-                    ui.label(tr!("Название"));
-                    ui.add(TextEdit::singleline(&mut p.name).desired_width(wide));
-                    ui.end_row();
-                    ui.label(tr!("Тип"));
-                    ui.horizontal(|ui| {
-                        for kind in [DbKind::MySql, DbKind::Postgres, DbKind::Sqlite] {
-                            if ui.selectable_label(p.kind == kind, kind.label()).clicked() && p.kind != kind {
-                                if p.port == p.kind.default_port() {
-                                    p.port = kind.default_port();
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(180.0);
+                    ScrollArea::vertical()
+                        .id_salt("tror_db_profiles")
+                        .max_height(270.0)
+                        .show(ui, |ui| {
+                            for (i, profile) in editor.drafts.iter().enumerate() {
+                                let name = if profile.name.trim().is_empty() {
+                                    tr!("без имени")
+                                } else {
+                                    profile.name.as_str()
+                                };
+                                if ui.selectable_label(i == editor.index, name).clicked() {
+                                    editor.index = i;
+                                    editor.result = None;
                                 }
-                                p.kind = kind;
-                            }
-                        }
-                    });
-                    ui.end_row();
-                    if p.kind == DbKind::Sqlite {
-                        ui.label(tr!("Файл базы"));
-                        ui.horizontal(|ui| {
-                            ui.add(TextEdit::singleline(&mut p.file).desired_width(wide - 78.0));
-                            if ui.button(tr!("Обзор…")).clicked()
-                                && let Some(file) = rfd::FileDialog::new()
-                                    .add_filter("SQLite", &["db", "sqlite", "sqlite3", "db3"])
-                                    .add_filter(tr!("Все файлы"), &["*"])
-                                    .pick_file()
-                            {
-                                p.file = file.display().to_string();
                             }
                         });
-                        ui.end_row();
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.add(Button::new(tr!("Добавить"))).clicked() {
+                            editor.drafts.push(DbProfile {
+                                name: tf!("База {}", "Database {}", editor.drafts.len() + 1),
+                                ..Default::default()
+                            });
+                            editor.index = editor.drafts.len() - 1;
+                            editor.result = None;
+                        }
+                        if ui
+                            .add_enabled(!editor.drafts.is_empty(), Button::new(tr!("Удалить")))
+                            .clicked()
+                        {
+                            editor.drafts.remove(editor.index);
+                            editor.index = editor.index.saturating_sub(1);
+                            editor.result = None;
+                        }
+                    });
+                });
+                ui.add_space(10.0);
+                ui.vertical(|ui| {
+                    let Some(p) = editor.drafts.get_mut(editor.index) else {
+                        ui.label(RichText::new(tr!("Добавьте профиль.")).color(pal.subtext));
                         return;
-                    }
-                    ui.label(tr!("Туннель через SSH"));
-                    ComboBox::from_id_salt("tror_db_tunnel")
-                        .width(wide)
-                        .selected_text(if p.tunnel.is_empty() {
-                            tr!("нет, подключаться напрямую")
-                        } else {
-                            p.tunnel.as_str()
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut p.tunnel,
-                                String::new(),
-                                tr!("нет, подключаться напрямую"),
-                            );
-                            for host in &store.profiles {
-                                if host.protocol == remote::Protocol::Sftp {
+                    };
+                    egui::Grid::new("tror_db_editor_grid")
+                        .num_columns(2)
+                        .spacing([14.0, 8.0])
+                        .show(ui, |ui| {
+                            let wide = 300.0;
+                            ui.label(tr!("Название"));
+                            ui.add(TextEdit::singleline(&mut p.name).desired_width(wide));
+                            ui.end_row();
+                            ui.label(tr!("Тип"));
+                            ui.horizontal(|ui| {
+                                for kind in [DbKind::MySql, DbKind::Postgres, DbKind::Sqlite] {
+                                    if ui.selectable_label(p.kind == kind, kind.label()).clicked() && p.kind != kind {
+                                        if p.port == p.kind.default_port() {
+                                            p.port = kind.default_port();
+                                        }
+                                        p.kind = kind;
+                                    }
+                                }
+                            });
+                            ui.end_row();
+                            if p.kind == DbKind::Sqlite {
+                                ui.label(tr!("Файл базы"));
+                                ui.horizontal(|ui| {
+                                    ui.add(TextEdit::singleline(&mut p.file).desired_width(wide - 78.0));
+                                    if ui.button(tr!("Обзор…")).clicked()
+                                        && let Some(file) = rfd::FileDialog::new()
+                                            .add_filter("SQLite", &["db", "sqlite", "sqlite3", "db3"])
+                                            .add_filter(tr!("Все файлы"), &["*"])
+                                            .pick_file()
+                                    {
+                                        p.file = file.display().to_string();
+                                    }
+                                });
+                                ui.end_row();
+                                return;
+                            }
+                            ui.label(tr!("Туннель через SSH"));
+                            ComboBox::from_id_salt("tror_db_tunnel")
+                                .width(wide)
+                                .selected_text(if p.tunnel.is_empty() {
+                                    tr!("нет, подключаться напрямую")
+                                } else {
+                                    p.tunnel.as_str()
+                                })
+                                .show_ui(ui, |ui| {
                                     ui.selectable_value(
                                         &mut p.tunnel,
-                                        host.name.clone(),
-                                        host.name.as_str(),
+                                        String::new(),
+                                        tr!("нет, подключаться напрямую"),
+                                    );
+                                    for host in &store.profiles {
+                                        if host.protocol == remote::Protocol::Sftp {
+                                            ui.selectable_value(
+                                                &mut p.tunnel,
+                                                host.name.clone(),
+                                                host.name.as_str(),
+                                            );
+                                        }
+                                    }
+                                });
+                            ui.end_row();
+                            ui.label(tr!("Шифрование TLS"));
+                            ui.vertical(|ui| {
+                                ui.checkbox(&mut p.tls, tr!("Подключаться по TLS"));
+                                if p.tls {
+                                    ui.checkbox(
+                                        &mut p.tls_any_cert,
+                                        tr!("Принимать любой сертификат (самоподписанный)"),
                                     );
                                 }
-                            }
+                            });
+                            ui.end_row();
+                            ui.label(if p.tunnel.is_empty() {
+                                tr!("Сервер")
+                            } else {
+                                tr!("Сервер (со стороны хоста)")
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add(TextEdit::singleline(&mut p.host).desired_width(wide - 70.0));
+                                crate::widgets::port_field(ui, &mut p.port, 60.0);
+                            });
+                            ui.end_row();
+                            ui.label(tr!("Пользователь"));
+                            ui.add(TextEdit::singleline(&mut p.user).desired_width(wide));
+                            ui.end_row();
+                            ui.label(tr!("Пароль"));
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    TextEdit::singleline(&mut p.password)
+                                        .password(!editor.show_password)
+                                        .desired_width(wide - 96.0),
+                                );
+                                let label = if editor.show_password {
+                                    tr!("Скрыть")
+                                } else {
+                                    tr!("Показать")
+                                };
+                                if ui.button(label).clicked() {
+                                    editor.show_password = !editor.show_password;
+                                }
+                            });
+                            ui.end_row();
+                            ui.label(tr!("База (необязательно)"));
+                            ui.add(TextEdit::singleline(&mut p.database).desired_width(wide));
+                            ui.end_row();
                         });
-                    ui.end_row();
-                    ui.label(tr!("Шифрование TLS"));
-                    ui.vertical(|ui| {
-                        ui.checkbox(&mut p.tls, tr!("Подключаться по TLS"));
-                        if p.tls {
-                            ui.checkbox(
-                                &mut p.tls_any_cert,
-                                tr!("Принимать любой сертификат (самоподписанный)"),
-                            );
-                        }
-                    });
-                    ui.end_row();
-                    ui.label(if p.tunnel.is_empty() {
-                        tr!("Сервер")
-                    } else {
-                        tr!("Сервер (со стороны хоста)")
-                    });
-                    ui.horizontal(|ui| {
-                        ui.add(TextEdit::singleline(&mut p.host).desired_width(wide - 70.0));
-                        crate::widgets::port_field(ui, &mut p.port, 60.0);
-                    });
-                    ui.end_row();
-                    ui.label(tr!("Пользователь"));
-                    ui.add(TextEdit::singleline(&mut p.user).desired_width(wide));
-                    ui.end_row();
-                    ui.label(tr!("Пароль"));
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            TextEdit::singleline(&mut p.password)
-                                .password(!editor.show_password)
-                                .desired_width(wide - 96.0),
-                        );
-                        let label = if editor.show_password {
-                            tr!("Скрыть")
-                        } else {
-                            tr!("Показать")
+                    ui.add_space(4.0);
+                    if editor.probe.is_some() {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(RichText::new(tr!("проверка…")).color(pal.subtext));
+                        });
+                    } else if ui.add(Button::new(tr!("Проверить подключение"))).clicked() {
+                        test = true;
+                    }
+                    if let Some(result) = &editor.result {
+                        let (text, color) = match result {
+                            Ok(text) => (tf!("Работает: {text}", "Works: {text}"), crate::widgets::ok_color(ui)),
+                            Err(e) => (tf!("Ошибка: {e}", "Error: {e}"), pal.warn),
                         };
-                        if ui.button(label).clicked() {
-                            editor.show_password = !editor.show_password;
-                        }
-                    });
-                    ui.end_row();
-                    ui.label(tr!("База (необязательно)"));
-                    ui.add(TextEdit::singleline(&mut p.database).desired_width(wide));
-                    ui.end_row();
+                        ui.label(RichText::new(text).small().color(color));
+                    }
+                    ui.add_space(6.0);
+                    if p.kind == DbKind::Sqlite {
+                        ui.label(
+                            RichText::new(tr!("Файл SQLite открывается напрямую с этого компьютера. Если файла нет, он будет создан."))
+                                .small()
+                                .color(pal.subtext),
+                        );
+                    } else {
+                        let sftp_hosts = store
+                            .profiles
+                            .iter()
+                            .filter(|h| h.protocol == remote::Protocol::Sftp)
+                            .count();
+                        let default_port = p.kind.default_port();
+                        let tunnel_note = if sftp_hosts == 0 {
+                            tr!("Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
+                             так устроен почти любой хостинг. В списке туннелей появляются ваши SFTP-профили из панели \
+                             «Удалённые хосты» (F8); сейчас там нет ни одного SFTP-профиля, поэтому выбрать нечего.")
+                                .to_owned()
+                        } else if p.tunnel.is_empty() {
+                            tr!("Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
+                             так устроен почти любой хостинг. Выберите в списке SFTP-профиль этого сервера: программа \
+                             зайдёт на него по SSH и уже оттуда подключится к базе.")
+                                .to_owned()
+                        } else {
+                            tf!("Программа зайдёт на выбранный хост по SSH и подключится к базе оттуда. В поле «Сервер» \
+                                 укажите адрес базы так, как его видит сам хост — обычно 127.0.0.1 или localhost, порт {default_port}.", "The program will log in to the chosen host over SSH and connect to the database from there. In the \"Server\" field \
+                                 enter the database address as the host itself sees it — usually 127.0.0.1 or localhost, port {default_port}."
+                            )
+                        };
+                        ui.label(RichText::new(tunnel_note).small().color(pal.subtext));
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(
+                                tr!("Пароль хранится в файле профилей в замаскированном, но не зашифрованном виде. \
+                                 Без TLS и без туннеля пароль и данные идут по сети открыто."),
+                            )
+                            .small()
+                            .color(pal.faint),
+                        );
+                    }
                 });
-            ui.add_space(4.0);
-            if editor.probe.is_some() {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(RichText::new(tr!("проверка…")).color(pal.subtext));
-                });
-            } else if ui.add(Button::new(tr!("Проверить подключение"))).clicked() {
-                test = true;
-            }
-            if let Some(result) = &editor.result {
-                let (text, color) = match result {
-                    Ok(text) => (tf!("Работает: {text}", "Works: {text}"), crate::widgets::ok_color(ui)),
-                    Err(e) => (tf!("Ошибка: {e}", "Error: {e}"), pal.warn),
-                };
-                ui.label(RichText::new(text).small().color(color));
-            }
-            ui.add_space(6.0);
-            if p.kind == DbKind::Sqlite {
-                ui.label(
-                    RichText::new(tr!("Файл SQLite открывается напрямую с этого компьютера. Если файла нет, он будет создан."))
-                        .small()
-                        .color(pal.subtext),
-                );
-            } else {
-                let sftp_hosts = store
-                    .profiles
-                    .iter()
-                    .filter(|h| h.protocol == remote::Protocol::Sftp)
-                    .count();
-                let default_port = p.kind.default_port();
-                let tunnel_note = if sftp_hosts == 0 {
-                    tr!("Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
-                     так устроен почти любой хостинг. В списке туннелей появляются ваши SFTP-профили из панели \
-                     «Удалённые хосты» (F8); сейчас там нет ни одного SFTP-профиля, поэтому выбрать нечего.")
-                        .to_owned()
-                } else if p.tunnel.is_empty() {
-                    tr!("Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
-                     так устроен почти любой хостинг. Выберите в списке SFTP-профиль этого сервера: программа \
-                     зайдёт на него по SSH и уже оттуда подключится к базе.")
-                        .to_owned()
-                } else {
-                    tf!("Программа зайдёт на выбранный хост по SSH и подключится к базе оттуда. В поле «Сервер» \
-                         укажите адрес базы так, как его видит сам хост — обычно 127.0.0.1 или localhost, порт {default_port}.", "The program will log in to the chosen host over SSH and connect to the database from there. In the \"Server\" field \
-                         enter the database address as the host itself sees it — usually 127.0.0.1 or localhost, port {default_port}."
-                    )
-                };
-                ui.label(RichText::new(tunnel_note).small().color(pal.subtext));
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(
-                        tr!("Пароль хранится в файле профилей в замаскированном, но не зашифрованном виде. \
-                         Без TLS и без туннеля пароль и данные идут по сети открыто."),
-                    )
-                    .small()
-                    .color(pal.faint),
-                );
-            }
+            });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if dialog_button(ui, pal, tr!("Сохранить"), true) {
                     save = true;
                 }
-                if dialog_button(ui, pal, tr!("Закрыть"), false) {
+                if dialog_button(ui, pal, tr!("Отмена"), false) {
                     done = true;
-                }
-                if editor.index.is_some() && dialog_button(ui, pal, tr!("Удалить"), false) {
-                    delete = true;
                 }
             });
         });
         if test {
-            let profile = editor.profile.clone();
+            let profile = editor.drafts.get(editor.index).cloned().unwrap_or_default();
             let ssh = (!profile.tunnel.is_empty() && profile.kind != DbKind::Sqlite)
                 .then(|| store.profiles.iter().find(|p| p.name == profile.tunnel))
                 .flatten()
@@ -2777,36 +2801,13 @@ impl DbPanel {
         if editor.probe.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-        if let Some(i) = switch {
-            self.selected = i;
-            self.open_editor(store, false);
-            return;
-        }
-        if create {
-            self.open_editor(store, true);
-            return;
-        }
         if save && let Some(editor) = self.editor.take() {
-            match editor.index {
-                Some(i) if i < store.databases.len() => store.databases[i] = editor.profile,
-                _ => {
-                    store.databases.push(editor.profile);
-                    self.selected = store.databases.len() - 1;
-                }
-            }
+            store.databases = editor.drafts;
+            self.selected = editor.index.min(store.databases.len().saturating_sub(1));
             if let Err(e) = store.save() {
                 self.status = tf!("Не удалось сохранить профили: {e}", "Could not save profiles: {e}");
                 self.error = true;
             }
-            return;
-        }
-        if delete
-            && let Some(Editor { index: Some(i), .. }) = self.editor.take()
-            && i < store.databases.len()
-        {
-            store.databases.remove(i);
-            self.selected = 0;
-            let _ = store.save();
             return;
         }
         if done || modal.should_close() {

@@ -1,0 +1,19 @@
+name: Feature request / Предложение
+description: An idea for TrorPad / Идея для TrorPad
+labels: [enhancement]
+body:
+  - type: textarea
+    id: task
+    attributes:
+      label: Task / Задача
+      description: What are you trying to do, and what gets in the way now? / Что вы хотите сделать и что сейчас мешает?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposed solution / Как это может выглядеть
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds / Как вы обходитесь сейчас

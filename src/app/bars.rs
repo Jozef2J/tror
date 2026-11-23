@@ -572,6 +572,11 @@ impl TrorApp {
                         ui.add_space(6.0);
                     }
                     ui.label(RichText::new("TrorPad").size(34.0).color(pal.faint));
+                    ui.label(
+                        RichText::new(tf!("версия {}", "version {}", env!("CARGO_PKG_VERSION")))
+                            .small()
+                            .color(pal.faint),
+                    );
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new(tr!("Перетащите файлы сюда или начните с пустой вкладки"))

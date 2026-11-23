@@ -2,14 +2,19 @@
 
 **English** · [Русский](README.ru.md)
 
+[![build](https://github.com/Jozef2J/tror/actions/workflows/build.yml/badge.svg)](https://github.com/Jozef2J/tror/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/Jozef2J/tror)](https://github.com/Jozef2J/tror/releases/latest)
+[![downloads](https://img.shields.io/github/downloads/Jozef2J/tror/total)](https://github.com/Jozef2J/tror/releases)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
 Tror is a set of tools for people who build and maintain websites. Its first app is **TrorPad**: a fast, compact code editor written in Rust. It is a single executable that opens huge files without lag and keeps everything you need for working on a live site close at hand.
 
 - **Editor:** files of 50 MB and more, syntax highlighting for about 200 languages, completion, search and replace with regular expressions in a file or across a project, named macros, recovery of unsaved work after a crash, file comparison, code folding, bookmarks.
 - **Visual HTML editor:** edit HTML, PHP and Twig pages as formatted text, with headings, lists, links, tables and images. PHP and Twig blocks stay untouched. Pasting from Word and Google Docs keeps the structure and drops colors and fonts; `.docx` files can be imported.
 - **Servers:** SFTP, FTP and FTPS with saved profiles, several connections at once and transfers between them, drag and drop between the server, the project and the desktop, a download window with progress, pause and cancel, server-side search, folder sync, archives, and a raw protocol log.
 - **Safe saving to servers:** before saving, TrorPad checks whether the file was changed on the server after you opened it and offers to compare or overwrite. The previous server version is kept as a local backup.
-- **Console:** SSH, Telnet and Mosh sessions in tabs, with your own color schemes and fonts. OpenSSH and PuTTY (`.ppk`) keys are supported.
-- **Databases:** MySQL/MariaDB, PostgreSQL and SQLite, including through an SSH tunnel and over TLS; query history; export to CSV, JSON and SQL.
+- **Console:** SSH, Telnet and Mosh sessions and a local terminal (PowerShell, bash, zsh) in tabs, with your own color schemes and fonts. OpenSSH and PuTTY (`.ppk`) keys are supported.
+- **Databases:** MySQL/MariaDB, PostgreSQL and SQLite, including through an SSH tunnel and over TLS; search for a value across all tables without writing SQL; query history; import of SQL dumps and CSV; export to CSV, JSON and SQL.
 - **Interface:** every panel can be dragged, docked, detached or moved to its own window; colors, fonts and shortcuts are configurable. English and Russian interface.
 - **Plugins:** WebAssembly plugins with an explicit permission model and a Rust SDK (see [`sdk/`](sdk/)).
 
@@ -55,6 +60,10 @@ cargo test
 - A file is kept in memory in full; in files larger than 2 MB highlighting is approximate.
 - Plugins only get the permissions you grant them. Plugins never receive passwords.
 - TrorPad collects no telemetry. See the [privacy policy](PRIVACY.md).
+
+## Contributing
+
+Bug reports, ideas and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Please report security problems privately as described in [SECURITY.md](SECURITY.md). Everyone in the project follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

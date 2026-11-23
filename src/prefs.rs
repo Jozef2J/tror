@@ -666,7 +666,11 @@ fn tabs_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
         pal,
         &mut settings.updates,
         tr!("Проверять обновления при запуске"),
-        tr!("Один запрос к github.com о последнем выпуске. Ничего не скачивается без вашего согласия."),
+        &tf!(
+            "Один запрос к github.com о последнем выпуске. Ничего не скачивается без вашего согласия. Установлена версия {}.",
+            "One request to github.com about the latest release. Nothing is downloaded without your consent. Installed version: {}.",
+            env!("CARGO_PKG_VERSION")
+        ),
     );
     ui.label(
         RichText::new(

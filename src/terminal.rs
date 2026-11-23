@@ -441,6 +441,7 @@ pub struct Screen {
     wanted: Option<((u16, u16), f64)>,
     pub grab_focus: bool,
     pub focused: bool,
+    tail: Vec<u8>,
 }
 
 impl Screen {
@@ -453,6 +454,7 @@ impl Screen {
             wanted: None,
             grab_focus: false,
             focused: false,
+            tail: Vec::new(),
         }
     }
 
@@ -465,8 +467,31 @@ impl Screen {
         self.select = None;
     }
 
-    pub fn process(&mut self, bytes: &[u8]) {
-        self.parser.process(bytes);
+    pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let done = self.tail.len();
+        let mut seen = std::mem::take(&mut self.tail);
+        seen.extend_from_slice(bytes);
+        let mut reply = Vec::new();
+        let mut fed = done;
+        let mut at = 0;
+        while let Some(i) = seen[at..].iter().position(|&b| b == 0x1b) {
+            let start = at + i;
+            let rest = &seen[start..];
+            if rest.starts_with(b"\x1b[6n") {
+                let end = (start + 4).max(fed);
+                self.parser.process(&seen[fed..end]);
+                fed = end;
+                let (row, col) = self.parser.screen().cursor_position();
+                reply.extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
+            } else if rest.starts_with(b"\x1b[c") || rest.starts_with(b"\x1b[0c") {
+                reply.extend_from_slice(b"\x1b[?1;2c");
+            } else if rest.len() < 4 && (b"\x1b[6n".starts_with(rest) || b"\x1b[0c".starts_with(rest)) {
+                self.tail = rest.to_vec();
+            }
+            at = start + 1;
+        }
+        self.parser.process(&seen[fed..]);
+        reply
     }
 
     pub fn settle(&mut self, cols: u16, rows: u16, now: f64) -> bool {
@@ -825,6 +850,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn answers_cursor_and_device_queries() {
+        let mut t = Screen::new();
+        assert_eq!(t.process(b"ab\x1b[6n"), b"\x1b[1;3R");
+        assert_eq!(t.process(b"\r\nx\x1b"), b"");
+        assert_eq!(t.process(b"[6ny"), b"\x1b[2;2R");
+        assert_eq!(t.process(b"\x1b[c"), b"\x1b[?1;2c");
+        assert_eq!(t.process(b"plain"), b"");
+    }
+
+    #[test]
     fn keys_map_to_terminal_sequences() {
         let none = Modifiers::NONE;
         assert_eq!(key_bytes(Key::Enter, none, false), Some(vec![b'\r']));
@@ -989,7 +1024,9 @@ mod tests {
                     Ok(ShellEvent::HostKey { .. }) => {
                         shell.tx.send(ShellCmd::TrustHost(true)).unwrap();
                     }
-                    Ok(ShellEvent::Output(bytes)) => t.process(&bytes),
+                    Ok(ShellEvent::Output(bytes)) => {
+                        t.process(&bytes);
+                    }
                     Ok(ShellEvent::Closed(e)) => panic!("{e}"),
                     _ => {}
                 }

@@ -204,6 +204,7 @@ mod imp {
     }
 }
 
-pub(super) use imp::{adopt, cursor, remember_main};
+pub(crate) use imp::adopt;
+pub(super) use imp::{cursor, remember_main};
 
 pub(super) const OWNED: bool = cfg!(windows);

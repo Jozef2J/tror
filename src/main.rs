@@ -46,6 +46,10 @@ pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLoc
 
 fn main() -> eframe::Result {
     STARTED.get_or_init(std::time::Instant::now);
+    if matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V")) {
+        println!("trorpad {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if std::env::args().nth(1).as_deref() == Some("--bench") {
         std::process::exit(bench::run());
     }

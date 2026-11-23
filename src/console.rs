@@ -311,7 +311,12 @@ impl ConsolePanel {
                             trusted.push((session.profile.address(), fingerprint));
                         }
                     }
-                    ShellEvent::Output(bytes) => session.screen.process(&bytes),
+                    ShellEvent::Output(bytes) => {
+                        let reply = session.screen.process(&bytes);
+                        if !reply.is_empty() {
+                            session.send(reply);
+                        }
+                    }
                     ShellEvent::Status(text) => session.status = text,
                     ShellEvent::Closed(message) => {
                         session.shell = None;

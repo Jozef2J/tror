@@ -122,6 +122,7 @@ struct Batch {
     lost: bool,
     finished: Option<std::time::Duration>,
     open: bool,
+    drag: bool,
 }
 
 impl Batch {
@@ -143,6 +144,7 @@ impl Batch {
             lost: false,
             finished: None,
             open: true,
+            drag: false,
         }
     }
 
@@ -226,6 +228,10 @@ pub struct RemotePanel {
     save_to: HashMap<String, PathBuf>,
     batch: Option<Batch>,
     pub out_drag: Option<(PathBuf, Vec<PathBuf>)>,
+    pub drag_done: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    batch_height: f32,
+    batch_placed: bool,
+    batch_owned: bool,
     drop_zone: Option<Rect>,
     drop_dirs: Vec<(Rect, String)>,
     pub external_hover: Option<String>,
@@ -309,6 +315,10 @@ impl RemotePanel {
             save_to: HashMap::new(),
             batch: None,
             out_drag: None,
+            drag_done: Default::default(),
+            batch_height: 0.0,
+            batch_placed: false,
+            batch_owned: false,
             drop_zone: None,
             drop_dirs: Vec::new(),
             external_hover: None,
@@ -434,6 +444,12 @@ impl RemotePanel {
             .map(|(path, _)| temp.join(remote::file_name(path)))
             .collect();
         self.download_into(items, &temp);
+        if let Some(batch) = &mut self.batch {
+            batch.drag = true;
+            batch.folder = None;
+            batch.target = tr!("для перетаскивания").to_owned();
+        }
+        *self.drag_done.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.out_drag = Some((temp, tops));
     }
 
@@ -1443,11 +1459,7 @@ impl RemotePanel {
         if let Some(a) = crate::widgets::profile_dialogs(&ctx, pal, list_id, &names) {
             action = Some(a);
         }
-        let width = (ui.available_width() - 4.0).max(20.0);
-        if ui
-            .add_sized([width, 24.0], Button::new(label).truncate())
-            .clicked()
-        {
+        if ui.add(Button::new(label)).clicked() {
             if active {
                 self.disconnect();
             } else {
@@ -2889,99 +2901,154 @@ impl RemotePanel {
         let (files, done, total) = (batch.files, batch.done, batch.total);
         let mut action = None;
         let mut open = true;
-        egui::Window::new(title)
-            .id(egui::Id::unique(("tror_download", self.id)))
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .default_width(380.0)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(pal.mantle)
-                    .stroke(egui::Stroke::new(1.0, pal.border)),
-            )
-            .show(ctx, |ui| {
-                ui.set_width(380.0);
-                ui.spacing_mut().item_spacing.y = 6.0;
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(tf!("Куда: {target}", "To: {target}")).color(pal.subtext),
-                    )
-                    .truncate(),
-                );
-                let state = if let Some(spent) = finished {
-                    format!("{outcome} · {}", duration_label(spent))
-                } else if walking {
-                    tr!("Подсчёт объёма…").to_owned()
-                } else if self.paused {
-                    tr!("Пауза").to_owned()
-                } else {
-                    running.unwrap_or_else(|| tr!("Ожидание…").to_owned())
-                };
-                ui.add(egui::Label::new(RichText::new(state).color(pal.text)).truncate());
-                ui.add(
-                    egui::ProgressBar::new(fraction)
-                        .desired_height(8.0)
-                        .fill(pal.accent)
-                        .corner_radius(4.0),
-                );
-                let volume = if total > 0 {
-                    tf!("{} из {} · {}%", "{} of {} · {}%",
-                        size_label(bytes as usize),
-                        size_label(total as usize),
-                        (fraction * 100.0) as u32
-                    )
-                } else {
-                    size_label(bytes as usize)
-                };
-                ui.label(RichText::new(volume).small().color(pal.subtext));
-                let mut line = tf!("Файлы: {done} из {files}", "Files: {done} of {files}");
-                if failed > 0 {
-                    line.push_str(&tf!(" · ошибок: {failed}", " · errors: {failed}"));
-                }
-                if finished.is_none() && speed > 0.0 {
-                    line.push_str(&tf!(" · {}/с", " · {}/s", size_label(speed as usize)));
-                    if total > bytes && !walking {
-                        let left = (total - bytes) as f64 / speed;
-                        line.push_str(&tf!(" · осталось ~{}", " · about {} left",
-                            duration_label(std::time::Duration::from_secs_f64(left))
-                        ));
+        let drag = batch.drag;
+        let id = egui::ViewportId::from_hash_of(("tror_batch", self.id));
+        let height = self.batch_height.max(150.0);
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title(title)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_taskbar(false)
+            .with_inner_size([408.0, height]);
+        if !self.batch_placed
+            && let Some(root) = ctx.input(|i| i.viewport().outer_rect)
+        {
+            builder = builder.with_position(root.center() - egui::vec2(204.0, height / 2.0));
+            self.batch_placed = true;
+        }
+        let mut used = height;
+        let mut owned = self.batch_owned;
+        let paused = self.paused;
+        ctx.show_viewport_immediate(id, builder, |ui, _class| {
+            let ctx = ui.ctx().clone();
+            if !owned {
+                owned = crate::app::owner::adopt(title);
+            }
+            if ctx.input(|i| i.viewport().close_requested()) {
+                open = false;
+            }
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new()
+                        .fill(pal.mantle)
+                        .stroke(egui::Stroke::new(1.0, pal.border))
+                        .inner_margin(egui::Margin::symmetric(14, 12)),
+                )
+                .show(ui, |ui| {
+                    let grip = ui.interact(
+                        ui.max_rect(),
+                        ui.scope_id().with("tror_batch_drag"),
+                        Sense::click_and_drag(),
+                    );
+                    if grip.drag_started() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
-                }
-                let color = if failed > 0 { pal.warn } else { pal.subtext };
-                ui.label(RichText::new(line).small().color(color));
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if finished.is_none() {
-                        let label = if self.paused { tr!("Продолжить") } else { tr!("Остановить") };
-                        if ui.add(crate::widgets::primary(label, pal).min_size(crate::widgets::ACTION)).lit(ui).clicked() {
-                            action = Some(0);
+                    let content = ui
+                        .scope(|ui| {
+                            ui.set_width(380.0);
+                            if crate::app::window_header(ui, pal, title, true) {
+                                open = false;
+                            }
+                            ui.add_space(2.0);
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(tf!("Куда: {target}", "To: {target}")).color(pal.subtext),
+                            )
+                            .truncate(),
+                        );
+                        let state = if let Some(spent) = finished {
+                            format!("{outcome} · {}", duration_label(spent))
+                        } else if walking {
+                            tr!("Подсчёт объёма…").to_owned()
+                        } else if paused {
+                            tr!("Пауза").to_owned()
+                        } else {
+                            running.clone().unwrap_or_else(|| tr!("Ожидание…").to_owned())
+                        };
+                        let success = finished.is_some() && outcome == tr!("Готово");
+                        let (state, tone) = if success && drag {
+                            (tr!("✓ Готово — отпустите файлы в нужном месте").to_owned(), crate::widgets::ok_color(ui))
+                        } else if success {
+                            (format!("✓ {state}"), crate::widgets::ok_color(ui))
+                        } else if finished.is_some() {
+                            (state, pal.warn)
+                        } else {
+                            (state, pal.text)
+                        };
+                        ui.add(egui::Label::new(RichText::new(state).color(tone)).truncate());
+                        ui.add(
+                            egui::ProgressBar::new(fraction)
+                                .desired_height(8.0)
+                                .fill(if success { tone } else { pal.accent })
+                                .corner_radius(4.0),
+                        );
+                        let volume = if total > 0 {
+                            tf!("{} из {} · {}%", "{} of {} · {}%",
+                                size_label(bytes as usize),
+                                size_label(total as usize),
+                                (fraction * 100.0) as u32
+                            )
+                        } else {
+                            size_label(bytes as usize)
+                        };
+                        ui.label(RichText::new(volume).small().color(pal.subtext));
+                        let mut line = tf!("Файлы: {done} из {files}", "Files: {done} of {files}");
+                        if failed > 0 {
+                            line.push_str(&tf!(" · ошибок: {failed}", " · errors: {failed}"));
                         }
-                        if ui.add(crate::widgets::secondary(tr!("Отменить"), pal).min_size(crate::widgets::ACTION)).clicked() {
-                            action = Some(1);
+                        if finished.is_none() && speed > 0.0 {
+                            line.push_str(&tf!(" · {}/с", " · {}/s", size_label(speed as usize)));
+                            if total > bytes && !walking {
+                                let left = (total - bytes) as f64 / speed;
+                                line.push_str(&tf!(" · осталось ~{}", " · about {} left",
+                                    duration_label(std::time::Duration::from_secs_f64(left))
+                                ));
+                            }
                         }
-                        if ui.add(crate::widgets::secondary(tr!("Скрыть"), pal).min_size(crate::widgets::ACTION)).clicked() {
-                            action = Some(2);
-                        }
-                    } else {
-                        if failed > 0
-                            && ui.add(crate::widgets::primary(tr!("Повторить"), pal).min_size(crate::widgets::ACTION)).lit(ui).clicked()
-                        {
-                            action = Some(3);
-                        }
-                        if (folder.is_some() || remote_dir.is_some())
-                            && ui.add(crate::widgets::secondary(tr!("Открыть папку"), pal)).clicked()
-                        {
-                            action = Some(4);
-                        }
-                        if ui.add(crate::widgets::secondary(tr!("Закрыть"), pal)).clicked() {
-                            action = Some(5);
-                        }
-                    }
+                        let color = if failed > 0 { pal.warn } else { pal.subtext };
+                        ui.label(RichText::new(line).small().color(color));
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if finished.is_none() {
+                                let label = if paused { tr!("Продолжить") } else { tr!("Остановить") };
+                                if ui.add(crate::widgets::primary(label, pal).min_size(crate::widgets::ACTION)).lit(ui).clicked() {
+                                    action = Some(0);
+                                }
+                                if ui.add(crate::widgets::secondary(tr!("Отменить"), pal).min_size(crate::widgets::ACTION)).clicked() {
+                                    action = Some(1);
+                                }
+                                if ui.add(crate::widgets::secondary(tr!("Скрыть"), pal).min_size(crate::widgets::ACTION)).clicked() {
+                                    action = Some(2);
+                                }
+                            } else {
+                                if failed > 0
+                                    && ui.add(crate::widgets::primary(tr!("Повторить"), pal).min_size(crate::widgets::ACTION)).lit(ui).clicked()
+                                {
+                                    action = Some(3);
+                                }
+                                if (folder.is_some() || remote_dir.is_some())
+                                    && ui.add(crate::widgets::secondary(tr!("Открыть папку"), pal).min_size(crate::widgets::ACTION)).clicked()
+                                {
+                                    action = Some(4);
+                                }
+                                if ui.add(crate::widgets::secondary(tr!("Закрыть"), pal).min_size(crate::widgets::ACTION)).clicked() {
+                                    action = Some(5);
+                                }
+                            }
+                        });
+
+                        })
+                        .response
+                        .rect;
+                    used = (content.height() + 24.0).round();
                 });
-            });
+        });
+        self.batch_owned = owned;
+        if (used - self.batch_height).abs() > 0.5 {
+            self.batch_height = used;
+            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::InnerSize(egui::vec2(408.0, used)));
+        }
         if !open {
             action = Some(if finished.is_some() { 5 } else { 2 });
         }
@@ -3023,6 +3090,20 @@ impl RemotePanel {
         let mut out = Vec::new();
         if let Some(text) = self.batch_tick() {
             out.push(PanelEvent::Toast(text));
+        }
+        let dropped = self.drag_done.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(dropped) = dropped
+            && self.batch.as_ref().is_some_and(|b| b.drag)
+        {
+            self.batch = None;
+            out.push(PanelEvent::Toast(
+                if dropped {
+                    tr!("Файлы перенесены")
+                } else {
+                    tr!("Перетаскивание отменено")
+                }
+                .to_owned(),
+            ));
         }
         if self.batch.as_ref().is_some_and(|b| b.finished.is_some() && !b.open) {
             self.batch = None;
