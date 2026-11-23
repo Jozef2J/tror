@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::Color32;
 use ropey::Rope;
-use syntect::highlighting::{HighlightIterator, HighlightState, Highlighter as Styler, Theme};
-use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
+use syntect::highlighting::{Highlighter as Styler, Theme};
+use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
 use two_face::theme::EmbeddedThemeName;
 
 pub const FRAME_BUDGET: Duration = Duration::from_millis(8);
@@ -41,6 +41,29 @@ pub struct Syntaxes {
     theme: Theme,
     pub generation: u64,
     pub names: Vec<String>,
+}
+
+impl Syntaxes {
+    pub fn print_html(&self, text: &str, syntax: &str, title: &str) -> String {
+        let theme = self.themes.get(EmbeddedThemeName::InspiredGithub);
+        let syntax = self.syntax(syntax);
+        let body = syntect::html::highlighted_html_for_string(text, &self.set, syntax, theme)
+            .unwrap_or_else(|_| format!("<pre>{}</pre>", escape(text)));
+        format!(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{}</title><style>\
+             body{{margin:0;font:12px/1.45 Consolas,'DejaVu Sans Mono',Menlo,monospace}}\
+             pre{{margin:0;padding:8mm;white-space:pre-wrap;word-break:break-all;background:#fff!important}}\
+             @page{{margin:12mm}}</style></head><body>{body}\
+             <script>window.onload=function(){{window.print()}}</script></body></html>",
+            escape(title)
+        )
+    }
+}
+
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 pub fn theme_names() -> Vec<&'static str> {
@@ -170,7 +193,7 @@ pub struct Span {
     pub color: Color32,
 }
 
-type State = (ParseState, HighlightState);
+type State = (ParseState, ScopeStack);
 
 #[derive(Default)]
 struct Entry {
@@ -199,15 +222,18 @@ pub struct Highlighter {
     dirty: Option<(usize, usize)>,
     shown: Option<Window>,
     building: Option<Builder>,
-    buf: String,
+    buf: Scratch,
     pub default_color: Color32,
 }
 
-fn fresh_state(syntax: &SyntaxReference, styler: &Styler<'_>) -> State {
-    (
-        ParseState::new(syntax),
-        HighlightState::new(styler, ScopeStack::new()),
-    )
+#[derive(Default)]
+struct Scratch {
+    line: String,
+    colors: std::collections::HashMap<Vec<Scope>, Color32>,
+}
+
+fn fresh_state(syntax: &SyntaxReference) -> State {
+    (ParseState::new(syntax), ScopeStack::new())
 }
 
 fn highlight_line(
@@ -216,12 +242,13 @@ fn highlight_line(
     state: &mut State,
     set: &SyntaxSet,
     styler: &Styler<'_>,
-    buf: &mut String,
+    scratch: &mut Scratch,
 ) -> Vec<Span> {
     let slice = rope.line(line);
     if slice.len_bytes() > MAX_LINE_BYTES {
         return Vec::new();
     }
+    let buf = &mut scratch.line;
     buf.clear();
     for chunk in slice.chunks() {
         buf.push_str(chunk);
@@ -229,19 +256,41 @@ fn highlight_line(
     let Ok(ops) = state.0.parse_line(buf, set) else {
         return Vec::new();
     };
-    let mut spans: Vec<Span> = Vec::new();
-    for (style, piece) in HighlightIterator::new(&mut state.1, &ops, buf, styler) {
-        if piece.is_empty() {
-            continue;
+    let colors = &mut scratch.colors;
+    let mut color_of = |stack: &ScopeStack| -> Color32 {
+        if let Some(color) = colors.get(stack.as_slice()) {
+            return *color;
         }
-        let c = style.foreground;
+        let c = styler.style_for_stack(stack.as_slice()).foreground;
         let color = Color32::from_rgb(c.r, c.g, c.b);
-        let len = piece.len() as u32;
+        colors.insert(stack.as_slice().to_vec(), color);
+        color
+    };
+    let mut spans: Vec<Span> = Vec::new();
+    let mut push = |len: usize, color: Color32| {
+        if len == 0 {
+            return;
+        }
+        let len = len as u32;
         match spans.last_mut() {
             Some(last) if last.color == color => last.len += len,
             _ => spans.push(Span { len, color }),
         }
+    };
+    let mut at = 0;
+    let mut color = color_of(&state.1);
+    for (pos, op) in &ops {
+        let pos = (*pos).min(buf.len());
+        if pos > at {
+            push(pos - at, color);
+            at = pos;
+        }
+        if state.1.apply(op).is_err() {
+            return Vec::new();
+        }
+        color = color_of(&state.1);
     }
+    push(buf.len() - at, color);
     spans
 }
 
@@ -337,6 +386,7 @@ impl Highlighter {
             || (full && syntax != "Plain Text" && self.entries.len() != lines);
         if stale {
             self.style = Some((syntax.to_owned(), generation, full));
+            self.buf.colors.clear();
             self.entries.clear();
             self.dirty = None;
             self.shown = None;
@@ -377,7 +427,7 @@ impl Highlighter {
         let first = i;
         let mut state = match self.entries[i].state.as_deref() {
             Some(state) => state.clone(),
-            None => fresh_state(syn.syntax(syntax), styler),
+            None => fresh_state(syn.syntax(syntax)),
         };
         loop {
             if i >= n {
@@ -442,7 +492,7 @@ impl Highlighter {
                 version,
                 start: visible.start.saturating_sub(WINDOW_WARMUP),
                 end: (visible.end + WINDOW_MARGIN).min(lines),
-                state: fresh_state(syn.syntax(name), styler),
+                state: fresh_state(syn.syntax(name)),
                 entries: Vec::new(),
             });
         }
@@ -764,5 +814,18 @@ mod tests {
                 "round {round}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod print_tests {
+    #[test]
+    fn print_page_is_light_and_escaped() {
+        let syn = super::Syntaxes::new();
+        let html = syn.print_html("<?php echo '<b>'; ?>", "PHP", "a<b>.php");
+        assert!(html.contains("window.print()"));
+        assert!(html.contains("<title>a&lt;b&gt;.php</title>"));
+        assert!(html.contains("&lt;b&gt;"));
+        assert!(html.contains("background-color:#ffffff"));
     }
 }

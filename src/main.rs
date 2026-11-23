@@ -18,6 +18,7 @@ mod fold;
 mod highlight;
 mod keys;
 mod marks;
+mod local;
 mod mosh;
 mod plugins;
 mod prefs;

@@ -316,6 +316,7 @@ pub enum TermProtocol {
     Ssh,
     Telnet,
     Mosh,
+    Local,
 }
 
 impl TermProtocol {
@@ -326,6 +327,7 @@ impl TermProtocol {
             TermProtocol::Ssh => "SSH",
             TermProtocol::Telnet => "Telnet",
             TermProtocol::Mosh => "Mosh",
+            TermProtocol::Local => tr!("Локальный"),
         }
     }
 
@@ -333,6 +335,7 @@ impl TermProtocol {
         match self {
             TermProtocol::Ssh | TermProtocol::Mosh => 22,
             TermProtocol::Telnet => 23,
+            TermProtocol::Local => 0,
         }
     }
 }
@@ -2381,6 +2384,7 @@ pub fn test_terminal(profile: &TermProfile, known: Option<String>) -> Result<Str
         profile.user.trim()
     ));
     let result = match profile.protocol {
+        TermProtocol::Local => Ok(crate::local::program()),
         TermProtocol::Telnet => (|| {
             let address = profile
                 .address()

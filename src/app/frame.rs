@@ -291,6 +291,7 @@ impl eframe::App for TrorApp {
         self.plugin_results(now);
         self.plugin_finished(now);
         self.plugin_watch(now);
+        self.console.cwd = self.project.root.clone();
         for note in self.console.poll() {
             self.notify(note, now);
         }

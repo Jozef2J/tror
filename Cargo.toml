@@ -1,6 +1,6 @@
 [package]
 name = "trorpad"
-version = "0.26.6"
+version = "0.26.7"
 description = "TrorPad — a fast, compact code editor with SFTP/FTP, SSH console and database tools"
 edition = "2024"
 license = "MIT OR Apache-2.0"
@@ -42,6 +42,7 @@ two-face = { version = "0.5.2", default-features = false, features = ["syntect-o
 vt100 = "0.18.1"
 sha1 = "0.10"
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+portable-pty = "0.9"
 
 [profile.release]
 opt-level = 3

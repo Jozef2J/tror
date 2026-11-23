@@ -64,6 +64,27 @@ impl TrorApp {
                 }
             }
             Action::OpenPath(path) => self.open_path(&path, now),
+            Action::Print => {
+                let Some(doc) = self.docs.get(self.active) else {
+                    return;
+                };
+                let title = doc.title();
+                let html = self
+                    .syntaxes
+                    .print_html(&doc.rope.to_string(), &doc.syntax, &title);
+                let file = std::env::temp_dir().join(format!("trorpad-print-{}.html", doc.id));
+                let result = std::fs::write(&file, html)
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| crate::preview::open_url(&file.display().to_string()));
+                let text = match result {
+                    Ok(()) => tr!("Открыто для печати в браузере").to_owned(),
+                    Err(e) => tf!(
+                        "Не удалось подготовить печать: {e}",
+                        "Could not prepare printing: {e}"
+                    ),
+                };
+                self.notify(text, now);
+            }
             Action::ToggleVisual => {
                 let Some(doc) = self.docs.get(self.active) else {
                     return;
@@ -524,6 +545,7 @@ impl TrorApp {
                 "save" => Action::Save,
                 "save_as" => Action::SaveAs,
                 "save_all" => Action::SaveAll,
+                "print" => Action::Print,
                 "close_tab" => Action::CloseTab(self.active),
                 "reopen" => Action::Reopen,
                 "next_tab" => Action::NextTab,

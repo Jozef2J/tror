@@ -86,6 +86,7 @@ pub struct ConsolePanel {
     focused: bool,
     tabs_scroll: Option<f32>,
     tabs_overflow: bool,
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 pub fn probe<F>(job: F) -> Receiver<Result<String, String>>
@@ -171,6 +172,7 @@ impl ConsolePanel {
             focused: false,
             tabs_scroll: None,
             tabs_overflow: false,
+            cwd: None,
         }
     }
 
@@ -238,11 +240,15 @@ impl ConsolePanel {
         let known = self.known(&session.profile);
         let size = session.screen.size();
         session.screen.reset();
+        let place = if session.profile.protocol == TermProtocol::Local {
+            format!("{} · {}", crate::local::program(), session.profile.host)
+        } else {
+            session.profile.address()
+        };
         session.screen.process(
             format!(
-                "\x1b[90m{} {}…\x1b[0m\r\n",
-                session.profile.protocol.label(),
-                session.profile.address()
+                "\x1b[90m{} {place}…\x1b[0m\r\n",
+                session.profile.protocol.label()
             )
             .as_bytes(),
         );
@@ -256,6 +262,11 @@ impl ConsolePanel {
             ),
             TermProtocol::Telnet => crate::telnet::open(&session.profile, size, wake),
             TermProtocol::Mosh => crate::mosh::open(&session.profile, known, size, wake),
+            TermProtocol::Local => crate::local::open(
+                (!session.profile.host.is_empty()).then(|| std::path::PathBuf::from(&session.profile.host)),
+                size,
+                wake,
+            ),
         });
         session.connected = false;
         session.host_key = None;
@@ -332,10 +343,35 @@ impl ConsolePanel {
         notes
     }
 
+    fn local_profile(&self) -> TermProfile {
+        TermProfile {
+            name: tr!("Локальный терминал").into(),
+            protocol: TermProtocol::Local,
+            host: self
+                .cwd
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
     fn quick_menu(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         ui.set_width(280.0);
         ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
         let mut open = None;
+        if ui
+            .button(tr!("Локальный терминал"))
+            .on_hover_text(tf!(
+                "{} на этом компьютере, в папке проекта",
+                "{} on this computer, in the project folder",
+                crate::local::program()
+            ))
+            .clicked()
+        {
+            open = Some(self.local_profile());
+        }
+        ui.separator();
         let names: Vec<(String, String)> = self
             .store
             .terminals
@@ -848,6 +884,9 @@ impl ConsolePanel {
                 let mut open = None;
                 let mut action = None;
                 ui.horizontal_wrapped(|ui| {
+                    if ui.add(Button::new(tr!("Локальный терминал"))).clicked() {
+                        open = Some(self.local_profile());
+                    }
                     let mut order: Vec<_> = self.store.terminals.iter().enumerate().collect();
                     order.sort_by_cached_key(|(_, p)| p.name.to_lowercase());
                     for (index, profile) in order {
@@ -1153,8 +1192,9 @@ impl ConsolePanel {
                             });
                         ui.add_space(4.0);
                         let note = match p.protocol {
-                            TermProtocol::Ssh => tr!("Вход по паролю, по ключу (RSA, ECDSA, Ed25519) или через ssh-agent, если не заданы ни пароль, ни ключ."),
+                            TermProtocol::Ssh => tr!("Вход по паролю, по ключу (RSA, ECDSA, Ed25519, PuTTY .ppk) или через ssh-agent, если не заданы ни пароль, ни ключ."),
                             TermProtocol::Telnet => tr!("Telnet передаёт всё, включая пароль, без шифрования — используйте его для сетевого оборудования в своей сети. Имя и пароль, если указаны, вводятся сами в ответ на приглашение входа."),
+                            TermProtocol::Local => "",
                             TermProtocol::Mosh => tr!("Mosh входит по SSH, запускает на сервере mosh-server и дальше работает по UDP: сеанс переживает обрывы, смену сети и сон ноутбука. На сервере должен быть установлен mosh, а порты UDP 60000–61000 — открыты."),
                         };
                         let color = if p.protocol == TermProtocol::Telnet { pal.warn } else { pal.subtext };

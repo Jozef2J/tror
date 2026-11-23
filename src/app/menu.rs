@@ -66,6 +66,9 @@ impl TrorApp {
                 ) {
                     actions.push(Action::SaveAll);
                 }
+                if item(ui, tr!("Печать…"), &key("print"), has_doc) {
+                    actions.push(Action::Print);
+                }
                 let backups = crate::remote::backups_dir().filter(|d| d.is_dir());
                 if item(ui, tr!("Резервные копии с серверов"), "", backups.is_some())
                     && let Some(dir) = backups

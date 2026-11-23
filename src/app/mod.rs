@@ -88,6 +88,7 @@ enum Action {
     OpenPath(PathBuf),
     OpenProject(PathBuf),
     ToggleVisual,
+    Print,
     Save,
     SaveAs,
     SaveAll,

@@ -135,6 +135,7 @@ enum Cmd {
     Databases,
     Tables(String),
     Batch(Vec<String>, String, Option<Source>),
+    Import(Vec<String>),
 }
 
 enum Event {
@@ -142,6 +143,7 @@ enum Event {
     Databases(Vec<String>),
     Tables(String, Vec<String>),
     Result(Table, Option<Source>, Vec<String>),
+    Imported(usize, u64),
     Error(String),
     Closed(String),
 }
@@ -438,6 +440,32 @@ impl Engine {
         result.unwrap_or_default()
     }
 
+    fn import(&mut self, statements: &[String]) -> Result<u64, String> {
+        let begin = match self {
+            Engine::My(_) => "START TRANSACTION",
+            _ => "BEGIN",
+        };
+        self.query(begin)?;
+        let mut affected = 0;
+        for (index, statement) in statements.iter().enumerate() {
+            match self.query(statement) {
+                Ok(table) => affected += table.affected,
+                Err(e) => {
+                    let _ = self.query("ROLLBACK");
+                    let head: String = statement.chars().take(200).collect();
+                    trace::line(format!("[DB] ROLLBACK: {} #{}: {head}", e, index + 1), true);
+                    return Err(tf!(
+                        "Запрос №{} не выполнен, всё отменено: {e}",
+                        "Statement #{} failed, everything was rolled back: {e}",
+                        index + 1
+                    ));
+                }
+            }
+        }
+        self.query("COMMIT")?;
+        Ok(affected)
+    }
+
     fn batch(&mut self, statements: &[String]) -> Result<u64, String> {
         let begin = match self {
             Engine::My(_) => "START TRANSACTION",
@@ -687,6 +715,13 @@ fn serve(profile: DbProfile, ssh: Ssh, cmds: Receiver<Cmd>, events: Sender<Event
             }
             Cmd::Databases => engine.databases().map(Event::Databases),
             Cmd::Tables(db) => engine.tables(&db).map(|tables| Event::Tables(db, tables)),
+            Cmd::Import(statements) => {
+                trace::client(format!("[DB] import, statements: {}", statements.len()));
+                engine.import(&statements).map(|affected| {
+                    trace::server(format!("[DB] committed, {affected} rows affected"));
+                    Event::Imported(statements.len(), affected)
+                })
+            }
             Cmd::Batch(statements, refresh, source) => engine.batch(&statements).and_then(|affected| {
                 trace::server(format!("[DB] committed, {affected} rows affected"));
                 let table = engine.query(&refresh)?;
@@ -761,6 +796,7 @@ pub struct DbPanel {
     editor: Option<Editor>,
     profile: String,
     history: Option<History>,
+    import: Option<(String, Vec<String>)>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -845,6 +881,178 @@ fn inserts(table: &Table, kind: DbKind, name: &str) -> String {
         ));
     }
     out
+}
+
+pub fn split_sql(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut delimiter = ";".to_owned();
+    let mut chars = text.chars().peekable();
+    let mut quote: Option<char> = None;
+    let mut line_start = true;
+    while let Some(c) = chars.next() {
+        if line_start && quote.is_none() && current.trim().is_empty() {
+            let rest: String = std::iter::once(c).chain(chars.clone().take_while(|ch| *ch != '\n')).collect();
+            if rest.trim_start().to_ascii_uppercase().starts_with("DELIMITER ") {
+                delimiter = rest.trim_start()[10..].trim().to_owned();
+                for _ in 0..rest.chars().count() - 1 {
+                    chars.next();
+                }
+                current.clear();
+                continue;
+            }
+        }
+        line_start = c == '\n';
+        if let Some(q) = quote {
+            current.push(c);
+            if c == '\\' && q != '`' {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => {
+                quote = Some(c);
+                current.push(c);
+            }
+            '-' if chars.peek() == Some(&'-') => {
+                for ch in chars.by_ref() {
+                    if ch == '\n' {
+                        line_start = true;
+                        current.push('\n');
+                        break;
+                    }
+                }
+            }
+            '#' => {
+                for ch in chars.by_ref() {
+                    if ch == '\n' {
+                        line_start = true;
+                        current.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = ' ';
+                let mut body = String::new();
+                for ch in chars.by_ref() {
+                    if prev == '*' && ch == '/' {
+                        body.pop();
+                        break;
+                    }
+                    body.push(ch);
+                    prev = ch;
+                }
+                if body.starts_with('!') {
+                    current.push_str("/*");
+                    current.push_str(&body);
+                    current.push_str("*/");
+                }
+            }
+            _ => {
+                current.push(c);
+                if current.ends_with(delimiter.as_str()) {
+                    current.truncate(current.len() - delimiter.len());
+                    let statement = current.trim();
+                    if !statement.is_empty() {
+                        out.push(statement.to_owned());
+                    }
+                    current.clear();
+                }
+            }
+        }
+    }
+    let statement = current.trim();
+    if !statement.is_empty() {
+        out.push(statement.to_owned());
+    }
+    out
+}
+
+pub fn parse_csv(text: &str) -> Vec<Vec<Option<String>>> {
+    let first = text.lines().next().unwrap_or_default();
+    let separator = [';', ',', '\t']
+        .into_iter()
+        .max_by_key(|s| first.matches(*s).count())
+        .unwrap_or(',');
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut was_quoted = false;
+    let mut chars = text.trim_start_matches('\u{feff}').chars().peekable();
+    let push = |field: &mut String, was_quoted: &mut bool, row: &mut Vec<Option<String>>| {
+        let value = std::mem::take(field);
+        row.push(if value.is_empty() && !*was_quoted { None } else { Some(value) });
+        *was_quoted = false;
+    };
+    while let Some(c) = chars.next() {
+        if quoted {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    quoted = false;
+                }
+            } else {
+                field.push(c);
+            }
+            continue;
+        }
+        match c {
+            '"' if field.is_empty() => {
+                quoted = true;
+                was_quoted = true;
+            }
+            '\r' => {}
+            '\n' => {
+                push(&mut field, &mut was_quoted, &mut row);
+                rows.push(std::mem::take(&mut row));
+            }
+            c if c == separator => push(&mut field, &mut was_quoted, &mut row),
+            c => field.push(c),
+        }
+    }
+    if !field.is_empty() || was_quoted || !row.is_empty() {
+        push(&mut field, &mut was_quoted, &mut row);
+        rows.push(row);
+    }
+    rows.retain(|r| !(r.len() == 1 && r[0].is_none()));
+    rows
+}
+
+fn csv_inserts(rows: &[Vec<Option<String>>], kind: DbKind, table: &str) -> Result<Vec<String>, String> {
+    let Some((header, body)) = rows.split_first() else {
+        return Err(tr!("файл пустой").into());
+    };
+    let columns: Vec<String> = header
+        .iter()
+        .map(|c| kind.quote(c.as_deref().unwrap_or_default().trim()))
+        .collect();
+    let columns = columns.join(", ");
+    body.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if row.len() != header.len() {
+                return Err(tf!(
+                    "строка {}: полей {}, а в заголовке {}",
+                    "line {}: {} fields, the header has {}",
+                    index + 2,
+                    row.len(),
+                    header.len()
+                ));
+            }
+            let values: Vec<String> = row.iter().map(|v| kind.literal(v.as_deref())).collect();
+            Ok(format!("INSERT INTO {table} ({columns}) VALUES ({})", values.join(", ")))
+        })
+        .collect()
 }
 
 fn csv(table: &Table, separator: char) -> String {
@@ -1075,6 +1283,14 @@ impl DbPanel {
                     self.edits = Edits::default();
                     self.result = Some(table);
                 }
+                Event::Imported(count, affected) => {
+                    self.status = tf!(
+                        "Импорт выполнен: запросов {count}, затронуто строк {affected}",
+                        "Import done: statements {count}, rows affected {affected}"
+                    );
+                    self.error = false;
+                    self.send(Cmd::Databases);
+                }
                 Event::Error(e) => {
                     self.status = e;
                     self.error = true;
@@ -1289,6 +1505,7 @@ impl DbPanel {
 
     fn tree(&mut self, ui: &mut Ui, pal: &Palette) {
         let mut refresh = false;
+        let mut csv_into: Option<(String, String)> = None;
         let kind = self.kind;
         ui.horizontal(|ui| {
             let title = match kind {
@@ -1347,6 +1564,11 @@ impl DbPanel {
                                             ui.close();
                                         }
                                     }
+                                    ui.separator();
+                                    if ui.button(tr!("Импорт CSV в эту таблицу…")).clicked() {
+                                        csv_into = Some((schema.name.clone(), table.clone()));
+                                        ui.close();
+                                    }
                                 });
                             }
                         }
@@ -1365,6 +1587,29 @@ impl DbPanel {
                 self.send(Cmd::Tables(name.clone()));
                 if kind == DbKind::MySql {
                     self.run(format!("USE {}", kind.quote(&name)));
+                }
+            }
+        }
+        if let Some((schema, table)) = csv_into
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("CSV", &["csv", "tsv", "txt"])
+                .pick_file()
+        {
+            let full = match kind {
+                DbKind::Sqlite => kind.quote(&table),
+                _ => format!("{}.{}", kind.quote(&schema), kind.quote(&table)),
+            };
+            let built = std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| csv_inserts(&parse_csv(&String::from_utf8_lossy(&bytes)), kind, &full));
+            match built {
+                Ok(statements) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    self.import = Some((format!("{name} → {table}"), statements));
+                }
+                Err(e) => {
+                    self.status = tf!("CSV не импортирован: {e}", "CSV not imported: {e}");
+                    self.error = true;
                 }
             }
         }
@@ -1440,6 +1685,27 @@ impl DbPanel {
                     });
                 });
             });
+            if ui
+                .add_enabled(!self.busy, egui::Button::new(tr!("Импорт SQL…")))
+                .on_hover_text(tr!("Выполнить запросы из файла .sql (например, дамп базы) в одной транзакции"))
+                .clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("SQL", &["sql", "txt"])
+                    .pick_file()
+            {
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes);
+                        let statements = split_sql(&text);
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        self.import = Some((name, statements));
+                    }
+                    Err(e) => {
+                        self.status = tf!("Не удалось прочитать {}: {e}", "Could not read {}: {e}", path.display());
+                        self.error = true;
+                    }
+                }
+            }
             if !self.current.is_empty() {
                 let what = match self.kind {
                     DbKind::MySql => tr!("база"),
@@ -1961,6 +2227,7 @@ impl DbPanel {
 
     pub fn dialogs(&mut self, ctx: &egui::Context, pal: &Palette, store: &mut Store) {
         self.confirm_dialog(ctx, pal);
+        self.import_dialog(ctx, pal);
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -2238,6 +2505,56 @@ impl DbPanel {
         }
         if done || modal.should_close() {
             self.editor = None;
+        }
+    }
+
+    fn import_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
+        let Some((name, statements)) = &self.import else {
+            return;
+        };
+        let mut run = false;
+        let mut cancel = false;
+        let modal = dialog("tror_db_import", pal).show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.label(RichText::new(tf!("Импорт: {name}", "Import: {name}")).strong());
+            ui.label(
+                RichText::new(tf!(
+                    "Запросов: {}. Они выполнятся в одной транзакции: при ошибке ничего не изменится.",
+                    "Statements: {}. They run in one transaction: on an error nothing changes.",
+                    statements.len()
+                ))
+                .color(pal.subtext)
+                .small(),
+            );
+            ui.add_space(6.0);
+            ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                for statement in statements.iter().take(20) {
+                    let short: String = statement.chars().take(300).collect();
+                    ui.add(egui::Label::new(RichText::new(short).monospace().size(12.0)).wrap());
+                    ui.add_space(3.0);
+                }
+                if statements.len() > 20 {
+                    ui.label(
+                        RichText::new(tf!("…и ещё {}", "…and {} more", statements.len() - 20)).color(pal.faint),
+                    );
+                }
+            });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if !statements.is_empty() && dialog_button(ui, pal, tr!("Выполнить"), true) {
+                    run = true;
+                }
+                if dialog_button(ui, pal, tr!("Отмена"), false) {
+                    cancel = true;
+                }
+            });
+        });
+        if run && let Some((_, statements)) = self.import.take() {
+            self.status = tr!("Импорт…").into();
+            self.error = false;
+            self.send(Cmd::Import(statements));
+        } else if cancel || modal.should_close() {
+            self.import = None;
         }
     }
 
@@ -2565,5 +2882,49 @@ mod history_tests {
         assert_eq!(loaded.entries.len(), HISTORY_MAX);
         assert_eq!(loaded.recent("c").next(), Some(format!("SELECT {}", HISTORY_MAX + 4).as_str()));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sql_files_split_and_csv_becomes_inserts() {
+        let dump = "-- comment; here\nCREATE TABLE t (a TEXT); /* x; */\nINSERT INTO t VALUES ('a;b', \"c\\\";d\");\n/*!40101 SET NAMES utf8 */;\nDELIMITER //\nCREATE TRIGGER x BEGIN SELECT 1; END//\nDELIMITER ;\nSELECT 2;";
+        let parts = split_sql(dump);
+        assert_eq!(
+            parts,
+            [
+                "CREATE TABLE t (a TEXT)",
+                "INSERT INTO t VALUES ('a;b', \"c\\\";d\")",
+                "/*!40101 SET NAMES utf8 */",
+                "CREATE TRIGGER x BEGIN SELECT 1; END",
+                "SELECT 2"
+            ]
+        );
+        let rows = parse_csv("\u{feff}id;name;note\r\n1;\"Иван; мл.\";\n2;\"\";\"say \"\"hi\"\"\"\n");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1], [Some("1".into()), Some("Иван; мл.".into()), None]);
+        assert_eq!(rows[2], [Some("2".into()), Some(String::new()), Some("say \"hi\"".into())]);
+        let inserts = csv_inserts(&rows, DbKind::Sqlite, "\"t\"").unwrap();
+        assert_eq!(inserts[0], "INSERT INTO \"t\" (\"id\", \"name\", \"note\") VALUES ('1', 'Иван; мл.', NULL)");
+        assert!(csv_inserts(&parse_csv("a,b\n1\n"), DbKind::Sqlite, "t").is_err());
+        let path = std::env::temp_dir().join(format!("tror-import-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let profile = DbProfile {
+            kind: DbKind::Sqlite,
+            file: path.display().to_string(),
+            ..Default::default()
+        };
+        let (mut engine, _) = open_engine(&profile, String::new(), 0).unwrap();
+        engine
+            .import(&split_sql("CREATE TABLE t (id INTEGER, name TEXT, note TEXT);\n-- x\n"))
+            .unwrap();
+        assert_eq!(engine.import(&inserts).unwrap(), 2);
+        let mut broken = inserts.clone();
+        broken.push("INSERT INTO nowhere VALUES (1)".into());
+        let error = engine.import(&broken).unwrap_err();
+        assert!(error.contains("3"), "{error}");
+        let count = engine.query("SELECT COUNT(*), SUM(note IS NULL) FROM t").unwrap();
+        assert_eq!(count.rows[0][0].as_deref(), Some("2"));
+        assert_eq!(count.rows[0][1].as_deref(), Some("1"));
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
     }
 }
