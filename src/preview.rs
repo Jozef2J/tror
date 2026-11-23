@@ -166,7 +166,7 @@ fn handle(mut stream: TcpStream, root: &Path, version: &AtomicU64) {
             &mut stream,
             "404 Not Found",
             "text/plain; charset=utf-8",
-            "404 — файл не найден".as_bytes(),
+            tr!("404 — файл не найден").as_bytes(),
         ),
     }
 }
@@ -191,7 +191,12 @@ pub fn open_url(url: &str) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("не удалось открыть браузер: {e}"))
+        .map_err(|e| {
+            tf!(
+                "не удалось открыть браузер: {e}",
+                "could not open the browser: {e}"
+            )
+        })
 }
 
 #[cfg(windows)]
@@ -296,7 +301,7 @@ impl Preview {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|_| {
-                "для предпросмотра PHP нужен установленный php в PATH (запускается php -S)"
+                tr!("для предпросмотра PHP нужен установленный php в PATH (запускается php -S)")
                     .to_owned()
             })?;
         for _ in 0..60 {
@@ -310,11 +315,11 @@ impl Preview {
     }
 
     pub fn url(&mut self, file: &Path) -> Result<String, String> {
-        let root = file.parent().ok_or("у файла нет каталога")?;
+        let root = file.parent().ok_or(tr!("у файла нет каталога"))?;
         let name = file
             .file_name()
             .and_then(|n| n.to_str())
-            .ok_or("непонятное имя файла")?;
+            .ok_or(tr!("непонятное имя файла"))?;
         let ext = file
             .extension()
             .and_then(|e| e.to_str())

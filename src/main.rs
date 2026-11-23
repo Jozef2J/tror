@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[macro_use]
+mod i18n;
 mod app;
+mod bench;
 mod archive;
 mod complete;
 mod console;
@@ -18,6 +21,7 @@ mod marks;
 mod mosh;
 mod plugins;
 mod prefs;
+mod ppk;
 mod preview;
 mod instance;
 mod recover;
@@ -41,6 +45,9 @@ pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLoc
 
 fn main() -> eframe::Result {
     STARTED.get_or_init(std::time::Instant::now);
+    if std::env::args().nth(1).as_deref() == Some("--bench") {
+        std::process::exit(bench::run());
+    }
     if std::env::args().nth(1).as_deref() == Some("--forget-passwords") {
         vault::clear();
         return Ok(());

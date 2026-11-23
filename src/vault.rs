@@ -158,7 +158,7 @@ pub mod backend {
 
     fn check() -> Result<(), String> {
         if BROKEN.load(std::sync::atomic::Ordering::Relaxed) {
-            Err("хранилище недоступно".into())
+            Err(tr!("хранилище недоступно").into())
         } else {
             Ok(())
         }

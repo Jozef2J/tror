@@ -71,10 +71,23 @@ impl TrorApp {
                         .filter(|p| p.peer_label().is_some())
                     {
                         Some(panel) => panel.receive(path, data),
-                        None => self.notify("Передача отменена: второй сервер отключён", now),
+                        None => self.notify(tr!("Передача отменена: второй сервер отключён"), now),
                     }
                 }
                 PanelEvent::Toast(text) => self.notify(text, now),
+                PanelEvent::Conflict {
+                    profile,
+                    doc,
+                    path,
+                    server,
+                } => {
+                    self.conflict = Some(Conflict {
+                        profile,
+                        doc: doc.0,
+                        path,
+                        server,
+                    });
+                }
                 PanelEvent::Console(profile) => {
                     self.console.open(*profile, ctx);
                     dock::show(&mut self.dock, Pane::Console, &self.settings.floats);
@@ -102,8 +115,17 @@ impl TrorApp {
                 PanelEvent::Uploaded { doc, path } => {
                     if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc.0) {
                         d.mark_saved(doc.1);
+                        if d.pending_hash.is_some() {
+                            d.server_hash = d.pending_hash.take();
+                        }
                     }
-                    self.notify(format!("Сохранено на сервере: {path}"), now);
+                    self.notify(
+                        tf!(
+                            "Сохранено на сервере: {path}",
+                            "Saved on the server: {path}"
+                        ),
+                        now,
+                    );
                 }
                 PanelEvent::Open {
                     profile,
@@ -117,7 +139,9 @@ impl TrorApp {
                         self.focus_editor = true;
                         match line {
                             Some(line) => self.docs[i].goto_line(line),
-                            None => self.notify("Файл уже открыт — показана открытая вкладка", now),
+                            None => {
+                                self.notify(tr!("Файл уже открыт — показана открытая вкладка"), now)
+                            }
                         }
                         continue;
                     }
@@ -134,7 +158,13 @@ impl TrorApp {
                             self.active = self.docs.len() - 1;
                             self.focus_editor = true;
                         }
-                        Err(e) => self.notify(format!("Не удалось открыть {path}: {e}"), now),
+                        Err(e) => self.notify(
+                            tf!(
+                                "Не удалось открыть {path}: {e}",
+                                "Could not open {path}: {e}"
+                            ),
+                            now,
+                        ),
                     }
                 }
             }

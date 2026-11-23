@@ -858,17 +858,17 @@ fn context_items(ui: &mut Ui, doc: &mut Document, id: Id) {
         }
         clicked
     };
-    if item(ui, "Вырезать", keys("X"), selected) {
+    if item(ui, tr!("Вырезать"), keys("X"), selected) {
         copy_selection(ui.ctx(), doc, true);
     }
-    if item(ui, "Копировать", keys("C"), selected) {
+    if item(ui, tr!("Копировать"), keys("C"), selected) {
         copy_selection(ui.ctx(), doc, false);
     }
-    if item(ui, "Вставить", keys("V"), true) {
+    if item(ui, tr!("Вставить"), keys("V"), true) {
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
         ui.memory_mut(|mem| mem.request_focus(id));
     }
-    if item(ui, "Удалить", "Delete".into(), true) {
+    if item(ui, tr!("Удалить"), "Delete".into(), true) {
         if selected {
             doc.insert_text("");
         } else {
@@ -876,53 +876,53 @@ fn context_items(ui: &mut Ui, doc: &mut Document, id: Id) {
         }
     }
     ui.separator();
-    if item(ui, "Выделить всё", keys("A"), true) {
+    if item(ui, tr!("Выделить всё"), keys("A"), true) {
         doc.select_all();
     }
     ui.separator();
-    if item(ui, "Закомментировать / раскомментировать", keys("/"), true) {
+    if item(ui, tr!("Закомментировать / раскомментировать"), keys("/"), true) {
         doc.toggle_comment();
     }
-    if item(ui, "Дублировать строку", String::new(), true) {
+    if item(ui, tr!("Дублировать строку"), String::new(), true) {
         doc.duplicate_lines();
     }
-    if item(ui, "Удалить строку", String::new(), true) {
+    if item(ui, tr!("Удалить строку"), String::new(), true) {
         doc.delete_lines();
     }
-    if item(ui, "Увеличить отступ", "Tab".into(), true) {
+    if item(ui, tr!("Увеличить отступ"), "Tab".into(), true) {
         doc.indent();
     }
-    if item(ui, "Уменьшить отступ", "Shift+Tab".into(), true) {
+    if item(ui, tr!("Уменьшить отступ"), "Shift+Tab".into(), true) {
         doc.outdent();
     }
-    ui.menu_button("Сворачивание", |ui| {
+    ui.menu_button(tr!("Сворачивание"), |ui| {
         ui.set_min_width(200.0);
-        if ui.button("Свернуть блок").clicked() {
+        if ui.button(tr!("Свернуть блок")).clicked() {
             doc.fold_here();
             ui.close();
         }
-        if ui.button("Развернуть блок").clicked() {
+        if ui.button(tr!("Развернуть блок")).clicked() {
             doc.unfold_here();
             ui.close();
         }
-        if ui.button("Свернуть всё").clicked() {
+        if ui.button(tr!("Свернуть всё")).clicked() {
             doc.fold_all();
             ui.close();
         }
-        if ui.button("Развернуть всё").clicked() {
+        if ui.button(tr!("Развернуть всё")).clicked() {
             doc.unfold_all();
             ui.close();
         }
     });
     ui.separator();
-    ui.menu_button("Регистр", |ui| {
+    ui.menu_button(tr!("Регистр"), |ui| {
         ui.set_min_width(220.0);
         let cases: [(&str, fn(&str) -> String); 5] = [
-            ("ПРОПИСНЫЕ", |t| t.to_uppercase()),
-            ("строчные", |t| t.to_lowercase()),
-            ("Как в предложении", sentence_case),
-            ("Каждое Слово С Заглавной", title_case),
-            ("иНВЕРСИЯ рЕГИСТРА", invert_case),
+            (tr!("ПРОПИСНЫЕ"), |t| t.to_uppercase()),
+            (tr!("строчные"), |t| t.to_lowercase()),
+            (tr!("Как в предложении"), sentence_case),
+            (tr!("Каждое Слово С Заглавной"), title_case),
+            (tr!("иНВЕРСИЯ рЕГИСТРА"), invert_case),
         ];
         for (label, f) in cases {
             if ui.button(label).clicked() {
@@ -1201,7 +1201,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         let pos = char_at(ui, doc, p);
         if let Some(url) = url_at(doc, pos) {
             if let Err(e) = crate::preview::open_url(&url) {
-                crate::trace::popup(format!("Не удалось открыть ссылку: {e}"), false);
+                crate::trace::popup(tf!("Не удалось открыть ссылку: {e}", "Could not open the link: {e}"), false);
             }
         } else {
             doc.add_cursor(pos);
@@ -1295,7 +1295,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         ctx.set_cursor_icon(CursorIcon::PointingHand);
         response
             .clone()
-            .on_hover_text_at_pointer("Ctrl+щелчок — открыть ссылку в браузере");
+            .on_hover_text_at_pointer(tr!("Ctrl+щелчок — открыть ссылку в браузере"));
     }
     ui.data_mut(|d| d.insert_temp(id, state));
     if response.secondary_clicked()

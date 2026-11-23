@@ -20,12 +20,12 @@ impl TrorApp {
                 Event::Found(release) => self.update.found = Some(release),
                 Event::Current => {
                     if std::mem::take(&mut self.update.manual) {
-                        self.notify("Установлена последняя версия", now);
+                        self.notify(tr!("Установлена последняя версия"), now);
                     }
                 }
                 Event::Failed(e) => {
                     if std::mem::take(&mut self.update.manual) || self.update.found.is_some() {
-                        self.notify(format!("Обновление не удалось: {e}"), now);
+                        self.notify(tf!("Обновление не удалось: {e}", "Update failed: {e}"), now);
                     }
                 }
                 Event::Ready(path, Kind::Installer) => {
@@ -42,7 +42,8 @@ impl TrorApp {
                         .unwrap_or_default();
                     match crate::update::apply(&path, &version) {
                         Ok(()) => self.update.swapped = true,
-                        Err(e) => self.notify(format!("Обновление не удалось: {e}"), now),
+                        Err(e) => self
+                            .notify(tf!("Обновление не удалось: {e}", "Update failed: {e}"), now),
                     }
                 }
             }
@@ -53,7 +54,7 @@ impl TrorApp {
         let kind = crate::update::kind();
         let mut close = false;
         let notes = crate::update::notes(&release.notes);
-        egui::Window::new("Доступно обновление")
+        egui::Window::new(tr!("Доступно обновление"))
             .title_bar(false)
             .collapsible(false)
             .resizable(false)
@@ -66,7 +67,7 @@ impl TrorApp {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         ui.label(
-                            RichText::new("Доступно обновление")
+                            RichText::new(tr!("Доступно обновление"))
                                 .small()
                                 .color(pal.accent),
                         );
@@ -78,9 +79,13 @@ impl TrorApp {
                     });
                     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                         ui.label(
-                            RichText::new(format!("у вас {}", env!("CARGO_PKG_VERSION")))
-                                .small()
-                                .color(pal.faint),
+                            RichText::new(tf!(
+                                "у вас {}",
+                                "you have {}",
+                                env!("CARGO_PKG_VERSION")
+                            ))
+                            .small()
+                            .color(pal.faint),
                         );
                     });
                 });
@@ -119,7 +124,7 @@ impl TrorApp {
                 if self.update.swapped {
                     ui.horizontal(|ui| {
                         if ui
-                            .add(crate::widgets::primary("Перезапустить сейчас", pal))
+                            .add(crate::widgets::primary(tr!("Перезапустить сейчас"), pal))
                             .lit(ui)
                             .clicked()
                         {
@@ -128,12 +133,16 @@ impl TrorApp {
                                 Err(e) => self.update.error = e,
                             }
                         }
-                        close = ui.add(crate::widgets::secondary("Позже", pal)).clicked();
+                        close = ui
+                            .add(crate::widgets::secondary(tr!("Позже"), pal))
+                            .clicked();
                     });
                 } else if self.update.busy {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(RichText::new("Скачиваю и проверяю файл…").color(pal.subtext));
+                        ui.label(
+                            RichText::new(tr!("Скачиваю и проверяю файл…")).color(pal.subtext),
+                        );
                     });
                 } else {
                     let can_install =
@@ -141,7 +150,7 @@ impl TrorApp {
                     ui.horizontal(|ui| {
                         if can_install
                             && ui
-                                .add(crate::widgets::primary("Скачать и установить", pal))
+                                .add(crate::widgets::primary(tr!("Скачать и установить"), pal))
                                 .lit(ui)
                                 .clicked()
                         {
@@ -149,20 +158,25 @@ impl TrorApp {
                             self.update.rx = Some(crate::update::download(release.clone()));
                         }
                         if ui
-                            .add(crate::widgets::secondary("Открыть страницу выпуска", pal))
+                            .add(crate::widgets::secondary(
+                                tr!("Открыть страницу выпуска"),
+                                pal,
+                            ))
                             .clicked()
                         {
                             let _ = preview::open_url(crate::update::PAGE);
                         }
-                        close = ui.add(crate::widgets::secondary("Позже", pal)).clicked();
+                        close = ui
+                            .add(crate::widgets::secondary(tr!("Позже"), pal))
+                            .clicked();
                     });
                 }
                 if !self.update.busy && !self.update.swapped && kind == Kind::Page {
                     ui.label(
-                        RichText::new(
+                        RichText::new(tr!(
                             "Установить отсюда нельзя: папка программы закрыта для записи. \
-                             Скачайте новую версию со страницы выпуска.",
-                        )
+                             Скачайте новую версию со страницы выпуска."
+                        ))
                         .small()
                         .color(pal.subtext),
                     );
@@ -185,7 +199,7 @@ impl TrorApp {
         let mut go = false;
         let modal = dialog("tror_rename_tab", pal).show(ctx, |ui| {
             ui.set_width(340.0);
-            ui.label("Новое имя файла");
+            ui.label(tr!("Новое имя файла"));
             ui.add_space(4.0);
             let field = ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY));
             if !field.has_focus() && !ui.input(|i| i.pointer.any_down()) {
@@ -196,10 +210,10 @@ impl TrorApp {
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if dialog_button(ui, pal, "Переименовать", true) {
+                if dialog_button(ui, pal, tr!("Переименовать"), true) {
                     go = true;
                 }
-                if dialog_button(ui, pal, "Отмена", false) {
+                if dialog_button(ui, pal, tr!("Отмена"), false) {
                     done = true;
                 }
             });
@@ -227,13 +241,16 @@ impl TrorApp {
                                     self.docs[index].remote = Some((profile, to));
                                 })
                             }
-                            None => Err(format!("сначала подключитесь к «{profile}»")),
+                            None => Err(tf!(
+                                "сначала подключитесь к «{profile}»",
+                                "connect to \"{profile}\" first"
+                            )),
                         }
                     }
                     (None, Some(path)) => {
                         let to = path.with_file_name(&name);
                         if to.exists() {
-                            Err("файл с таким именем уже есть".into())
+                            Err(tr!("файл с таким именем уже есть").into())
                         } else {
                             std::fs::rename(&path, &to)
                                 .map_err(|e| e.to_string())
@@ -261,9 +278,12 @@ impl TrorApp {
                         {
                             self.settings.tab_colors.insert(new, color);
                         }
-                        self.notify(format!("Переименовано в {name}"), now);
+                        self.notify(tf!("Переименовано в {name}", "Renamed to {name}"), now);
                     }
-                    Err(e) => self.notify(format!("Не удалось переименовать: {e}"), now),
+                    Err(e) => self.notify(
+                        tf!("Не удалось переименовать: {e}", "Could not rename: {e}"),
+                        now,
+                    ),
                 }
             }
         }
@@ -283,19 +303,19 @@ impl TrorApp {
             ui.set_width(300.0);
             match state {
                 MacroDialog::Save(name) => {
-                    window_header(ui, pal, "Сохранить макрос", false);
+                    window_header(ui, pal, tr!("Сохранить макрос"), false);
                     let field = ui.add(
                         TextEdit::singleline(name)
-                            .hint_text("название")
+                            .hint_text(tr!("название"))
                             .desired_width(f32::INFINITY),
                     );
                     field.request_focus();
                 }
                 MacroDialog::Run(times, until_end) => {
-                    window_header(ui, pal, "Выполнить макрос", false);
+                    window_header(ui, pal, tr!("Выполнить макрос"), false);
                     ui.add_enabled_ui(!*until_end, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label("Сколько раз");
+                            ui.label(tr!("Сколько раз"));
                             let mut value = *times as f32;
                             if crate::widgets::stepper(
                                 ui,
@@ -310,7 +330,7 @@ impl TrorApp {
                             }
                         });
                     });
-                    ui.checkbox(until_end, "До конца файла");
+                    ui.checkbox(until_end, tr!("До конца файла"));
                 }
             }
             if ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -319,13 +339,13 @@ impl TrorApp {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 let label = match state {
-                    MacroDialog::Save(_) => "Сохранить",
-                    MacroDialog::Run(..) => "Выполнить",
+                    MacroDialog::Save(_) => tr!("Сохранить"),
+                    MacroDialog::Run(..) => tr!("Выполнить"),
                 };
                 if dialog_button(ui, pal, label, true) {
                     confirm = true;
                 }
-                if dialog_button(ui, pal, "Отмена", false) {
+                if dialog_button(ui, pal, tr!("Отмена"), false) {
                     done = true;
                 }
             });
@@ -364,11 +384,11 @@ impl TrorApp {
         let mut go = false;
         let modal = dialog("tror_goto", pal).show(ctx, |ui| {
             ui.set_width(260.0);
-            ui.label("Перейти к строке");
+            ui.label(tr!("Перейти к строке"));
             ui.add_space(4.0);
             let field = ui.add(
                 TextEdit::singleline(input)
-                    .hint_text("номер строки")
+                    .hint_text(tr!("номер строки"))
                     .desired_width(f32::INFINITY),
             );
             field.request_focus();
@@ -377,10 +397,10 @@ impl TrorApp {
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if dialog_button(ui, pal, "Перейти", true) {
+                if dialog_button(ui, pal, tr!("Перейти"), true) {
                     go = true;
                 }
-                if dialog_button(ui, pal, "Отмена", false) {
+                if dialog_button(ui, pal, tr!("Отмена"), false) {
                     done = true;
                 }
             });
@@ -408,24 +428,30 @@ impl TrorApp {
         let pal = self.palette();
         let message = match confirm {
             Confirm::Tab(id) => match self.docs.iter().find(|d| d.id == id) {
-                Some(doc) => format!("Сохранить изменения в «{}»?", doc.title()),
+                Some(doc) => tf!(
+                    "Сохранить изменения в «{}»?",
+                    "Save changes to \"{}\"?",
+                    doc.title()
+                ),
                 None => {
                     self.confirm = None;
                     return;
                 }
             },
-            Confirm::Quit => format!(
+            Confirm::Quit => tf!(
                 "Несохранённых файлов: {}. Сохранить перед выходом?",
+                "Unsaved files: {}. Save before exiting?",
                 self.docs.iter().filter(|d| d.dirty()).count()
             ),
             Confirm::Missing(id) => match self.docs.iter().find(|d| d.id == id) {
-                Some(doc) => format!(
+                Some(doc) => tf!(
                     "Файл «{}» больше не существует {}. Оставить вкладку открытой?",
+                    "File \"{}\" no longer exists {}. Keep the tab open?",
                     doc.title(),
                     if doc.remote.is_some() {
-                        "на сервере"
+                        tr!("на сервере")
                     } else {
-                        "на диске"
+                        tr!("на диске")
                     }
                 ),
                 None => {
@@ -442,21 +468,21 @@ impl TrorApp {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if missing {
-                    if dialog_button(ui, &pal, "Оставить", true) {
+                    if dialog_button(ui, &pal, tr!("Оставить"), true) {
                         choice = Some(2);
                     }
-                    if dialog_button(ui, &pal, "Закрыть вкладку", false) {
+                    if dialog_button(ui, &pal, tr!("Закрыть вкладку"), false) {
                         choice = Some(1);
                     }
                     return;
                 }
-                if dialog_button(ui, &pal, "Сохранить", true) {
+                if dialog_button(ui, &pal, tr!("Сохранить"), true) {
                     choice = Some(0);
                 }
-                if dialog_button(ui, &pal, "Не сохранять", false) {
+                if dialog_button(ui, &pal, tr!("Не сохранять"), false) {
                     choice = Some(1);
                 }
-                if dialog_button(ui, &pal, "Отмена", false) {
+                if dialog_button(ui, &pal, tr!("Отмена"), false) {
                     choice = Some(2);
                 }
             });
@@ -490,6 +516,86 @@ impl TrorApp {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
             _ => {}
+        }
+    }
+
+    pub(super) fn conflict_modal(&mut self, ctx: &egui::Context) {
+        let Some(conflict) = &self.conflict else {
+            return;
+        };
+        let Some(index) = self.docs.iter().position(|d| d.id == conflict.doc) else {
+            self.conflict = None;
+            return;
+        };
+        let now = ctx.input(|i| i.time);
+        let pal = self.palette();
+        let name = crate::remote::file_name(&conflict.path).to_owned();
+        let mut choice = None;
+        let modal = dialog("tror_conflict", &pal).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(tf!("Файл «{name}» изменился на сервере после того, как вы его открыли. Ваши правки пока не записаны.", "File \"{name}\" was changed on the server after you opened it. Your edits are not written yet."
+            ));
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(tr!("При перезаписи версия с сервера сохранится в резервные копии."))
+                    .small()
+                    .color(pal.subtext),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if dialog_button(ui, &pal, tr!("Сравнить"), true) {
+                    choice = Some(0);
+                }
+                if dialog_button(ui, &pal, tr!("Перезаписать"), false) {
+                    choice = Some(1);
+                }
+                if dialog_button(ui, &pal, tr!("Отмена"), false) {
+                    choice = Some(2);
+                }
+            });
+        });
+        if modal.should_close() && choice.is_none() {
+            choice = Some(2);
+        }
+        let Some(choice) = choice else {
+            return;
+        };
+        let Some(conflict) = self.conflict.take() else {
+            return;
+        };
+        match choice {
+            0 => match Document::open_remote(
+                self.next_id,
+                &conflict.profile,
+                &conflict.path,
+                conflict.server,
+            ) {
+                Ok(mut server) => {
+                    self.next_id += 1;
+                    server.remote = None;
+                    server.name = Some(tf!("{name} (сервер)", "{name} (server)"));
+                    server.syntax = self.docs[index].syntax.clone();
+                    let local = self.docs[index].id;
+                    let id = server.id;
+                    self.diff.left = Some(id);
+                    self.diff.right = Some(local);
+                    self.docs.push(server);
+                    dock::show(&mut self.dock, Pane::Doc(id), &self.settings.floats);
+                    dock::show(&mut self.dock, Pane::Diff, &self.settings.floats);
+                }
+                Err(e) => self.notify(
+                    tf!(
+                        "Не удалось открыть версию с сервера: {e}",
+                        "Could not open the server version: {e}"
+                    ),
+                    now,
+                ),
+            },
+            1 => {
+                self.docs[index].server_hash = None;
+                self.save(index, now);
+            }
+            _ => self.notify(tr!("Сохранение отменено"), now),
         }
     }
 }

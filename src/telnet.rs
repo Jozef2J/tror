@@ -195,12 +195,12 @@ fn run(
     let address = profile
         .address()
         .to_socket_addrs()
-        .map_err(|e| format!("не удалось найти хост: {e}"))?
+        .map_err(|e| tf!("не удалось найти хост: {e}", "could not resolve the host: {e}"))?
         .next()
-        .ok_or("не удалось найти хост")?;
+        .ok_or(tr!("не удалось найти хост"))?;
     trace::line(format!("[TELNET] connecting to {address}"), false);
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(12))
-        .map_err(|e| format!("нет соединения: {e}"))?;
+        .map_err(|e| tf!("нет соединения: {e}", "no connection: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_millis(15)))
         .map_err(|e| e.to_string())?;
@@ -216,7 +216,7 @@ fn run(
     let mut sent_password = profile.password.is_empty();
     loop {
         match stream.read(&mut buf) {
-            Ok(0) => return Ok("соединение закрыто сервером".into()),
+            Ok(0) => return Ok(tr!("соединение закрыто сервером").into()),
             Ok(n) => {
                 let mut data = Vec::new();
                 let mut reply = Vec::new();
@@ -243,7 +243,7 @@ fn run(
                         {
                             sent_user = true;
                             seen.clear();
-                            trace::client("[TELNET] > (имя пользователя)");
+                            trace::client(tr!("[TELNET] > (имя пользователя)"));
                             stream
                                 .write_all(&escape(format!("{}\r", profile.user.trim()).as_bytes()))
                                 .map_err(|e| e.to_string())?;
@@ -251,7 +251,7 @@ fn run(
                             sent_password = true;
                             sent_user = true;
                             seen.clear();
-                            trace::client("[TELNET] > (пароль)");
+                            trace::client(tr!("[TELNET] > (пароль)"));
                             stream
                                 .write_all(&escape(format!("{}\r", profile.password).as_bytes()))
                                 .map_err(|e| e.to_string())?;
@@ -266,7 +266,7 @@ fn run(
                     e.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) => {}
-            Err(e) => return Err(format!("соединение прервано: {e}")),
+            Err(e) => return Err(tf!("соединение прервано: {e}", "connection interrupted: {e}")),
         }
         loop {
             match cmds.try_recv() {
@@ -281,7 +281,7 @@ fn run(
                 Ok(ShellCmd::TrustHost(_)) => {}
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    return Ok("отключено".into());
+                    return Ok(tr!("отключено").into());
                 }
             }
         }

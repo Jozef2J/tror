@@ -24,7 +24,10 @@ impl TrorApp {
                 look.tab_width,
             )
         {
-            self.notify(format!("Шрифт не загружен: {e}"), ctx.input(|i| i.time));
+            self.notify(
+                tf!("Шрифт не загружен: {e}", "Font not loaded: {e}"),
+                ctx.input(|i| i.time),
+            );
         }
         self.term_fonts = Some(wanted_fonts);
         theme::apply(ctx, &look.palette(), look.dark, look.radius, look.ui_size);

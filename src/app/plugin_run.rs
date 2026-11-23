@@ -12,7 +12,11 @@ impl TrorApp {
         let doc = self.docs.get(self.active);
         if doc.is_none() && plugin.input != Input::None {
             self.notify(
-                format!("Плагину «{}» нужен открытый файл", plugin.name),
+                tf!(
+                    "Плагину «{}» нужен открытый файл",
+                    "Plugin \"{}\" needs an open file",
+                    plugin.name
+                ),
                 now,
             );
             return;
@@ -69,7 +73,7 @@ impl TrorApp {
                 Ok(text) => text,
                 Err(e) => {
                     crate::trace::line(format!("[plugin {name}] {e}"), true);
-                    self.notify(format!("Плагин «{name}»: {e}"), now);
+                    self.notify(tf!("Плагин «{name}»: {e}", "Plugin \"{name}\": {e}"), now);
                     continue;
                 }
             };
@@ -80,7 +84,7 @@ impl TrorApp {
                     for line in text.lines() {
                         crate::trace::line(format!("[plugin {name}] {line}"), false);
                     }
-                    let first = text.lines().next().unwrap_or("готово").to_owned();
+                    let first = text.lines().next().unwrap_or(tr!("готово")).to_owned();
                     self.notify(format!("{name}: {first}"), now);
                 }
                 (Output::NewTab, _) => {
@@ -105,7 +109,7 @@ impl TrorApp {
                     }
                 }
                 _ => self.notify(
-                    format!("Плагин «{name}»: файл изменился или закрыт, результат не применён"),
+                    tf!("Плагин «{name}»: файл изменился или закрыт, результат не применён", "Plugin \"{name}\": the file changed or was closed, the result was not applied"),
                     now,
                 ),
             }
@@ -269,14 +273,20 @@ impl TrorApp {
                     doc.apply_edits(&edits, sel);
                 } else if !edits.is_empty() {
                     self.notify(
-                        format!("Плагин «{name}»: файл изменился, правки не применены"),
+                        tf!(
+                            "Плагин «{name}»: файл изменился, правки не применены",
+                            "Plugin \"{name}\": the file changed, edits were not applied"
+                        ),
                         now,
                     );
                 }
             }
             if let Some(error) = outcome.error {
                 crate::trace::line(format!("[plugin {name}] {error}"), true);
-                self.notify(format!("Плагин «{name}»: {error}"), now);
+                self.notify(
+                    tf!("Плагин «{name}»: {error}", "Plugin \"{name}\": {error}"),
+                    now,
+                );
             }
         }
     }

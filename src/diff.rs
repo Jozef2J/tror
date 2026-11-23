@@ -173,7 +173,7 @@ impl DiffPanel {
             self.key = None;
             self.rows.clear();
             self.hunks.clear();
-            self.note = "Выберите два открытых файла".into();
+            self.note = tr!("Выберите два открытых файла").into();
             return;
         };
         let key = [a.id, a.version, b.id, b.version];
@@ -185,7 +185,7 @@ impl DiffPanel {
         self.hunks.clear();
         self.note.clear();
         if a.rope.len_bytes() > MAX_BYTES || b.rope.len_bytes() > MAX_BYTES {
-            self.note = "Файлы больше 32 МБ не сравниваются".into();
+            self.note = tr!("Файлы больше 32 МБ не сравниваются").into();
             return;
         }
         self.texts = [lines(a), lines(b)];
@@ -209,7 +209,7 @@ impl DiffPanel {
             }
         }
         if self.hunks.is_empty() {
-            self.note = "Различий нет".into();
+            self.note = tr!("Различий нет").into();
         }
         self.at = 0;
         self.jump = self.hunks.first().copied();
@@ -231,7 +231,7 @@ impl DiffPanel {
             let name = |id: Option<u64>| {
                 id.and_then(|id| docs.iter().find(|d| d.id == id))
                     .map(|d| d.title())
-                    .unwrap_or_else(|| "— выбрать —".into())
+                    .unwrap_or_else(|| tr!("— выбрать —").into())
             };
             for (salt, side) in [("tror_diff_left", 0), ("tror_diff_right", 1)] {
                 let slot = if side == 0 {
@@ -251,7 +251,7 @@ impl DiffPanel {
                 if side == 0
                     && ui
                         .add(Button::new("← →"))
-                        .on_hover_text("Поменять местами")
+                        .on_hover_text(tr!("Поменять местами"))
                         .clicked()
                 {
                     std::mem::swap(&mut self.left, &mut self.right);
@@ -268,8 +268,7 @@ impl DiffPanel {
                     self.jump = Some(self.hunks[self.at]);
                 }
                 ui.label(
-                    RichText::new(format!(
-                        "изменение {} из {count}   +{}  −{}",
+                    RichText::new(tf!("изменение {} из {count}   +{}  −{}", "change {} of {count}   +{}  −{}",
                         self.at + 1,
                         self.added,
                         self.removed

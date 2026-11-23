@@ -8,6 +8,17 @@ use serde::Deserialize;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+const GUIDE_EN: &str = "TrorPad plugins
+
+Plugins are written in Rust and compiled to WebAssembly. Put each plugin into its own folder here:
+plugin.json + plugin.wasm, or install a zip with Plugins > Manage plugins > Install from zip.
+
+Documentation, the SDK and a full example:
+https://github.com/Jozef2J/tror/blob/main/sdk/README.md
+
+Old-style plugins (*.json files that run an external program) still work; see sort-lines.json.
+";
+
 const GUIDE: &str = r#"Плагины TrorPad
 
 Есть два вида плагинов.
@@ -218,7 +229,10 @@ pub fn load(dir: &Path) -> (Vec<Plugin>, Vec<String>) {
             .and_then(|text| serde_json::from_str::<Plugin>(&text).map_err(|e| e.to_string()));
         match parsed {
             Ok(plugin) if plugin.name.trim().is_empty() || plugin.command.trim().is_empty() => {
-                errors.push(format!("{name}: нужны поля name и command"));
+                errors.push(tf!(
+                    "{name}: нужны поля name и command",
+                    "{name}: the name and command fields are required"
+                ));
             }
             Ok(plugin) => list.push(plugin),
             Err(e) => errors.push(format!("{name}: {e}")),
@@ -234,7 +248,7 @@ pub fn peek_manifest(archive: &Path) -> Result<crate::wasm::Manifest, String> {
         .filter(|(name, _)| name == "plugin.json" || name.ends_with("/plugin.json"))
         .min_by_key(|(name, _)| name.len())
         .map(|(_, data)| data.clone())
-        .ok_or("в архиве нет plugin.json")?;
+        .ok_or(tr!("в архиве нет plugin.json"))?;
     serde_json::from_slice(&json).map_err(|e| format!("plugin.json: {e}"))
 }
 
@@ -242,29 +256,29 @@ pub(crate) fn unzip(archive: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     use std::io::Read;
     let data = std::fs::read(archive).map_err(|e| e.to_string())?;
     if data.len() > 64 << 20 {
-        return Err("архив больше 64 МБ".into());
+        return Err(tr!("архив больше 64 МБ").into());
     }
     let u16_at = |i: usize| -> Result<usize, String> {
         data.get(i..i + 2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize)
-            .ok_or_else(|| "повреждённый архив".to_owned())
+            .ok_or_else(|| tr!("повреждённый архив").to_owned())
     };
     let u32_at = |i: usize| -> Result<usize, String> {
         data.get(i..i + 4)
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
-            .ok_or_else(|| "повреждённый архив".to_owned())
+            .ok_or_else(|| tr!("повреждённый архив").to_owned())
     };
     let end = (0..data.len().saturating_sub(21))
         .rev()
         .find(|&i| data[i..].starts_with(&[0x50, 0x4b, 0x05, 0x06]))
-        .ok_or("это не zip-архив")?;
+        .ok_or(tr!("это не zip-архив"))?;
     let count = u16_at(end + 10)?;
     let mut at = u32_at(end + 16)?;
     let mut out = Vec::new();
     let mut total = 0usize;
     for _ in 0..count {
         if u32_at(at)? != 0x0201_4b50 {
-            return Err("повреждённый архив".into());
+            return Err(tr!("повреждённый архив").into());
         }
         let method = u16_at(at + 10)?;
         let packed = u32_at(at + 20)?;
@@ -275,7 +289,7 @@ pub(crate) fn unzip(archive: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
         let local = u32_at(at + 42)?;
         let name = String::from_utf8_lossy(
             data.get(at + 46..at + 46 + name_len)
-                .ok_or("повреждённый архив")?,
+                .ok_or(tr!("повреждённый архив"))?,
         )
         .replace('\\', "/");
         at += 46 + name_len + extra + comment;
@@ -284,12 +298,12 @@ pub(crate) fn unzip(archive: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
         }
         total += size;
         if total > 256 << 20 {
-            return Err("распакованный архив больше 256 МБ".into());
+            return Err(tr!("распакованный архив больше 256 МБ").into());
         }
         let start = local + 30 + u16_at(local + 26)? + u16_at(local + 28)?;
         let raw = data
             .get(start..start + packed)
-            .ok_or("повреждённый архив")?;
+            .ok_or(tr!("повреждённый архив"))?;
         let bytes = match method {
             0 => raw.to_vec(),
             8 => {
@@ -300,7 +314,12 @@ pub(crate) fn unzip(archive: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
                     .map_err(|e| e.to_string())?;
                 buf
             }
-            other => return Err(format!("{name}: неподдерживаемое сжатие {other}")),
+            other => {
+                return Err(tf!(
+                    "{name}: неподдерживаемое сжатие {other}",
+                    "{name}: unsupported compression {other}"
+                ));
+            }
         };
         out.push((name, bytes));
     }
@@ -345,7 +364,11 @@ pub fn execute(
         Ok(child) => child,
         Err(e) => {
             return (
-                Err(format!("не удалось запустить «{}»: {e}", plugin.command)),
+                Err(tf!(
+                    "не удалось запустить «{}»: {e}",
+                    "could not start \"{}\": {e}",
+                    plugin.command
+                )),
                 String::new(),
             );
         }
@@ -379,7 +402,7 @@ pub fn execute(
             Ok(None) if started.elapsed() > TIMEOUT => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break Err("не уложился в 30 секунд и был остановлен".to_owned());
+                break Err(tr!("не уложился в 30 секунд и был остановлен").to_owned());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(15)),
             Err(e) => break Err(e.to_string()),
@@ -394,7 +417,11 @@ pub fn execute(
         Ok(status) if status.success() => Ok(stdout),
         Ok(status) => Err(match stderr.lines().next() {
             Some(line) => line.to_owned(),
-            None => format!("завершился с кодом {}", status.code().unwrap_or(-1)),
+            None => tf!(
+                "завершился с кодом {}",
+                "exited with code {}",
+                status.code().unwrap_or(-1)
+            ),
         }),
         Err(e) => Err(e),
     };
@@ -453,7 +480,7 @@ impl Plugins {
     }
 
     pub fn install(&mut self, archive: &Path) -> Result<crate::wasm::Manifest, String> {
-        let dir = self.dir.clone().ok_or("нет папки данных программы")?;
+        let dir = self.dir.clone().ok_or(tr!("нет папки данных программы"))?;
         let files = unzip(archive)?;
         let (prefix, json) = files
             .iter()
@@ -465,13 +492,13 @@ impl Plugins {
                     data.clone(),
                 )
             })
-            .ok_or("в архиве нет plugin.json")?;
+            .ok_or(tr!("в архиве нет plugin.json"))?;
         let manifest: crate::wasm::Manifest =
             serde_json::from_slice(&json).map_err(|e| format!("plugin.json: {e}"))?;
         let safe = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.';
         if manifest.id.is_empty() || !manifest.id.chars().all(safe) || manifest.id.starts_with('.')
         {
-            return Err("недопустимый id плагина".into());
+            return Err(tr!("недопустимый id плагина").into());
         }
         let target = dir.join(&manifest.id);
         let staging = dir.join(format!(".{}-new", manifest.id));
@@ -488,7 +515,10 @@ impl Plugins {
                 .components()
                 .any(|c| !matches!(c, std::path::Component::Normal(_)))
             {
-                return Err(format!("недопустимый путь в архиве: {name}"));
+                return Err(tf!(
+                    "недопустимый путь в архиве: {name}",
+                    "invalid path in the archive: {name}"
+                ));
             }
             let out = staging.join(relative);
             if let Some(parent) = out.parent() {
@@ -498,7 +528,11 @@ impl Plugins {
         }
         if !staging.join(&manifest.wasm).is_file() {
             let _ = std::fs::remove_dir_all(&staging);
-            return Err(format!("в архиве нет {}", manifest.wasm));
+            return Err(tf!(
+                "в архиве нет {}",
+                "the archive has no {}",
+                manifest.wasm
+            ));
         }
         for keep in ["storage.json", "settings.json"] {
             let old = target.join(keep);
@@ -513,9 +547,9 @@ impl Plugins {
     }
 
     pub fn remove(&mut self, folder: &Path) -> Result<(), String> {
-        let dir = self.dir.clone().ok_or("нет папки данных программы")?;
+        let dir = self.dir.clone().ok_or(tr!("нет папки данных программы"))?;
         if folder.parent() != Some(dir.as_path()) {
-            return Err("папка вне каталога плагинов".into());
+            return Err(tr!("папка вне каталога плагинов").into());
         }
         std::fs::remove_dir_all(folder).map_err(|e| e.to_string())?;
         self.reload();
@@ -534,11 +568,16 @@ impl Plugins {
     }
 
     pub fn prepare(&mut self) -> Result<PathBuf, String> {
-        let dir = self.dir.clone().ok_or("нет папки данных программы")?;
+        let dir = self.dir.clone().ok_or(tr!("нет папки данных программы"))?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let guide = dir.join("КАК-ПИСАТЬ-ПЛАГИНЫ.txt");
-        if std::fs::read_to_string(&guide).ok().as_deref() != Some(GUIDE) {
-            std::fs::write(&guide, GUIDE).map_err(|e| e.to_string())?;
+        let (name, text) = if crate::i18n::english() {
+            ("HOW-TO-WRITE-PLUGINS.txt", GUIDE_EN)
+        } else {
+            ("КАК-ПИСАТЬ-ПЛАГИНЫ.txt", GUIDE)
+        };
+        let guide = dir.join(name);
+        if std::fs::read_to_string(&guide).ok().as_deref() != Some(text) {
+            std::fs::write(&guide, text).map_err(|e| e.to_string())?;
         }
         let empty = load(&dir).0.is_empty() && crate::wasm::load_all(&dir).0.is_empty();
         let example = dir.join("sort-lines.json");

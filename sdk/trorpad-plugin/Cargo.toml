@@ -1,8 +1,14 @@
 [package]
 name = "trorpad-plugin"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
-description = "SDK для плагинов TrorPad на Rust (wasm32-unknown-unknown)"
+description = "Rust SDK for TrorPad editor plugins (WebAssembly, wasm32-unknown-unknown)"
+repository = "https://github.com/Jozef2J/tror"
+homepage = "https://github.com/Jozef2J/tror/tree/main/sdk"
+documentation = "https://github.com/Jozef2J/tror/blob/main/sdk/README.md"
+readme = "../README.md"
+keywords = ["trorpad", "plugin", "editor", "wasm", "sdk"]
+categories = ["wasm", "text-editors", "development-tools"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

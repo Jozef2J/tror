@@ -194,7 +194,7 @@ fn lite_cell(value: rusqlite::types::ValueRef<'_>) -> Option<String> {
         ValueRef::Integer(v) => v.to_string(),
         ValueRef::Real(v) => v.to_string(),
         ValueRef::Text(bytes) => clip(String::from_utf8_lossy(bytes).into_owned()),
-        ValueRef::Blob(bytes) => format!("[BLOB, {} Б]", bytes.len()),
+        ValueRef::Blob(bytes) => tf!("[BLOB, {} Б]", "[BLOB, {} B]", bytes.len()),
     })
 }
 
@@ -529,7 +529,7 @@ fn open_engine(profile: &DbProfile, host: String, port: u16) -> Result<(Engine, 
         DbKind::Sqlite => {
             let path = profile.file.trim();
             if path.is_empty() {
-                return Err("не выбран файл базы".into());
+                return Err(tr!("не выбран файл базы").into());
             }
             let conn = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
             let _ = conn.busy_timeout(Duration::from_secs(5));
@@ -547,14 +547,14 @@ pub fn one_shot(store: &Store, name: &str, sql: &str) -> Result<serde_json::Valu
         .iter()
         .find(|p| p.name == name)
         .cloned()
-        .ok_or_else(|| format!("подключение «{name}» не найдено"))?;
+        .ok_or_else(|| tf!("подключение «{name}» не найдено", "connection \"{name}\" not found"))?;
     let mut ssh = None;
     if !profile.tunnel.is_empty() && profile.kind != DbKind::Sqlite {
         let host = store
             .profiles
             .iter()
             .find(|p| p.name == profile.tunnel)
-            .ok_or_else(|| format!("хост «{}» для туннеля не найден", profile.tunnel))?;
+            .ok_or_else(|| tf!("хост «{}» для туннеля не найден", "host \"{}\" for the tunnel not found", profile.tunnel))?;
         let key = format!("{}:{}", host.host.trim(), host.port);
         ssh = Some((host.clone(), store.known_hosts.get(&key).cloned()));
     }
@@ -584,7 +584,7 @@ fn link(profile: &DbProfile, ssh: &Ssh) -> Result<(Engine, String, Option<remote
         && let Some((ssh, known)) = ssh
     {
         let open = remote::tunnel(ssh, known.as_deref(), &host, port)
-            .map_err(|e| format!("туннель: {e}"))?;
+            .map_err(|e| tf!("туннель: {e}", "tunnel: {e}"))?;
         host = "127.0.0.1".into();
         port = open.port;
         tunnel = Some(open);
@@ -658,7 +658,7 @@ fn serve(profile: DbProfile, ssh: Ssh, cmds: Receiver<Cmd>, events: Sender<Event
             if let Err(e) = revive(&mut engine, &mut tunnel, &used) {
                 lost = true;
                 trace::line(format!("[DB] {e}"), true);
-                send(Event::Error(format!("Соединение потеряно, переподключиться не удалось: {e}")));
+                send(Event::Error(tf!("Соединение потеряно, переподключиться не удалось: {e}", "Connection lost, could not reconnect: {e}")));
                 continue;
             }
         }
@@ -955,7 +955,7 @@ impl DbPanel {
         let mut ssh = None;
         if !profile.tunnel.is_empty() && profile.kind != DbKind::Sqlite {
             let Some(host) = store.profiles.iter().find(|p| p.name == profile.tunnel) else {
-                self.status = format!("Хост «{}» для туннеля не найден", profile.tunnel);
+                self.status = tf!("Хост «{}» для туннеля не найден", "Host \"{}\" for the tunnel not found", profile.tunnel);
                 self.error = true;
                 return;
             };
@@ -980,7 +980,7 @@ impl DbPanel {
         self.schemas.clear();
         self.result = None;
         self.edits = Edits::default();
-        self.status = "Подключение…".into();
+        self.status = tr!("Подключение…").into();
         self.error = false;
         self.busy = true;
     }
@@ -1002,7 +1002,7 @@ impl DbPanel {
             self.busy = false;
             match event {
                 Event::Connected(version) => {
-                    self.status = format!("Подключено: {version}");
+                    self.status = tf!("Подключено: {version}", "Connected: {version}");
                     self.error = false;
                     self.version = Some(version);
                     self.send(Cmd::Databases);
@@ -1034,18 +1034,16 @@ impl DbPanel {
                 }
                 Event::Result(table, source, keys) => {
                     self.status = if table.columns.is_empty() {
-                        format!(
-                            "Выполнено: затронуто строк {}, {:.1} мс. {}",
+                        tf!("Выполнено: затронуто строк {}, {:.1} мс. {}", "Done: rows affected {}, {:.1} ms. {}",
                             table.affected,
                             table.elapsed.as_secs_f64() * 1000.0,
                             table.info
                         )
                     } else {
-                        format!(
-                            "Строк: {}{}, {:.1} мс",
+                        tf!("Строк: {}{}, {:.1} мс", "Rows: {}{}, {:.1} ms",
                             table.rows.len(),
                             if table.truncated {
-                                format!(" (показаны первые {})", max_rows())
+                                tf!(" (показаны первые {})", " (first {} shown)", max_rows())
                             } else {
                                 String::new()
                             },
@@ -1082,7 +1080,7 @@ impl DbPanel {
                     self.error = true;
                 }
                 Event::Closed(e) => {
-                    self.status = format!("Нет подключения: {e}");
+                    self.status = tf!("Нет подключения: {e}", "Not connected: {e}");
                     self.error = true;
                     self.conn = None;
                     self.version = None;
@@ -1099,9 +1097,9 @@ impl DbPanel {
         ui.add_space(8.0);
         if store.databases.is_empty() {
             crate::widgets::wrapped_row(ui, 8.0, |ui| {
-                ui.label(RichText::new("Подключений к базам пока нет.").color(pal.subtext));
+                ui.label(RichText::new(tr!("Подключений к базам пока нет.")).color(pal.subtext));
                 if ui
-                    .add(Button::new("Создать подключение"))
+                    .add(Button::new(tr!("Создать подключение")))
                     .clicked()
                 {
                     self.open_editor(store, true);
@@ -1134,7 +1132,7 @@ impl DbPanel {
                                 list_id,
                                 &names,
                                 Some(self.selected),
-                                "Добавить подключение…",
+                                tr!("Добавить подключение…"),
                             ) {
                                 action = Some(a);
                             }
@@ -1148,7 +1146,7 @@ impl DbPanel {
                     }
                 });
                 if crate::widgets::plus_button(ui, pal, egui::vec2(26.0, 24.0))
-                    .on_hover_text("Добавить подключение")
+                    .on_hover_text(tr!("Добавить подключение"))
                     .clicked()
                 {
                     action = Some(crate::widgets::ProfileAction::Add);
@@ -1181,11 +1179,11 @@ impl DbPanel {
             None => {}
         }
         crate::widgets::wrapped_row(ui, 8.0, |ui| {
-            let label = if active { "Отключить" } else { "Подключить" };
+            let label = if active { tr!("Отключить") } else { tr!("Подключить") };
             if ui.add(Button::new(label)).clicked() {
                 if active {
                     self.disconnect();
-                    self.status = "Отключено".into();
+                    self.status = tr!("Отключено").into();
                     self.error = false;
                 } else {
                     self.connect(store, &ctx);
@@ -1236,20 +1234,20 @@ impl DbPanel {
     fn table_queries(&self, schema: &str, table: &str) -> Vec<(&'static str, String)> {
         let kind = self.kind;
         let full = format!("{}.{}", kind.quote(schema), kind.quote(table));
-        let first = ("Первые 200 строк", format!("SELECT * FROM {full} LIMIT 200"));
-        let count = ("Число строк", format!("SELECT COUNT(*) FROM {full}"));
+        let first = (tr!("Первые 200 строк"), format!("SELECT * FROM {full} LIMIT 200"));
+        let count = (tr!("Число строк"), format!("SELECT COUNT(*) FROM {full}"));
         match kind {
             DbKind::MySql => vec![
                 first,
-                ("Столбцы", format!("SHOW FULL COLUMNS FROM {full}")),
-                ("Индексы", format!("SHOW INDEX FROM {full}")),
-                ("SQL создания", format!("SHOW CREATE TABLE {full}")),
+                (tr!("Столбцы"), format!("SHOW FULL COLUMNS FROM {full}")),
+                (tr!("Индексы"), format!("SHOW INDEX FROM {full}")),
+                (tr!("SQL создания"), format!("SHOW CREATE TABLE {full}")),
                 count,
             ],
             DbKind::Postgres => vec![
                 first,
                 (
-                    "Столбцы",
+                    tr!("Столбцы"),
                     format!(
                         "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = {} AND table_name = {} ORDER BY ordinal_position",
                         kind.literal(Some(schema)),
@@ -1257,7 +1255,7 @@ impl DbPanel {
                     ),
                 ),
                 (
-                    "Индексы",
+                    tr!("Индексы"),
                     format!(
                         "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = {} AND tablename = {}",
                         kind.literal(Some(schema)),
@@ -1269,15 +1267,15 @@ impl DbPanel {
             DbKind::Sqlite => vec![
                 first,
                 (
-                    "Столбцы",
+                    tr!("Столбцы"),
                     format!("PRAGMA {}.table_info({})", kind.quote(schema), kind.quote(table)),
                 ),
                 (
-                    "Индексы",
+                    tr!("Индексы"),
                     format!("PRAGMA {}.index_list({})", kind.quote(schema), kind.quote(table)),
                 ),
                 (
-                    "SQL создания",
+                    tr!("SQL создания"),
                     format!(
                         "SELECT sql FROM {}.sqlite_master WHERE name = {}",
                         kind.quote(schema),
@@ -1294,14 +1292,14 @@ impl DbPanel {
         let kind = self.kind;
         ui.horizontal(|ui| {
             let title = match kind {
-                DbKind::MySql => "Базы и таблицы",
-                DbKind::Postgres => "Схемы и таблицы",
-                DbKind::Sqlite => "Таблицы",
+                DbKind::MySql => tr!("Базы и таблицы"),
+                DbKind::Postgres => tr!("Схемы и таблицы"),
+                DbKind::Sqlite => tr!("Таблицы"),
             };
             ui.label(RichText::new(title).small().color(pal.faint));
             if ui
                 .small_button("↺")
-                .on_hover_text("Обновить список")
+                .on_hover_text(tr!("Обновить список"))
                 .clicked()
             {
                 refresh = true;
@@ -1386,7 +1384,7 @@ impl DbPanel {
             .id_salt("tror_db_sql")
             .font(font.clone())
             .hint_text(
-                "SQL-запрос — Ctrl+Enter для выполнения (выделенный фрагмент выполняется отдельно)",
+                tr!("SQL-запрос — Ctrl+Enter для выполнения (выделенный фрагмент выполняется отдельно)"),
             )
             .desired_rows(4)
             .desired_width(f32::INFINITY)
@@ -1410,7 +1408,7 @@ impl DbPanel {
             let run = ui
                 .add_enabled(
                     !self.busy,
-                    crate::widgets::primary("Выполнить", pal),
+                    crate::widgets::primary(tr!("Выполнить"), pal),
                 ).lit(ui)
                 .clicked();
             if (run || (run_key && output.response.has_focus())) && !self.busy {
@@ -1421,7 +1419,7 @@ impl DbPanel {
             });
             let recent: Vec<String> = history.recent(&self.profile).take(40).map(str::to_owned).collect();
             ui.add_enabled_ui(!recent.is_empty(), |ui| {
-                ui.menu_button("История", |ui| {
+                ui.menu_button(tr!("История"), |ui| {
                     ui.set_min_width(360.0);
                     ui.set_max_width(520.0);
                     egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
@@ -1444,9 +1442,9 @@ impl DbPanel {
             });
             if !self.current.is_empty() {
                 let what = match self.kind {
-                    DbKind::MySql => "база",
-                    DbKind::Postgres => "схема",
-                    DbKind::Sqlite => "база",
+                    DbKind::MySql => tr!("база"),
+                    DbKind::Postgres => tr!("схема"),
+                    DbKind::Sqlite => tr!("база"),
                 };
                 ui.label(
                     RichText::new(format!("{what}: {}", self.current))
@@ -1455,12 +1453,12 @@ impl DbPanel {
                 );
             }
             if self.result.as_ref().is_some_and(|t| !t.columns.is_empty()) {
-                if ui.button("Экспорт…").on_hover_text("В файл CSV, JSON или SQL — формат выбирается в окне сохранения").clicked() {
+                if ui.button(tr!("Экспорт…")).on_hover_text(tr!("В файл CSV, JSON или SQL — формат выбирается в окне сохранения")).clicked() {
                     export = Some(true);
                 }
                 if ui
-                    .button("Копировать (TSV)")
-                    .on_hover_text("Вся таблица результата в буфер обмена")
+                    .button(tr!("Копировать (TSV)"))
+                    .on_hover_text(tr!("Вся таблица результата в буфер обмена"))
                     .clicked()
                 {
                     export = Some(false);
@@ -1468,8 +1466,8 @@ impl DbPanel {
             }
             if self.editable() {
                 if ui
-                    .button("+ Строка")
-                    .on_hover_text("Добавить строку в таблицу")
+                    .button(tr!("+ Строка"))
+                    .on_hover_text(tr!("Добавить строку в таблицу"))
                     .clicked()
                 {
                     add_row = true;
@@ -1478,13 +1476,13 @@ impl DbPanel {
                 if count > 0 {
                     if ui
                         .add(
-                            crate::widgets::primary(format!("Применить изменения ({count})"), pal),
+                            crate::widgets::primary(tf!("Применить изменения ({count})", "Apply changes ({count})"), pal),
                         ).lit(ui)
                         .clicked()
                     {
                         apply = true;
                     }
-                    if ui.button("Отменить").clicked() {
+                    if ui.button(tr!("Отменить")).clicked() {
                         discard = true;
                     }
                 }
@@ -1510,9 +1508,9 @@ impl DbPanel {
                     .map_or_else(|| "result".to_owned(), |s| s.table.clone());
                 if let Some(path) = rfd::FileDialog::new()
                     .set_file_name(format!("{name}.csv"))
-                    .add_filter("CSV, разделитель «;»", &["csv"])
+                    .add_filter(tr!("CSV, разделитель «;»"), &["csv"])
                     .add_filter("JSON", &["json"])
-                    .add_filter("SQL — команды INSERT", &["sql"])
+                    .add_filter(tr!("SQL — команды INSERT"), &["sql"])
                     .save_file()
                 {
                     let text = match path.extension().and_then(|e| e.to_str()) {
@@ -1521,9 +1519,9 @@ impl DbPanel {
                         _ => csv(table, ';'),
                     };
                     match std::fs::write(&path, text) {
-                        Ok(()) => self.status = format!("Сохранено: {}", path.display()),
+                        Ok(()) => self.status = tf!("Сохранено: {}", "Saved: {}", path.display()),
                         Err(e) => {
-                            self.status = format!("Не сохранено: {e}");
+                            self.status = tf!("Не сохранено: {e}", "Not saved: {e}");
                             self.error = true;
                         }
                     }
@@ -1538,13 +1536,13 @@ impl DbPanel {
             && self.keys.is_empty()
         {
             ui.label(
-                RichText::new("У таблицы нет первичного ключа — правка в сетке недоступна, меняйте данные запросами.")
+                RichText::new(tr!("У таблицы нет первичного ключа — правка в сетке недоступна, меняйте данные запросами."))
                     .small()
                     .color(pal.faint),
             );
         } else if self.editable() {
             ui.label(
-                RichText::new("Двойной щелчок по ячейке — правка, Enter — принять, Esc — отмена. Правый щелчок — NULL и удаление строки.")
+                RichText::new(tr!("Двойной щелчок по ячейке — правка, Enter — принять, Esc — отмена. Правый щелчок — NULL и удаление строки."))
                     .small()
                     .color(pal.faint),
             );
@@ -1814,7 +1812,7 @@ impl DbPanel {
                         if let Some((r, c)) = picked
                             && r == index
                         {
-                            if ui.button("Копировать значение").clicked() {
+                            if ui.button(tr!("Копировать значение")).clicked() {
                                 let value = if added {
                                     self.edits.added[r - base_rows][c].clone()
                                 } else {
@@ -1828,17 +1826,17 @@ impl DbPanel {
                                 ui.close();
                             }
                             if editable && !deleted {
-                                if ui.button("Изменить значение").clicked() {
+                                if ui.button(tr!("Изменить значение")).clicked() {
                                     start_edit = Some((r, c));
                                     ui.close();
                                 }
-                                if ui.button("Сделать NULL").clicked() {
+                                if ui.button(tr!("Сделать NULL")).clicked() {
                                     set_null = Some((r, c));
                                     ui.close();
                                 }
                             }
                         }
-                        if ui.button("Копировать строку").clicked() {
+                        if ui.button(tr!("Копировать строку")).clicked() {
                             copy = Some(
                                 row_values
                                     .iter()
@@ -1851,11 +1849,11 @@ impl DbPanel {
                         if editable {
                             ui.separator();
                             let label = if added {
-                                "Убрать новую строку"
+                                tr!("Убрать новую строку")
                             } else if deleted {
-                                "Не удалять строку"
+                                tr!("Не удалять строку")
                             } else {
-                                "Удалить строку"
+                                tr!("Удалить строку")
                             };
                             if ui.button(label).clicked() {
                                 toggle_delete = Some(index);
@@ -1879,10 +1877,10 @@ impl DbPanel {
             };
             let long = current.as_ref().is_some_and(|v| v.chars().count() > MAX_CELL);
             if long {
-                self.status = "Значение длиннее 4000 символов показано не целиком — измените его запросом".into();
+                self.status = tr!("Значение длиннее 4000 символов показано не целиком — измените его запросом").into();
                 self.error = true;
             } else if current.as_deref().is_some_and(|v| v.starts_with("[BLOB")) {
-                self.status = "Двоичные данные в сетке не правятся".into();
+                self.status = tr!("Двоичные данные в сетке не правятся").into();
                 self.error = true;
             } else {
                 self.edits.editing = Some((row, col, current.unwrap_or_default()));
@@ -1942,7 +1940,7 @@ impl DbPanel {
         self.editor = Some(if new || store.databases.is_empty() {
             Editor {
                 profile: DbProfile {
-                    name: format!("База {}", store.databases.len() + 1),
+                    name: tf!("База {}", "Database {}", store.databases.len() + 1),
                     ..Default::default()
                 },
                 index: None,
@@ -1977,8 +1975,8 @@ impl DbPanel {
         {
             crate::trace::popup(
                 match &result {
-                    Ok(text) => format!("Подключение работает: {text}"),
-                    Err(e) => format!("Не удалось подключиться: {e}"),
+                    Ok(text) => tf!("Подключение работает: {text}", "Connection works: {text}"),
+                    Err(e) => tf!("Не удалось подключиться: {e}", "Could not connect: {e}"),
                 },
                 result.is_ok(),
             );
@@ -1988,7 +1986,7 @@ impl DbPanel {
         let modal = dialog("tror_db_editor", pal).show(ctx, |ui| {
             ui.set_width(460.0);
             ui.label(
-                RichText::new("Подключение к базе данных")
+                RichText::new(tr!("Подключение к базе данных"))
                     .family(crate::theme::medium())
                     .size(16.0),
             );
@@ -2003,7 +2001,7 @@ impl DbPanel {
                         switch = Some(i);
                     }
                 }
-                if ui.button("+ Новое").clicked() {
+                if ui.button(tr!("+ Новое")).clicked() {
                     create = true;
                 }
             });
@@ -2014,10 +2012,10 @@ impl DbPanel {
                 .spacing([14.0, 8.0])
                 .show(ui, |ui| {
                     let wide = 300.0;
-                    ui.label("Название");
+                    ui.label(tr!("Название"));
                     ui.add(TextEdit::singleline(&mut p.name).desired_width(wide));
                     ui.end_row();
-                    ui.label("Тип");
+                    ui.label(tr!("Тип"));
                     ui.horizontal(|ui| {
                         for kind in [DbKind::MySql, DbKind::Postgres, DbKind::Sqlite] {
                             if ui.selectable_label(p.kind == kind, kind.label()).clicked() && p.kind != kind {
@@ -2030,13 +2028,13 @@ impl DbPanel {
                     });
                     ui.end_row();
                     if p.kind == DbKind::Sqlite {
-                        ui.label("Файл базы");
+                        ui.label(tr!("Файл базы"));
                         ui.horizontal(|ui| {
                             ui.add(TextEdit::singleline(&mut p.file).desired_width(wide - 78.0));
-                            if ui.button("Обзор…").clicked()
+                            if ui.button(tr!("Обзор…")).clicked()
                                 && let Some(file) = rfd::FileDialog::new()
                                     .add_filter("SQLite", &["db", "sqlite", "sqlite3", "db3"])
-                                    .add_filter("Все файлы", &["*"])
+                                    .add_filter(tr!("Все файлы"), &["*"])
                                     .pick_file()
                             {
                                 p.file = file.display().to_string();
@@ -2045,11 +2043,11 @@ impl DbPanel {
                         ui.end_row();
                         return;
                     }
-                    ui.label("Туннель через SSH");
+                    ui.label(tr!("Туннель через SSH"));
                     ComboBox::from_id_salt("tror_db_tunnel")
                         .width(wide)
                         .selected_text(if p.tunnel.is_empty() {
-                            "нет, подключаться напрямую"
+                            tr!("нет, подключаться напрямую")
                         } else {
                             p.tunnel.as_str()
                         })
@@ -2057,7 +2055,7 @@ impl DbPanel {
                             ui.selectable_value(
                                 &mut p.tunnel,
                                 String::new(),
-                                "нет, подключаться напрямую",
+                                tr!("нет, подключаться напрямую"),
                             );
                             for host in &store.profiles {
                                 if host.protocol == remote::Protocol::Sftp {
@@ -2070,31 +2068,31 @@ impl DbPanel {
                             }
                         });
                     ui.end_row();
-                    ui.label("Шифрование TLS");
+                    ui.label(tr!("Шифрование TLS"));
                     ui.vertical(|ui| {
-                        ui.checkbox(&mut p.tls, "Подключаться по TLS");
+                        ui.checkbox(&mut p.tls, tr!("Подключаться по TLS"));
                         if p.tls {
                             ui.checkbox(
                                 &mut p.tls_any_cert,
-                                "Принимать любой сертификат (самоподписанный)",
+                                tr!("Принимать любой сертификат (самоподписанный)"),
                             );
                         }
                     });
                     ui.end_row();
                     ui.label(if p.tunnel.is_empty() {
-                        "Сервер"
+                        tr!("Сервер")
                     } else {
-                        "Сервер (со стороны хоста)"
+                        tr!("Сервер (со стороны хоста)")
                     });
                     ui.horizontal(|ui| {
                         ui.add(TextEdit::singleline(&mut p.host).desired_width(wide - 70.0));
                         crate::widgets::port_field(ui, &mut p.port, 60.0);
                     });
                     ui.end_row();
-                    ui.label("Пользователь");
+                    ui.label(tr!("Пользователь"));
                     ui.add(TextEdit::singleline(&mut p.user).desired_width(wide));
                     ui.end_row();
-                    ui.label("Пароль");
+                    ui.label(tr!("Пароль"));
                     ui.horizontal(|ui| {
                         ui.add(
                             TextEdit::singleline(&mut p.password)
@@ -2102,16 +2100,16 @@ impl DbPanel {
                                 .desired_width(wide - 96.0),
                         );
                         let label = if editor.show_password {
-                            "Скрыть"
+                            tr!("Скрыть")
                         } else {
-                            "Показать"
+                            tr!("Показать")
                         };
                         if ui.button(label).clicked() {
                             editor.show_password = !editor.show_password;
                         }
                     });
                     ui.end_row();
-                    ui.label("База (необязательно)");
+                    ui.label(tr!("База (необязательно)"));
                     ui.add(TextEdit::singleline(&mut p.database).desired_width(wide));
                     ui.end_row();
                 });
@@ -2119,22 +2117,22 @@ impl DbPanel {
             if editor.probe.is_some() {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new("проверка…").color(pal.subtext));
+                    ui.label(RichText::new(tr!("проверка…")).color(pal.subtext));
                 });
-            } else if ui.add(Button::new("Проверить подключение")).clicked() {
+            } else if ui.add(Button::new(tr!("Проверить подключение"))).clicked() {
                 test = true;
             }
             if let Some(result) = &editor.result {
                 let (text, color) = match result {
-                    Ok(text) => (format!("Работает: {text}"), egui::Color32::from_rgb(0x3f, 0xc2, 0x6e)),
-                    Err(e) => (format!("Ошибка: {e}"), pal.warn),
+                    Ok(text) => (tf!("Работает: {text}", "Works: {text}"), egui::Color32::from_rgb(0x3f, 0xc2, 0x6e)),
+                    Err(e) => (tf!("Ошибка: {e}", "Error: {e}"), pal.warn),
                 };
                 ui.label(RichText::new(text).small().color(color));
             }
             ui.add_space(6.0);
             if p.kind == DbKind::Sqlite {
                 ui.label(
-                    RichText::new("Файл SQLite открывается напрямую с этого компьютера. Если файла нет, он будет создан.")
+                    RichText::new(tr!("Файл SQLite открывается напрямую с этого компьютера. Если файла нет, он будет создан."))
                         .small()
                         .color(pal.subtext),
                 );
@@ -2146,27 +2144,27 @@ impl DbPanel {
                     .count();
                 let default_port = p.kind.default_port();
                 let tunnel_note = if sftp_hosts == 0 {
-                    "Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
+                    tr!("Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
                      так устроен почти любой хостинг. В списке туннелей появляются ваши SFTP-профили из панели \
-                     «Удалённые хосты» (F8); сейчас там нет ни одного SFTP-профиля, поэтому выбрать нечего."
+                     «Удалённые хосты» (F8); сейчас там нет ни одного SFTP-профиля, поэтому выбрать нечего.")
                         .to_owned()
                 } else if p.tunnel.is_empty() {
-                    "Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
+                    tr!("Туннель через SSH нужен, когда база принимает подключения только с самого сервера — \
                      так устроен почти любой хостинг. Выберите в списке SFTP-профиль этого сервера: программа \
-                     зайдёт на него по SSH и уже оттуда подключится к базе."
+                     зайдёт на него по SSH и уже оттуда подключится к базе.")
                         .to_owned()
                 } else {
-                    format!(
-                        "Программа зайдёт на выбранный хост по SSH и подключится к базе оттуда. В поле «Сервер» \
-                         укажите адрес базы так, как его видит сам хост — обычно 127.0.0.1 или localhost, порт {default_port}."
+                    tf!("Программа зайдёт на выбранный хост по SSH и подключится к базе оттуда. В поле «Сервер» \
+                         укажите адрес базы так, как его видит сам хост — обычно 127.0.0.1 или localhost, порт {default_port}.", "The program will log in to the chosen host over SSH and connect to the database from there. In the \"Server\" field \
+                         enter the database address as the host itself sees it — usually 127.0.0.1 or localhost, port {default_port}."
                     )
                 };
                 ui.label(RichText::new(tunnel_note).small().color(pal.subtext));
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(
-                        "Пароль хранится в файле профилей в замаскированном, но не зашифрованном виде. \
-                         Без TLS и без туннеля пароль и данные идут по сети открыто.",
+                        tr!("Пароль хранится в файле профилей в замаскированном, но не зашифрованном виде. \
+                         Без TLS и без туннеля пароль и данные идут по сети открыто."),
                     )
                     .small()
                     .color(pal.faint),
@@ -2174,13 +2172,13 @@ impl DbPanel {
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if dialog_button(ui, pal, "Сохранить", true) {
+                if dialog_button(ui, pal, tr!("Сохранить"), true) {
                     save = true;
                 }
-                if dialog_button(ui, pal, "Закрыть", false) {
+                if dialog_button(ui, pal, tr!("Закрыть"), false) {
                     done = true;
                 }
-                if editor.index.is_some() && dialog_button(ui, pal, "Удалить", false) {
+                if editor.index.is_some() && dialog_button(ui, pal, tr!("Удалить"), false) {
                     delete = true;
                 }
             });
@@ -2224,7 +2222,7 @@ impl DbPanel {
                 }
             }
             if let Err(e) = store.save() {
-                self.status = format!("Не удалось сохранить профили: {e}");
+                self.status = tf!("Не удалось сохранить профили: {e}", "Could not save profiles: {e}");
                 self.error = true;
             }
             return;
@@ -2251,9 +2249,9 @@ impl DbPanel {
         let mut cancel = false;
         let modal = dialog("tror_db_apply", pal).show(ctx, |ui| {
             ui.set_width(560.0);
-            ui.label(RichText::new("Применить изменения").strong());
+            ui.label(RichText::new(tr!("Применить изменения")).strong());
             ui.label(
-                RichText::new("Будут выполнены запросы, в одной транзакции:")
+                RichText::new(tr!("Будут выполнены запросы, в одной транзакции:"))
                     .color(pal.subtext)
                     .small(),
             );
@@ -2268,10 +2266,10 @@ impl DbPanel {
             });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if dialog_button(ui, pal, "Выполнить", true) {
+                if dialog_button(ui, pal, tr!("Выполнить"), true) {
                     run = true;
                 }
-                if dialog_button(ui, pal, "Отмена", false) {
+                if dialog_button(ui, pal, tr!("Отмена"), false) {
                     cancel = true;
                 }
             });

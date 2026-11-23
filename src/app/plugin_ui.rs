@@ -350,7 +350,13 @@ fn render(ui: &mut Ui, pal: &Palette, salt: u64, node: &mut Value, out: &mut Vec
         "space" => ui.add_space(node.get("size").and_then(Value::as_f64).unwrap_or(8.0) as f32),
         "" => {}
         other => {
-            ui.label(RichText::new(format!("неизвестный элемент «{other}»")).color(pal.subtext));
+            ui.label(
+                RichText::new(tf!(
+                    "неизвестный элемент «{other}»",
+                    "unknown element \"{other}\""
+                ))
+                .color(pal.subtext),
+            );
         }
     }
 }
@@ -420,7 +426,7 @@ impl TrorApp {
             self.plugin_dialog = Some(PluginDialog {
                 plugin,
                 id: String::new(),
-                title: format!("Настройки: {}", worker.manifest.name),
+                title: tf!("Настройки: {}", "Settings: {}", worker.manifest.name),
                 ask: Ask::Settings(crate::wasm::settings_of(&worker.dir, &worker.manifest)),
             });
         }
@@ -433,7 +439,7 @@ impl TrorApp {
     pub(super) fn plugin_pane(&mut self, ui: &mut Ui, key: u64, pal: &Palette) {
         let Some(panel) = self.plugin_panels.get_mut(&key) else {
             ui.add_space(12.0);
-            ui.label(RichText::new("Плагин этой панели не загружен").color(pal.subtext));
+            ui.label(RichText::new(tr!("Плагин этой панели не загружен")).color(pal.subtext));
             return;
         };
         let mut out = Vec::new();
@@ -445,7 +451,7 @@ impl TrorApp {
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
                         if panel.tree.is_null() {
-                            ui.label(RichText::new("Загрузка…").color(pal.subtext));
+                            ui.label(RichText::new(tr!("Загрузка…")).color(pal.subtext));
                         } else {
                             render(ui, pal, key, &mut panel.tree, &mut out);
                         }
@@ -528,7 +534,7 @@ impl TrorApp {
                 Ask::Pick(items, filter, selected) => {
                     let field = ui.add(
                         TextEdit::singleline(filter)
-                            .hint_text("фильтр")
+                            .hint_text(tr!("фильтр"))
                             .desired_width(f32::INFINITY),
                     );
                     field.request_focus();
@@ -642,7 +648,7 @@ impl TrorApp {
                 if dialog_button(ui, pal, "OK", true) {
                     confirm = true;
                 }
-                if dialog_button(ui, pal, "Отмена", false) {
+                if dialog_button(ui, pal, tr!("Отмена"), false) {
                     done = true;
                 }
             });
@@ -665,7 +671,7 @@ impl TrorApp {
                     (Value::Object(map), Some(worker)) => {
                         crate::wasm::save_settings(&worker.dir, map)
                     }
-                    _ => Err("плагин не загружен".into()),
+                    _ => Err(tr!("плагин не загружен").into()),
                 };
                 match saved {
                     Ok(()) => self.plugin_send(
@@ -673,7 +679,13 @@ impl TrorApp {
                         json!({"method": "event", "params": {"name": "settings"}}),
                         target,
                     ),
-                    Err(e) => self.notify(format!("Настройки плагина не сохранены: {e}"), now),
+                    Err(e) => self.notify(
+                        tf!(
+                            "Настройки плагина не сохранены: {e}",
+                            "Plugin settings not saved: {e}"
+                        ),
+                        now,
+                    ),
                 }
                 self.focus_editor = true;
             }

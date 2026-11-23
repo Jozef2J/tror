@@ -22,8 +22,9 @@ impl eframe::App for TrorApp {
             if self.scale > 0.0 {
                 let size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
                 crate::trace::line(
-                    format!(
+                    tf!(
                         "[UI] масштаб экрана {} → {scale}, окно {size:?}",
+                        "[UI] screen scale {} → {scale}, window {size:?}",
                         self.scale
                     ),
                     false,
@@ -46,7 +47,13 @@ impl eframe::App for TrorApp {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 self.settings.keep_session = false;
                 let now = ctx.input(|i| i.time);
-                self.notify(format!("Не удалось сохранить правки сеанса: {e}"), now);
+                self.notify(
+                    tf!(
+                        "Не удалось сохранить правки сеанса: {e}",
+                        "Could not save session edits: {e}"
+                    ),
+                    now,
+                );
             }
             self.recovery.last = f64::INFINITY;
         } else if ctx.input(|i| i.viewport().close_requested())
@@ -157,7 +164,10 @@ impl eframe::App for TrorApp {
                 if released {
                     let now = ctx.input(|i| i.time);
                     self.remotes[index].download_into(items.clone(), &dir);
-                    self.notify(format!("Скачивание в {}", dir.display()), now);
+                    self.notify(
+                        tf!("Скачивание в {}", "Downloading to {}", dir.display()),
+                        now,
+                    );
                 } else {
                     panel.external_hover = Some(dir);
                 }
@@ -223,12 +233,16 @@ impl eframe::App for TrorApp {
         if reset {
             self.settings.look.font_size = crate::prefs::Look::default().font_size;
             let now = ctx.input(|i| i.time);
-            self.notify("Размер шрифта редактора по умолчанию".to_owned(), now);
+            self.notify(tr!("Размер шрифта редактора по умолчанию").to_owned(), now);
         }
         if zoom != 0.0 {
             let size = &mut self.settings.look.font_size;
             *size = (*size + zoom).clamp(7.0, 48.0);
-            let text = format!("Размер шрифта редактора: {}", *size as i32);
+            let text = tf!(
+                "Размер шрифта редактора: {}",
+                "Editor font size: {}",
+                *size as i32
+            );
             let now = ctx.input(|i| i.time);
             self.notify(text, now);
         }
@@ -555,15 +569,15 @@ impl eframe::App for TrorApp {
                             );
                             if !matches!(pane, Pane::Doc(_))
                                 && icon_button(&mut buttons, &pal, Icon::Close)
-                                    .on_hover_text("Скрыть панель")
+                                    .on_hover_text(tr!("Скрыть панель"))
                                     .clicked()
                             {
                                 hidden = true;
                             }
                             if icon_button(&mut buttons, &pal, Icon::Dock)
-                                .on_hover_text(
-                                    "Вернуть в окно TrorPad (двойной щелчок по заголовку)",
-                                )
+                                .on_hover_text(tr!(
+                                    "Вернуть в окно TrorPad (двойной щелчок по заголовку)"
+                                ))
                                 .clicked()
                             {
                                 closed = true;
@@ -678,7 +692,7 @@ impl eframe::App for TrorApp {
                 Stroke::new(2.0, pal.accent),
                 egui::StrokeKind::Inside,
             );
-            let label = format!("Загрузить в {dir}");
+            let label = tf!("Загрузить в {dir}", "Upload to {dir}");
             let galley = painter.layout_no_wrap(label, FontId::proportional(14.0), pal.text);
             let at = egui::pos2(
                 zone.center().x - galley.size().x / 2.0,
@@ -706,7 +720,7 @@ impl eframe::App for TrorApp {
             painter.text(
                 screen.center(),
                 egui::Align2::CENTER_CENTER,
-                "Отпустите, чтобы открыть файл",
+                tr!("Отпустите, чтобы открыть файл"),
                 FontId::proportional(22.0),
                 pal.text,
             );
@@ -718,6 +732,7 @@ impl eframe::App for TrorApp {
         self.macro_modal(&ctx, &pal);
         self.rename_modal(&ctx, &pal);
         self.confirm_modal(&ctx);
+        self.conflict_modal(&ctx);
         let mut panes = self.hosts_panes();
         panes.extend([Pane::Console, Pane::Db, Pane::Project]);
         for pane in panes {
@@ -822,12 +837,13 @@ impl TrorApp {
                             self.relocate(&moved);
                         }
                         self.notify(
-                            format!(
+                            tf!(
                                 "{} {} в {}",
+                                "{} {} to {}",
                                 if keep {
-                                    "Скопировано:"
+                                    tr!("Скопировано:")
                                 } else {
-                                    "Перемещено:"
+                                    tr!("Перемещено:")
                                 },
                                 moved.len(),
                                 dir.display()
@@ -835,7 +851,7 @@ impl TrorApp {
                             now,
                         );
                     }
-                    Err(e) => self.notify(format!("Не удалось: {e}"), now),
+                    Err(e) => self.notify(tf!("Не удалось: {e}", "Failed: {e}"), now),
                 }
                 self.project.reload();
                 self.project2.reload();
@@ -884,19 +900,20 @@ impl TrorApp {
                 }
                 let n = moved.len();
                 self.notify(
-                    format!(
+                    tf!(
                         "{} {n} в {}",
+                        "{} {n} to {}",
                         if keep {
-                            "Скопировано:"
+                            tr!("Скопировано:")
                         } else {
-                            "Перемещено:"
+                            tr!("Перемещено:")
                         },
                         dir.display()
                     ),
                     now,
                 )
             }
-            Err(e) => self.notify(format!("Не удалось: {e}"), now),
+            Err(e) => self.notify(tf!("Не удалось: {e}", "Failed: {e}"), now),
         }
         self.project.reload();
         self.project2.reload();
@@ -943,7 +960,13 @@ fn drag_out(frame: &eframe::Frame, paths: Vec<PathBuf>) {
         |_, _| {},
         drag::Options::default(),
     ) {
-        crate::trace::popup(format!("Не удалось начать перетаскивание: {e}"), false);
+        crate::trace::popup(
+            tf!(
+                "Не удалось начать перетаскивание: {e}",
+                "Could not start dragging: {e}"
+            ),
+            false,
+        );
     }
 }
 

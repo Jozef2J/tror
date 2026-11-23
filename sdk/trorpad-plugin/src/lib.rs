@@ -49,7 +49,9 @@ fn exchange(message: &[u8]) -> Vec<u8> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn exchange(_message: &[u8]) -> Vec<u8> {
-    r#"{"error":"плагин запущен не в TrorPad"}"#.as_bytes().to_vec()
+    r#"{"error":"the plugin is not running inside TrorPad"}"#
+        .as_bytes()
+        .to_vec()
 }
 
 pub fn request(method: &str, params: Value) -> Result<Value, String> {
@@ -57,7 +59,7 @@ pub fn request(method: &str, params: Value) -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     let reply: Value = serde_json::from_slice(&exchange(&message)).map_err(|e| e.to_string())?;
     match reply.get("error") {
-        Some(error) => Err(error.as_str().unwrap_or("ошибка хоста").to_owned()),
+        Some(error) => Err(error.as_str().unwrap_or("host error").to_owned()),
         None => Ok(reply.get("ok").cloned().unwrap_or(Value::Null)),
     }
 }
@@ -514,12 +516,12 @@ fn dispatch<T: Plugin>(slot: &mut Option<T>, bytes: &[u8]) -> Result<(), String>
     };
     if method == "initialize" {
         std::panic::set_hook(Box::new(|info| {
-            let _ = host::log_error(&format!("паника: {info}"));
+            let _ = host::log_error(&format!("panic: {info}"));
         }));
         *slot = Some(T::default());
         return Ok(());
     }
-    let plugin = slot.as_mut().ok_or("плагин не инициализирован")?;
+    let plugin = slot.as_mut().ok_or("plugin is not initialized")?;
     match method {
         "command" => plugin.command(&string("id")),
         "event" => match string("name").as_str() {
@@ -541,7 +543,7 @@ fn dispatch<T: Plugin>(slot: &mut Option<T>, bytes: &[u8]) -> Result<(), String>
             ),
             name => plugin.event(name, &params),
         },
-        other => Err(format!("неизвестный метод «{other}»")),
+        other => Err(format!("unknown method \"{other}\"")),
     }
 }
 

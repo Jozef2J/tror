@@ -1038,7 +1038,7 @@ fn blocks_of(nodes: &[Node], src: &str, top: bool) -> (Vec<Block>, usize) {
             );
         }
         trim_runs(&mut runs, false);
-        let (gap, s, e) = trimmed_span(src, start, end, *last_end);
+        let (gap, s, e) = trimmed_span(src, start, end, if top { *last_end } else { Some(start) });
         let mut block = Block::para("", runs);
         if top {
             block.gap = gap;

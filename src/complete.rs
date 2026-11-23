@@ -393,14 +393,14 @@ fn dictionaries(
     match lang {
         Lang::Php if prefix.starts_with('$') => vec![(PHP_VARS, "php")],
         Lang::Php if matches!(before, Some('>' | ':')) => vec![],
-        Lang::Php if before == Some('<') => vec![(HTML_TAGS, "тег")],
-        Lang::Php => vec![(PHP_KEYWORDS, "php"), (PHP_FUNCS, "функция")],
-        Lang::Html | Lang::Twig if matches!(before, Some('<' | '/')) => vec![(HTML_TAGS, "тег")],
-        Lang::Html => vec![(HTML_ATTRS, "атрибут")],
-        Lang::Twig => vec![(TWIG_WORDS, "twig"), (HTML_ATTRS, "атрибут")],
-        Lang::Js if before == Some('.') => vec![(JS_METHODS, "метод"), (JQUERY, "jQuery")],
+        Lang::Php if before == Some('<') => vec![(HTML_TAGS, tr!("тег"))],
+        Lang::Php => vec![(PHP_KEYWORDS, "php"), (PHP_FUNCS, tr!("функция"))],
+        Lang::Html | Lang::Twig if matches!(before, Some('<' | '/')) => vec![(HTML_TAGS, tr!("тег"))],
+        Lang::Html => vec![(HTML_ATTRS, tr!("атрибут"))],
+        Lang::Twig => vec![(TWIG_WORDS, "twig"), (HTML_ATTRS, tr!("атрибут"))],
+        Lang::Js if before == Some('.') => vec![(JS_METHODS, tr!("метод")), (JQUERY, "jQuery")],
         Lang::Js => vec![(JS_KEYWORDS, "js"), (JS_GLOBALS, "js")],
-        Lang::Css => vec![(CSS_PROPS, "свойство"), (CSS_VALUES, "значение")],
+        Lang::Css => vec![(CSS_PROPS, tr!("свойство")), (CSS_VALUES, tr!("значение"))],
         Lang::Python => vec![(PYTHON, "python")],
         Lang::Rust => vec![(RUST, "rust")],
         Lang::Sql | Lang::Other => vec![],
@@ -497,7 +497,7 @@ impl Completion {
             let short = short_name(&word).to_owned();
             let candidate = if member { short } else { word };
             if candidate.to_lowercase().starts_with(&lower) {
-                add(&candidate, "словарь", 0);
+                add(&candidate, tr!("словарь"), 0);
             }
         }
         for source in builtin_sigs(lang) {
@@ -517,12 +517,12 @@ impl Completion {
                     continue;
                 };
                 if candidate.to_lowercase().starts_with(&lower) {
-                    add(candidate, if member { "метод" } else { "класс" }, 1);
+                    add(candidate, if member { tr!("метод") } else { tr!("класс") }, 1);
                 }
             }
         }
         for word in &words {
-            add(word, "текст", 0);
+            add(word, tr!("текст"), 0);
         }
         if items.is_empty() {
             return;

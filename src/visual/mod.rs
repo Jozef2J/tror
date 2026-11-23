@@ -12,6 +12,7 @@ use eframe::egui::{
 };
 
 use crate::document::{Document, EditKind};
+use crate::search::{Pending, SearchState};
 use crate::theme::Palette;
 use model::*;
 use ops::{TableOp, table_html};
@@ -71,6 +72,8 @@ pub struct Visual {
     chars_menu: Option<Pos2>,
     pub notice: Option<String>,
     base_dir: Option<std::path::PathBuf>,
+    hits: Vec<(Pos, Pos)>,
+    hits_key: Option<(String, bool, bool, bool, bool, u64)>,
 }
 
 pub const LIMIT: usize = 3 * 1024 * 1024;
@@ -116,6 +119,8 @@ impl Visual {
             chars_menu: None,
             notice: None,
             base_dir: doc.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()),
+            hits: Vec::new(),
+            hits_key: None,
         };
         if visual.paras.is_empty() {
             visual.html.blocks.push(Block::para("p", Vec::new()));
@@ -165,17 +170,156 @@ impl Visual {
         self.version = doc.version;
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, doc: &mut Document, pal: &Palette, base: f32, focus: bool) {
+    pub fn selection_text(&self) -> String {
+        self.selected_text()
+    }
+
+    fn find(&mut self, search: &mut SearchState, version: u64) -> Option<EditKind> {
+        if search.query.is_empty() {
+            search.pending = None;
+            search.error = None;
+            search.visual = Some((None, 0));
+            self.hits.clear();
+            self.hits_key = None;
+            return None;
+        }
+        let re = match search.pattern() {
+            Ok(re) => re,
+            Err(e) => {
+                search.pending = None;
+                search.error = Some(e);
+                search.visual = Some((None, 0));
+                self.hits.clear();
+                return None;
+            }
+        };
+        search.error = None;
+        self.scan(search, &re, version);
+        let mut edited = None;
+        if let Some(pending) = search.pending.take() {
+            let (a, b) = self.ordered();
+            let current = self.hits.iter().position(|h| *h == (a, b));
+            match pending {
+                Pending::Replace => {
+                    if current.is_some() {
+                        let found = self.selected_text();
+                        self.insert_text(&search.replace_with(&re, &found));
+                        self.pending = None;
+                        edited = Some(EditKind::Other);
+                        self.hits_key = None;
+                        self.scan(search, &re, version + 1);
+                    }
+                    self.step(Pending::FromAnchor);
+                }
+                Pending::ReplaceAll | Pending::DeleteAll => {
+                    let delete = pending == Pending::DeleteAll;
+                    let hits = std::mem::take(&mut self.hits);
+                    for (a, b) in hits.iter().rev() {
+                        self.anchor = *a;
+                        self.head = *b;
+                        let text = if delete {
+                            String::new()
+                        } else {
+                            let found = self.selected_text();
+                            search.replace_with(&re, &found)
+                        };
+                        self.insert_text(&text);
+                        self.pending = None;
+                    }
+                    search.last_replaced = Some(hits.len());
+                    search.deleted = delete;
+                    if !hits.is_empty() {
+                        edited = Some(EditKind::Other);
+                    }
+                    self.hits_key = None;
+                    self.scan(search, &re, version + 1);
+                }
+                other => self.step(other),
+            }
+        }
+        let (a, b) = self.ordered();
+        let current = self.hits.iter().position(|h| *h == (a, b));
+        search.visual = Some((current, self.hits.len()));
+        edited
+    }
+
+    fn scan(&mut self, search: &SearchState, re: &regex::Regex, version: u64) {
+        let key = (search.query.clone(), search.case, search.word, search.regex, search.extended, version);
+        if self.hits_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.hits_key = Some(key);
+        self.hits.clear();
+        for para in 0..self.paras.len() {
+            let Some(runs) = self.runs(para) else {
+                continue;
+            };
+            let text = plain(runs);
+            for m in re.find_iter(&text) {
+                if m.is_empty() {
+                    continue;
+                }
+                let from = text[..m.start()].chars().count();
+                let to = from + m.as_str().chars().count();
+                self.hits.push((Pos { para, off: from }, Pos { para, off: to }));
+            }
+        }
+    }
+
+    fn step(&mut self, pending: Pending) {
+        if self.hits.is_empty() {
+            return;
+        }
+        let (a, b) = self.ordered();
+        let index = match pending {
+            Pending::Prev => {
+                let i = self.hits.partition_point(|h| h.1 <= a);
+                if i == 0 { self.hits.len() - 1 } else { i - 1 }
+            }
+            _ => {
+                let from = if pending == Pending::Next { b } else { a };
+                let i = self.hits.partition_point(|h| h.0 < from);
+                if i == self.hits.len() { 0 } else { i }
+            }
+        };
+        let (a, b) = self.hits[index];
+        self.anchor = a;
+        self.head = b;
+        self.pending = None;
+        self.goal_x = None;
+        self.reveal = true;
+    }
+
+    pub fn ui(
+        &mut self,
+        ui: &mut Ui,
+        doc: &mut Document,
+        pal: &Palette,
+        base: f32,
+        focus: bool,
+        search: Option<&mut SearchState>,
+    ) {
         if doc.rope.len_bytes() > LIMIT {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new("Файл слишком большой для визуального режима (больше 3 МБ).").color(pal.subtext));
+                ui.label(RichText::new(tr!("Файл слишком большой для визуального режима (больше 3 МБ).")).color(pal.subtext));
             });
             return;
         }
         self.sync_from(doc);
         let id = egui::Id::unique(("tror_visual", doc.id));
         let mut changed: Option<EditKind> = None;
+        match search {
+            Some(search) if search.open && !search.files => {
+                changed = self.find(search, doc.version);
+            }
+            Some(search) => {
+                search.visual = None;
+                self.hits.clear();
+                self.hits_key = None;
+            }
+            None => {}
+        }
         self.toolbar(ui, pal, doc, &mut changed);
         let status_h = 24.0;
         let height = (ui.available_height() - status_h).max(60.0);
@@ -253,18 +397,36 @@ impl Visual {
     }
 
     fn pointer(&mut self, ui: &Ui, response: &egui::Response) {
-        let Some(pos) = ui.input(|i| i.pointer.interact_pos()) else {
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        }
+        let (pos, pressed, down, shift) = ui.input(|i| {
+            (
+                i.pointer.interact_pos(),
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.modifiers.shift,
+            )
+        });
+        let Some(pos) = pos else {
             return;
         };
-        let shift = ui.input(|i| i.modifiers.shift);
-        if response.double_clicked_by(egui::PointerButton::Primary) {
+        if response.triple_clicked() {
+            if let Some(hit) = self.hit(pos) {
+                self.anchor = Pos { para: hit.para, off: 0 };
+                self.head = Pos { para: hit.para, off: self.len(hit.para) };
+            }
+            self.dragging = false;
+            return;
+        }
+        if response.double_clicked() {
             if let Some(hit) = self.hit(pos) {
                 self.select_word(hit);
             }
+            self.dragging = false;
             return;
         }
-        let primary = response.clicked_by(egui::PointerButton::Primary);
-        if response.drag_started_by(egui::PointerButton::Primary) || primary || response.secondary_clicked() && self.anchor == self.head {
+        if pressed && response.hovered() {
             if let Some(hit) = self.hit(pos) {
                 self.head = hit;
                 if !shift {
@@ -273,16 +435,23 @@ impl Visual {
                 self.pending = None;
                 self.goal_x = None;
             }
-            self.dragging = response.drag_started();
+            self.dragging = true;
         }
-        if self.dragging && response.dragged() {
-            if let Some(hit) = self.hit(pos) {
-                self.head = hit;
+        if response.secondary_clicked() && self.anchor == self.head && let Some(hit) = self.hit(pos) {
+            self.collapse_to(hit);
+            self.goal_x = None;
+        }
+        if self.dragging {
+            if down {
+                if let Some(hit) = self.hit(pos)
+                    && hit != self.head
+                {
+                    self.head = hit;
+                    self.reveal = true;
+                }
+            } else {
+                self.dragging = false;
             }
-            self.reveal = true;
-        }
-        if response.drag_stopped() {
-            self.dragging = false;
         }
     }
 
@@ -395,6 +564,13 @@ impl Visual {
                 }
             }
         }
+        for (a, b) in &self.hits {
+            if let Some(view) = self.view(a.para) {
+                let from = m2g(&view.segs, a.off);
+                let to = m2g(&view.segs, b.off);
+                paint_selection(painter, view, from, to, pal.match_bg);
+            }
+        }
         let (a, b) = self.ordered();
         if a != b {
             for view in &self.views {
@@ -405,7 +581,7 @@ impl Visual {
                 let to = if view.para == b.para {
                     m2g(&view.segs, b.off)
                 } else {
-                    view.galley.text().chars().count()
+                    view.galley.text().chars().count() + 1
                 };
                 paint_selection(painter, view, from, to, pal.selection);
             }
@@ -435,20 +611,20 @@ impl Visual {
                     ui.painter().rect_filled(r, 0.0, pal.border);
                     ui.add_space(4.0);
                 };
-                if icon_tool(ui, pal, Icon::Undo, "Отменить (Ctrl+Z)", false) && doc.can_undo() {
+                if icon_tool(ui, pal, Icon::Undo, tr!("Отменить (Ctrl+Z)"), false) && doc.can_undo() {
                     doc.undo();
                 }
-                if icon_tool(ui, pal, Icon::Redo, "Повторить (Ctrl+Y)", false) && doc.can_redo() {
+                if icon_tool(ui, pal, Icon::Redo, tr!("Повторить (Ctrl+Y)"), false) && doc.can_redo() {
                     doc.redo();
                 }
                 sep(ui);
                 let styles = [
-                    (Style::Bold, "B", "Полужирный (Ctrl+B)"),
-                    (Style::Italic, "I", "Курсив (Ctrl+I)"),
-                    (Style::Underline, "U", "Подчёркнутый (Ctrl+U)"),
-                    (Style::Strike, "S", "Зачёркнутый"),
-                    (Style::Sub, "x₂", "Подстрочный индекс"),
-                    (Style::Sup, "x²", "Надстрочный индекс"),
+                    (Style::Bold, "B", tr!("Полужирный (Ctrl+B)")),
+                    (Style::Italic, "I", tr!("Курсив (Ctrl+I)")),
+                    (Style::Underline, "U", tr!("Подчёркнутый (Ctrl+U)")),
+                    (Style::Strike, "S", tr!("Зачёркнутый")),
+                    (Style::Sub, "x₂", tr!("Подстрочный индекс")),
+                    (Style::Sup, "x²", tr!("Надстрочный индекс")),
                 ];
                 for (style, label, hint) in styles {
                     if style_tool(ui, pal, label, hint, style, self.style_active(style)) {
@@ -456,7 +632,7 @@ impl Visual {
                         *changed = Some(EditKind::Other);
                     }
                 }
-                if tool(ui, pal, "Tx", "Убрать форматирование", false) {
+                if tool(ui, pal, "Tx", tr!("Убрать форматирование"), false) {
                     self.clear_format();
                     *changed = Some(EditKind::Other);
                 }
@@ -464,33 +640,33 @@ impl Visual {
                 let list = self
                     .list_context(self.head.para)
                     .and_then(|(l, _)| self.html.block(&l).map(|b| b.tag().to_owned()));
-                if icon_tool(ui, pal, Icon::Ordered, "Нумерованный список", list.as_deref() == Some("ol")) {
+                if icon_tool(ui, pal, Icon::Ordered, tr!("Нумерованный список"), list.as_deref() == Some("ol")) {
                     self.toggle_list(true);
                     *changed = Some(EditKind::Other);
                 }
-                if icon_tool(ui, pal, Icon::Bullets, "Маркированный список", list.as_deref() == Some("ul")) {
+                if icon_tool(ui, pal, Icon::Bullets, tr!("Маркированный список"), list.as_deref() == Some("ul")) {
                     self.toggle_list(false);
                     *changed = Some(EditKind::Other);
                 }
-                if tool(ui, pal, "⇤", "Уменьшить отступ (Shift+Tab)", false) {
+                if tool(ui, pal, "⇤", tr!("Уменьшить отступ (Shift+Tab)"), false) {
                     self.indent(false);
                     *changed = Some(EditKind::Other);
                 }
-                if tool(ui, pal, "⇥", "Увеличить отступ (Tab)", false) {
+                if tool(ui, pal, "⇥", tr!("Увеличить отступ (Tab)"), false) {
                     self.indent(true);
                     *changed = Some(EditKind::Other);
                 }
-                if icon_tool(ui, pal, Icon::Quote, "Цитата", self.quote_context().is_some()) {
+                if icon_tool(ui, pal, Icon::Quote, tr!("Цитата"), self.quote_context().is_some()) {
                     self.toggle_quote();
                     *changed = Some(EditKind::Other);
                 }
                 sep(ui);
                 let align = self.align();
                 for (value, label, hint) in [
-                    (None, Icon::Left, "По левому краю"),
-                    (Some("center"), Icon::Center, "По центру"),
-                    (Some("right"), Icon::Right, "По правому краю"),
-                    (Some("justify"), Icon::Justify, "По ширине"),
+                    (None, Icon::Left, tr!("По левому краю")),
+                    (Some("center"), Icon::Center, tr!("По центру")),
+                    (Some("right"), Icon::Right, tr!("По правому краю")),
+                    (Some("justify"), Icon::Justify, tr!("По ширине")),
                 ] {
                     let active = match value {
                         None => align.is_empty() || align == "left",
@@ -503,18 +679,18 @@ impl Visual {
                 }
                 sep(ui);
                 let link = self.link_at_cursor();
-                if icon_tool(ui, pal, Icon::Link, "Ссылка (Ctrl+K)", link.is_some()) {
+                if icon_tool(ui, pal, Icon::Link, tr!("Ссылка (Ctrl+K)"), link.is_some()) {
                     self.open_link();
                 }
-                if icon_tool(ui, pal, Icon::Unlink, "Убрать ссылку", false) {
+                if icon_tool(ui, pal, Icon::Unlink, tr!("Убрать ссылку"), false) {
                     self.unlink();
                     *changed = Some(EditKind::Other);
                 }
-                if icon_tool(ui, pal, Icon::Anchor, "Якорь", false) {
+                if icon_tool(ui, pal, Icon::Anchor, tr!("Якорь"), false) {
                     self.dialog = Some(Dialog::Anchor(String::new()));
                 }
                 sep(ui);
-                if icon_tool(ui, pal, Icon::Image, "Изображение", false) {
+                if icon_tool(ui, pal, Icon::Image, tr!("Изображение"), false) {
                     self.dialog = Some(Dialog::Image {
                         src: String::new(),
                         alt: String::new(),
@@ -523,7 +699,7 @@ impl Visual {
                         replace: None,
                     });
                 }
-                if icon_tool(ui, pal, Icon::Table, "Таблица", self.table_context().is_some()) {
+                if icon_tool(ui, pal, Icon::Table, tr!("Таблица"), self.table_context().is_some()) {
                     self.dialog = Some(Dialog::Table {
                         rows: "3".into(),
                         cols: "3".into(),
@@ -532,13 +708,13 @@ impl Visual {
                         border: "1".into(),
                     });
                 }
-                if tool(ui, pal, "―", "Горизонтальная линия", false) {
+                if tool(ui, pal, "―", tr!("Горизонтальная линия"), false) {
                     self.insert_block_after(Block::new(Kind::Raw("<hr>".into())), true);
                     *changed = Some(EditKind::Other);
                 }
-                if tool(ui, pal, "W", "Вставить документ Word (.docx)…", false)
+                if tool(ui, pal, "W", tr!("Вставить документ Word (.docx)…"), false)
                     && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Документ Word", &["docx"])
+                        .add_filter(tr!("Документ Word"), &["docx"])
                         .pick_file()
                 {
                     match docx::to_html(&path) {
@@ -547,10 +723,10 @@ impl Visual {
                                 *changed = Some(EditKind::Other);
                             }
                         }
-                        Err(e) => self.notice = Some(format!("Не удалось открыть {}: {e}", path.display())),
+                        Err(e) => self.notice = Some(tf!("Не удалось открыть {}: {e}", "Could not open {}: {e}", path.display())),
                     }
                 }
-                let chars = tool(ui, pal, "Ω", "Специальный символ", false);
+                let chars = tool(ui, pal, "Ω", tr!("Специальный символ"), false);
                 if chars {
                     self.chars_menu = ui.ctx().pointer_latest_pos();
                 }
@@ -558,16 +734,16 @@ impl Visual {
                 self.format_combo(ui, changed);
                 self.size_combo(ui, changed);
                 self.font_combo(ui, changed);
-                let text_color = icon_tool(ui, pal, Icon::Color, "Цвет текста", false);
+                let text_color = icon_tool(ui, pal, Icon::Color, tr!("Цвет текста"), false);
                 if text_color {
                     self.color_menu = ui.ctx().pointer_latest_pos().map(|p| (false, p));
                 }
-                let bg_color = icon_tool(ui, pal, Icon::Fill, "Цвет фона", false);
+                let bg_color = icon_tool(ui, pal, Icon::Fill, tr!("Цвет фона"), false);
                 if bg_color {
                     self.color_menu = ui.ctx().pointer_latest_pos().map(|p| (true, p));
                 }
                 sep(ui);
-                if icon_tool(ui, pal, Icon::Blocks, "Показать блоки", self.blocks) {
+                if icon_tool(ui, pal, Icon::Blocks, tr!("Показать блоки"), self.blocks) {
                     self.blocks = !self.blocks;
                 }
             });
@@ -579,20 +755,20 @@ impl Visual {
     fn format_combo(&mut self, ui: &mut Ui, changed: &mut Option<EditKind>) {
         let current = self.current_block_tag();
         let formats = [
-            ("p", "Обычный"),
-            ("h1", "Заголовок 1"),
-            ("h2", "Заголовок 2"),
-            ("h3", "Заголовок 3"),
-            ("h4", "Заголовок 4"),
-            ("h5", "Заголовок 5"),
-            ("h6", "Заголовок 6"),
-            ("pre", "Форматированный"),
-            ("address", "Адрес"),
+            ("p", tr!("Обычный")),
+            ("h1", tr!("Заголовок 1")),
+            ("h2", tr!("Заголовок 2")),
+            ("h3", tr!("Заголовок 3")),
+            ("h4", tr!("Заголовок 4")),
+            ("h5", tr!("Заголовок 5")),
+            ("h6", tr!("Заголовок 6")),
+            ("pre", tr!("Форматированный")),
+            ("address", tr!("Адрес")),
         ];
         let label = formats
             .iter()
             .find(|(t, _)| *t == current)
-            .map_or("Обычный", |(_, l)| *l);
+            .map_or(tr!("Обычный"), |(_, l)| *l);
         egui::ComboBox::from_id_salt("tror_visual_format")
             .width(130.0)
             .selected_text(label)
@@ -614,9 +790,9 @@ impl Visual {
             .unwrap_or_default();
         egui::ComboBox::from_id_salt("tror_visual_size")
             .width(62.0)
-            .selected_text(if current.is_empty() { "Размер".to_owned() } else { current.clone() })
+            .selected_text(if current.is_empty() { tr!("Размер").to_owned() } else { current.clone() })
             .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_empty(), "Обычный").clicked() {
+                if ui.selectable_label(current.is_empty(), tr!("Обычный")).clicked() {
                     self.set_span_style("font-size", None);
                     *changed = Some(EditKind::Other);
                 }
@@ -639,9 +815,9 @@ impl Visual {
         let shown = current.split(',').next().unwrap_or("").trim_matches(['\'', '"']).to_owned();
         egui::ComboBox::from_id_salt("tror_visual_font")
             .width(96.0)
-            .selected_text(if shown.is_empty() { "Шрифт".to_owned() } else { shown })
+            .selected_text(if shown.is_empty() { tr!("Шрифт").to_owned() } else { shown })
             .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_empty(), "Обычный").clicked() {
+                if ui.selectable_label(current.is_empty(), tr!("Обычный")).clicked() {
                     self.set_span_style("font-family", None);
                     *changed = Some(EditKind::Other);
                 }
@@ -678,7 +854,7 @@ impl Visual {
             .fixed_pos(pos + egui::vec2(-10.0, 14.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::menu(ui.style()).show(ui, |ui| {
-                    if ui.button("Автоматически").clicked() {
+                    if ui.button(tr!("Автоматически")).clicked() {
                         self.set_span_style(prop, None);
                         *changed = Some(EditKind::Other);
                         close = true;
@@ -734,7 +910,7 @@ impl Visual {
                             }
                         }
                     });
-                    if ui.button("Неразрывный пробел").clicked() {
+                    if ui.button(tr!("Неразрывный пробел")).clicked() {
                         self.insert_text("\u{a0}");
                         *changed = Some(EditKind::Other);
                         close = true;
@@ -771,10 +947,10 @@ impl Visual {
                 egui::Frame::menu(ui.style()).show(ui, |ui| {
                     ui.set_min_width(200.0);
                     for (label, value) in [
-                        ("Вставить строку сверху", TableOp::RowAbove),
-                        ("Вставить строку снизу", TableOp::RowBelow),
-                        ("Вставить столбец слева", TableOp::ColLeft),
-                        ("Вставить столбец справа", TableOp::ColRight),
+                        (tr!("Вставить строку сверху"), TableOp::RowAbove),
+                        (tr!("Вставить строку снизу"), TableOp::RowBelow),
+                        (tr!("Вставить столбец слева"), TableOp::ColLeft),
+                        (tr!("Вставить столбец справа"), TableOp::ColRight),
                     ] {
                         if ui.button(label).clicked() {
                             op = Some(value);
@@ -782,9 +958,9 @@ impl Visual {
                     }
                     ui.separator();
                     for (label, value) in [
-                        ("Удалить строку", TableOp::DeleteRow),
-                        ("Удалить столбец", TableOp::DeleteCol),
-                        ("Удалить таблицу", TableOp::DeleteTable),
+                        (tr!("Удалить строку"), TableOp::DeleteRow),
+                        (tr!("Удалить столбец"), TableOp::DeleteCol),
+                        (tr!("Удалить таблицу"), TableOp::DeleteTable),
                     ] {
                         if ui.button(label).clicked() {
                             op = Some(value);
@@ -822,20 +998,20 @@ impl Visual {
             };
             match dialog {
                 Dialog::Link { href, blank } => {
-                    ui.label(RichText::new("Ссылка").strong());
+                    ui.label(RichText::new(tr!("Ссылка")).strong());
                     ui.add_space(6.0);
-                    row(ui, "Адрес", href);
-                    ui.checkbox(blank, "Открывать в новом окне");
+                    row(ui, tr!("Адрес"), href);
+                    ui.checkbox(blank, tr!("Открывать в новом окне"));
                 }
                 Dialog::Image { src, alt, width, height, .. } => {
-                    ui.label(RichText::new("Изображение").strong());
+                    ui.label(RichText::new(tr!("Изображение")).strong());
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        ui.add_sized([110.0, 24.0], egui::Label::new("Адрес"));
+                        ui.add_sized([110.0, 24.0], egui::Label::new(tr!("Адрес")));
                         ui.add(TextEdit::singleline(src).desired_width(220.0));
-                        if ui.button("Выбрать…").clicked() {
+                        if ui.button(tr!("Выбрать…")).clicked() {
                             let mut picker = rfd::FileDialog::new().add_filter(
-                                "Изображения",
+                                tr!("Изображения"),
                                 &["png", "jpg", "jpeg", "gif", "webp", "svg"],
                             );
                             if let Some(dir) = &base {
@@ -846,23 +1022,23 @@ impl Visual {
                             }
                         }
                     });
-                    row(ui, "Описание (alt)", alt);
-                    row(ui, "Ширина", width);
-                    row(ui, "Высота", height);
+                    row(ui, tr!("Описание (alt)"), alt);
+                    row(ui, tr!("Ширина"), width);
+                    row(ui, tr!("Высота"), height);
                 }
                 Dialog::Table { rows, cols, header, width, border } => {
-                    ui.label(RichText::new("Таблица").strong());
+                    ui.label(RichText::new(tr!("Таблица")).strong());
                     ui.add_space(6.0);
-                    row(ui, "Строк", rows);
-                    row(ui, "Столбцов", cols);
-                    row(ui, "Ширина", width);
-                    row(ui, "Рамка", border);
-                    ui.checkbox(header, "Первая строка — заголовок");
+                    row(ui, tr!("Строк"), rows);
+                    row(ui, tr!("Столбцов"), cols);
+                    row(ui, tr!("Ширина"), width);
+                    row(ui, tr!("Рамка"), border);
+                    ui.checkbox(header, tr!("Первая строка — заголовок"));
                 }
                 Dialog::Anchor(name) => {
-                    ui.label(RichText::new("Якорь").strong());
+                    ui.label(RichText::new(tr!("Якорь")).strong());
                     ui.add_space(6.0);
-                    row(ui, "Имя", name);
+                    row(ui, tr!("Имя"), name);
                 }
             }
             if ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -873,7 +1049,7 @@ impl Visual {
                 if crate::app::dialog_button(ui, pal, "OK", true) {
                     ok = true;
                 }
-                if crate::app::dialog_button(ui, pal, "Отмена", false) {
+                if crate::app::dialog_button(ui, pal, tr!("Отмена"), false) {
                     cancel = true;
                 }
             });
@@ -1193,34 +1369,30 @@ impl Visual {
 }
 
 fn paint_selection(painter: &egui::Painter, view: &View, from: usize, to: usize, color: Color32) {
-    if to <= from {
-        let rect = view.galley.pos_from_cursor(CCursor::new(from));
-        let r = Rect::from_min_size(rect.min, egui::vec2(6.0, rect.height().max(14.0)));
-        painter.rect_filled(r.translate(view.origin.to_vec2()), 0.0, color);
-        return;
-    }
-    let mut start = from;
-    while start < to {
-        let a = view.galley.pos_from_cursor(CCursor::new(start));
-        let row_end = view.galley.cursor_end_of_row(&CCursor::new(start)).index.0;
-        let end = row_end.min(to).max(start + 1).min(to);
-        let b = view.galley.pos_from_cursor(CCursor { index: egui::text::CharIndex(end), prefer_next_row: false });
-        let mut right = b.left();
-        if end == row_end && end < to {
-            right += 6.0;
+    let offset = view.origin.to_vec2();
+    let rows = &view.galley.rows;
+    let mut start = 0;
+    let mut top: Option<f32> = None;
+    for row in rows {
+        let n = row.glyphs.len();
+        let rect = row.rect();
+        let y0 = top.map_or(rect.top(), |t| t.min(rect.top()));
+        top = Some(rect.bottom());
+        let a = from.max(start);
+        let more = to > start + n;
+        if a <= start + n && (a < to.min(start + n) || more || n == 0 && from <= start && to > from) {
+            let x0 = row.pos.x + row.x_offset(egui::text::CharIndex(a - start));
+            let x1 = if more {
+                rect.right().max(x0) + 6.0
+            } else {
+                row.pos.x + row.x_offset(egui::text::CharIndex(to.min(start + n) - start))
+            };
+            let r = Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1.max(x0 + 1.0), rect.bottom()));
+            painter.rect_filled(r.translate(offset), 0.0, color);
         }
-        let rect = Rect::from_min_max(a.min, egui::pos2(right.max(a.min.x + 2.0), a.max.y));
-        painter.rect_filled(rect.translate(view.origin.to_vec2()), 0.0, color);
-        if end <= start {
+        start += row.char_count_including_newline().0;
+        if start > to {
             break;
-        }
-        start = end;
-        if end == row_end {
-            let next = view.galley.cursor_from_pos(egui::vec2(0.0, a.max.y + 2.0)).index.0;
-            if next <= start {
-                break;
-            }
-            start = next;
         }
     }
 }

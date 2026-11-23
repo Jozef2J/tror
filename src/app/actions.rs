@@ -9,9 +9,13 @@ impl TrorApp {
         self.search.focus_query = true;
         self.search.last_replaced = None;
         if let Some(doc) = self.docs.get(self.active) {
+            let visual = self.visual.get(&doc.id).map(|v| v.selection_text());
             let range = doc.selection();
-            if !range.is_empty() && range.len() < 200 {
-                let selected = doc.selected_text();
+            let picked = match visual {
+                Some(text) => (!text.is_empty() && text.chars().count() < 200).then_some(text),
+                None => (!range.is_empty() && range.len() < 200).then(|| doc.selected_text()),
+            };
+            if let Some(selected) = picked {
                 if !selected.contains(['\n', '\r', '\t']) {
                     self.search.query = selected;
                 } else if !self.search.regex {
@@ -60,12 +64,41 @@ impl TrorApp {
                 }
             }
             Action::OpenPath(path) => self.open_path(&path, now),
+            Action::ToggleVisual => {
+                let Some(doc) = self.docs.get(self.active) else {
+                    return;
+                };
+                let id = doc.id;
+                if !crate::visual::supports(doc) {
+                    self.notify(
+                        tr!("Визуальный редактор доступен для HTML, PHP, Twig и новых файлов")
+                            .to_string(),
+                        now,
+                    );
+                } else if self.visual.remove(&id).is_some() {
+                    self.focus_editor = true;
+                } else {
+                    let index = self.active;
+                    if self.docs[index].syntax == "Plain Text" {
+                        self.docs[index].syntax = "HTML".into();
+                    }
+                    let editor = crate::visual::Visual::new(&self.docs[index]);
+                    self.visual.insert(id, editor);
+                }
+            }
             Action::OpenProject(path) => {
                 if path.is_dir() {
                     self.project.set_root(path);
                     dock::show(&mut self.dock, Pane::Project, &self.settings.floats);
                 } else {
-                    self.notify(format!("Папка не найдена: {}", path.display()), now);
+                    self.notify(
+                        tf!(
+                            "Папка не найдена: {}",
+                            "Folder not found: {}",
+                            path.display()
+                        ),
+                        now,
+                    );
                 }
             }
             Action::Save => {
@@ -96,7 +129,13 @@ impl TrorApp {
                                 .or_else(|| self.remotes.iter().position(|r| !r.in_use()))
                                 .unwrap_or(0);
                             if let Err(e) = self.remotes[index].reopen(ctx, &profile, &file) {
-                                self.notify(format!("Не удалось открыть {file}: {e}"), now);
+                                self.notify(
+                                    tf!(
+                                        "Не удалось открыть {file}: {e}",
+                                        "Could not open {file}: {e}"
+                                    ),
+                                    now,
+                                );
                             } else if !self.host_shown(index) {
                                 dock::show(
                                     &mut self.dock,
@@ -112,13 +151,13 @@ impl TrorApp {
                         }
                     }
                 } else {
-                    self.notify("Закрытых вкладок нет", now);
+                    self.notify(tr!("Закрытых вкладок нет"), now);
                 }
             }
             Action::CloseAll => {
                 if self.docs.iter().any(|d| d.dirty()) {
                     self.notify(
-                        "Есть несохранённые вкладки — закройте их по отдельности",
+                        tr!("Есть несохранённые вкладки — закройте их по отдельности"),
                         now,
                     );
                     self.docs.retain(|d| d.dirty());
@@ -186,12 +225,21 @@ impl TrorApp {
                         "lower" => doc.transform(|t| t.to_lowercase()),
                         "trim" => {
                             let count = doc.trim_trailing();
-                            self.notify(format!("Пробелы в конце строк убраны: {count}"), now);
+                            self.notify(
+                                tf!(
+                                    "Пробелы в конце строк убраны: {count}",
+                                    "Trailing spaces removed: {count}"
+                                ),
+                                now,
+                            );
                         }
                         "bookmark" => doc.toggle_mark(),
                         "bookmark_next" | "bookmark_prev" => {
                             if !doc.jump_mark(command == "bookmark_next") {
-                                self.notify("Закладок нет: Ctrl+F2 ставит закладку на строку", now);
+                                self.notify(
+                                    tr!("Закладок нет: Ctrl+F2 ставит закладку на строку"),
+                                    now,
+                                );
                             }
                         }
                         "bookmark_clear" => doc.marks.clear(),
@@ -246,28 +294,31 @@ impl TrorApp {
             }
             Action::Preview => {
                 let url = match self.docs.get(self.active) {
-                    None => Err("Нет открытого файла".to_owned()),
+                    None => Err(tr!("Нет открытого файла").to_owned()),
                     Some(doc) => match (&doc.remote, &doc.path) {
                         (Some((profile, path)), _) => self.remotes[0].site_url(profile, path).ok_or(
-                            "В профиле хоста не указан адрес сайта — добавьте его в настройках профиля"
+                            tr!("В профиле хоста не указан адрес сайта — добавьте его в настройках профиля")
                                 .to_owned(),
                         ),
                         (None, Some(path)) => self.preview.url(path),
-                        _ => Err("Сначала сохраните файл на диск".to_owned()),
+                        _ => Err(tr!("Сначала сохраните файл на диск").to_owned()),
                     },
                 };
                 match url {
                     Ok(url) => match preview::open_url(&url) {
-                        Ok(()) => self.notify(format!("Открыто в браузере: {url}"), now),
-                        Err(e) => self.notify(format!("Предпросмотр: {e}"), now),
+                        Ok(()) => self.notify(
+                            tf!("Открыто в браузере: {url}", "Opened in the browser: {url}"),
+                            now,
+                        ),
+                        Err(e) => self.notify(tf!("Предпросмотр: {e}", "Preview: {e}"), now),
                     },
-                    Err(e) => self.notify(format!("Предпросмотр: {e}"), now),
+                    Err(e) => self.notify(tf!("Предпросмотр: {e}", "Preview: {e}"), now),
                 }
             }
             Action::CheckUpdates => {
                 self.update.manual = true;
                 self.update.rx = Some(crate::update::check());
-                self.notify("Проверяю обновления…", now);
+                self.notify(tr!("Проверяю обновления…"), now);
             }
             Action::FindFiles => {
                 self.open_search(false);
@@ -278,12 +329,18 @@ impl TrorApp {
                 if self.macros.recording {
                     self.macros.recording = false;
                     let count = self.macros.events.len();
-                    self.notify(format!("Макрос записан, действий: {count}"), now);
+                    self.notify(
+                        tf!(
+                            "Макрос записан, действий: {count}",
+                            "Macro recorded, actions: {count}"
+                        ),
+                        now,
+                    );
                 } else {
                     self.macros.events.clear();
                     self.macros.recording = true;
                     self.notify(
-                        "Идёт запись макроса — нажмите сочетание ещё раз, чтобы остановить",
+                        tr!("Идёт запись макроса — нажмите сочетание ещё раз, чтобы остановить"),
                         now,
                     );
                 }
@@ -291,9 +348,9 @@ impl TrorApp {
             }
             Action::MacroPlay => {
                 if self.macros.recording {
-                    self.notify("Сначала остановите запись макроса", now);
+                    self.notify(tr!("Сначала остановите запись макроса"), now);
                 } else if self.macros.events.is_empty() {
-                    self.notify("Макрос ещё не записан", now);
+                    self.notify(tr!("Макрос ещё не записан"), now);
                 } else {
                     self.macros.play += 1;
                     self.focus_editor = true;
@@ -301,7 +358,7 @@ impl TrorApp {
             }
             Action::MacroDialog(save) => {
                 if self.macros.recording || self.macros.events.is_empty() {
-                    self.notify("Макрос ещё не записан", now);
+                    self.notify(tr!("Макрос ещё не записан"), now);
                 } else {
                     self.macro_dialog = Some(if save {
                         MacroDialog::Save(String::new())
@@ -316,7 +373,7 @@ impl TrorApp {
                     if run {
                         self.macros.play += 1;
                     } else {
-                        self.notify(format!("Текущий макрос: {name}"), now);
+                        self.notify(tf!("Текущий макрос: {name}", "Current macro: {name}"), now);
                     }
                     self.focus_editor = true;
                 }
@@ -352,8 +409,11 @@ impl TrorApp {
                     .prepare()
                     .and_then(|dir| preview::open_folder(&dir).map(|()| dir));
                 match opened {
-                    Ok(dir) => self.notify(format!("Папка плагинов: {}", dir.display()), now),
-                    Err(e) => self.notify(format!("Папка плагинов: {e}"), now),
+                    Ok(dir) => self.notify(
+                        tf!("Папка плагинов: {}", "Plugins folder: {}", dir.display()),
+                        now,
+                    ),
+                    Err(e) => self.notify(tf!("Папка плагинов: {e}", "Plugins folder: {e}"), now),
                 }
             }
             Action::PluginsManage => self.manager = Some(Default::default()),
@@ -376,10 +436,15 @@ impl TrorApp {
                 }
                 self.notify(
                     if errors.is_empty() {
-                        format!("Плагинов загружено: {}", self.plugins.count())
+                        tf!(
+                            "Плагинов загружено: {}",
+                            "Plugins loaded: {}",
+                            self.plugins.count()
+                        )
                     } else {
-                        format!(
+                        tf!(
                             "Плагинов загружено: {}, с ошибками: {} (подробности в журнале)",
+                            "Plugins loaded: {}, with errors: {} (details in the log)",
                             self.plugins.count(),
                             errors.len()
                         )
@@ -483,6 +548,7 @@ impl TrorApp {
                 "fold_all" => Action::Fold(2),
                 "unfold_all" => Action::Fold(3),
                 "wrap" => Action::ToggleWrap,
+                "visual" => Action::ToggleVisual,
                 "theme" => Action::ToggleTheme,
                 "settings" => Action::Show(Pane::Settings),
                 "hosts" => Action::Toggle(Pane::Hosts),

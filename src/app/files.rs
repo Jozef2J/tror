@@ -56,7 +56,10 @@ impl TrorApp {
         crate::recover::clear(&dir);
         let _ = self.recovery.snapshot(&dir, &self.docs);
         self.toast = Some((
-            format!("Восстановлены несохранённые изменения, вкладок: {count}"),
+            tf!(
+                "Восстановлены несохранённые изменения, вкладок: {count}",
+                "Unsaved changes restored, tabs: {count}"
+            ),
             0.0,
         ));
     }
@@ -139,11 +142,21 @@ impl TrorApp {
                     let editor = crate::visual::Visual::new(doc);
                     self.visual.insert(doc.id, editor);
                     self.notify(
-                        format!("Документ Word «{stem}» открыт как HTML — сохраните его как .html"),
+                        tf!(
+                            "Документ Word «{stem}» открыт как HTML — сохраните его как .html",
+                            "Word document \"{stem}\" opened as HTML — save it as .html"
+                        ),
                         now,
                     );
                 }
-                Err(e) => self.notify(format!("Не удалось открыть {}: {e}", path.display()), now),
+                Err(e) => self.notify(
+                    tf!(
+                        "Не удалось открыть {}: {e}",
+                        "Could not open {}: {e}",
+                        path.display()
+                    ),
+                    now,
+                ),
             }
             return;
         }
@@ -176,7 +189,14 @@ impl TrorApp {
                 self.remember(path);
                 self.plugin_event("opened", self.active);
             }
-            Err(e) => self.notify(format!("Не удалось открыть {}: {e}", path.display()), now),
+            Err(e) => self.notify(
+                tf!(
+                    "Не удалось открыть {}: {e}",
+                    "Could not open {}: {e}",
+                    path.display()
+                ),
+                now,
+            ),
         }
     }
 
@@ -241,10 +261,19 @@ impl TrorApp {
                 .position(|r| r.serves(&profile))
                 .unwrap_or(0);
             let panel = &mut self.remotes[index];
-            let result = panel.upload(&ctx, &profile, &path, doc.encoded(), (doc.id, doc.version));
+            let data = doc.encoded();
+            doc.pending_hash = Some(crate::remote::content_hash(&data));
+            let result = panel.upload(
+                &ctx,
+                &profile,
+                &path,
+                data,
+                (doc.id, doc.version),
+                doc.server_hash,
+            );
             match result {
                 Ok(text) => self.notify(text, now),
-                Err(e) => self.notify(format!("Не сохранено: {e}"), now),
+                Err(e) => self.notify(tf!("Не сохранено: {e}", "Not saved: {e}"), now),
             }
             return false;
         }
@@ -255,12 +284,12 @@ impl TrorApp {
             Ok(()) => {
                 let title = doc.title();
                 self.preview.touch();
-                self.notify(format!("Сохранено: {title}"), now);
+                self.notify(tf!("Сохранено: {title}", "Saved: {title}"), now);
                 self.plugin_event("saved", index);
                 true
             }
             Err(e) => {
-                self.notify(format!("Ошибка сохранения: {e}"), now);
+                self.notify(tf!("Ошибка сохранения: {e}", "Save error: {e}"), now);
                 false
             }
         }
@@ -295,13 +324,13 @@ impl TrorApp {
                 doc.syntax = self.syntaxes.detect(Some(&path), &doc.first_line());
                 self.preview.touch();
                 self.remember(&path);
-                self.notify(format!("Сохранено: {}", path.display()), now);
+                self.notify(tf!("Сохранено: {}", "Saved: {}", path.display()), now);
                 self.plugin_event("saved", index);
                 true
             }
             Err(e) => {
                 self.docs[index].path = previous;
-                self.notify(format!("Ошибка сохранения: {e}"), now);
+                self.notify(tf!("Ошибка сохранения: {e}", "Save error: {e}"), now);
                 false
             }
         }

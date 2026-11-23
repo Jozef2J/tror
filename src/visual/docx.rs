@@ -85,11 +85,9 @@ fn on(attrs: &str) -> bool {
 struct Format {
     bold: bool,
     italic: bool,
-    underline: bool,
     strike: bool,
     sup: bool,
     sub: bool,
-    color: Option<String>,
     link: Option<String>,
 }
 
@@ -104,17 +102,11 @@ impl Format {
         if let Some(link) = &self.link {
             tag(&format!("<a href=\"{}\">", escape_attr(link)), "</a>");
         }
-        if let Some(color) = &self.color {
-            tag(&format!("<span style=\"color: #{color};\">"), "</span>");
-        }
         if self.bold {
             tag("<strong>", "</strong>");
         }
         if self.italic {
             tag("<em>", "</em>");
-        }
-        if self.underline {
-            tag("<u>", "</u>");
         }
         if self.strike {
             tag("<s>", "</s>");
@@ -261,17 +253,11 @@ fn paragraph(t: &[Tok], i: &mut usize, ctx: &Ctx) -> Block {
             Tok::Open(name, a, _) if in_run_props => match *name {
                 "w:b" => format.bold = on(a),
                 "w:i" => format.italic = on(a),
-                "w:u" => format.underline = on(a),
                 "w:strike" | "w:dstrike" => format.strike = on(a),
                 "w:vertAlign" => {
                     let v = attr(a, "w:val").unwrap_or_default();
                     format.sup = v == "superscript";
                     format.sub = v == "subscript";
-                }
-                "w:color" => {
-                    format.color = attr(a, "w:val").filter(|v| {
-                        v.len() == 6 && v != "000000" && v.chars().all(|c| c.is_ascii_hexdigit())
-                    })
                 }
                 _ => {}
             },
@@ -600,7 +586,7 @@ pub fn to_html(path: &Path) -> Result<String, String> {
             .find(|(n, _)| n == name)
             .map(|(_, data)| String::from_utf8_lossy(data).into_owned())
     };
-    let document = text("word/document.xml").ok_or("это не документ Word (.docx)")?;
+    let document = text("word/document.xml").ok_or(tr!("это не документ Word (.docx)"))?;
     let mut rels = HashMap::new();
     if let Some(xml) = text("word/_rels/document.xml.rels") {
         for tok in tokens(&xml) {

@@ -73,7 +73,7 @@ pub fn pattern(query: &str, regex: bool, case: bool, word: bool) -> Result<Regex
         .case_insensitive(!case)
         .multi_line(true)
         .build()
-        .map_err(|e| format!("Ошибка в выражении: {e}"))
+        .map_err(|e| tf!("Ошибка в выражении: {e}", "Error in the expression: {e}"))
 }
 
 fn wanted(name: &str, masks: &[String]) -> bool {
@@ -194,7 +194,7 @@ impl FindFiles {
                 return;
             }
         };
-        self.note = "Идёт поиск…".to_owned();
+        self.note = tr!("Идёт поиск…").to_owned();
         self.searched = self.query.clone();
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -240,14 +240,15 @@ impl FindFiles {
         let (with, literal, ctx) = (self.replace.clone(), !self.regex, ctx.clone());
         let (tx, rx) = channel();
         self.rx = Some(rx);
-        self.note = "Идёт замена…".to_owned();
+        self.note = tr!("Идёт замена…").to_owned();
         self.hits.clear();
         std::thread::spawn(move || {
             let (mut files, mut count, mut failed) = (0, 0, Vec::new());
             for path in paths {
                 if skip.contains(&path) {
-                    failed.push(format!(
+                    failed.push(tf!(
                         "{} — открыт с несохранёнными правками",
+                        "{} — open with unsaved edits",
                         path.display()
                     ));
                     continue;
@@ -293,15 +294,20 @@ impl FindFiles {
                     let found: std::collections::BTreeSet<&PathBuf> =
                         self.hits.iter().map(|h| &h.path).collect();
                     self.note = if self.hits.is_empty() {
-                        format!("Ничего не найдено, просмотрено файлов: {files}")
+                        tf!(
+                            "Ничего не найдено, просмотрено файлов: {files}",
+                            "Nothing found, files scanned: {files}"
+                        )
                     } else if capped {
-                        format!(
+                        tf!(
                             "Показаны первые {} строк — уточните запрос",
+                            "First {} lines shown — refine the query",
                             self.hits.len()
                         )
                     } else {
-                        format!(
+                        tf!(
                             "Строк: {}, файлов: {} из {files}",
+                            "Lines: {}, files: {} of {files}",
                             self.hits.len(),
                             found.len()
                         )
@@ -313,10 +319,16 @@ impl FindFiles {
                     count,
                     failed,
                 } => {
-                    self.note = format!("Заменено: {count}, файлов: {files}");
+                    self.note = tf!(
+                        "Заменено: {count}, файлов: {files}",
+                        "Replaced: {count}, files: {files}"
+                    );
                     if !failed.is_empty() {
-                        self.note
-                            .push_str(&format!(". Пропущено: {}", failed.join("; ")));
+                        self.note.push_str(&tf!(
+                            ". Пропущено: {}",
+                            ". Skipped: {}",
+                            failed.join("; ")
+                        ));
                     }
                     finished = true;
                     changed = true;
@@ -346,17 +358,17 @@ impl FindFiles {
         let mut go = false;
         use crate::widgets::{FORM_ROW, form_field, form_row, toggle};
         ui.spacing_mut().item_spacing.y = 8.0;
-        form_row(ui, pal, "Найти", |ui| {
+        form_row(ui, pal, tr!("Найти"), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             let width = crate::widgets::field_width(ui, 3.0 * 32.0 + 34.0);
-            let query =
-                ui.add(form_field(&mut self.query, "текст или выражение").desired_width(width));
+            let query = ui
+                .add(form_field(&mut self.query, tr!("текст или выражение")).desired_width(width));
             if std::mem::take(&mut self.focus) {
                 query.request_focus();
             }
             go |= query.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if crate::app::icon_button(ui, pal, crate::app::Icon::Close)
-                .on_hover_text("Очистить поиск")
+                .on_hover_text(tr!("Очистить поиск"))
                 .clicked()
             {
                 self.cancel();
@@ -368,27 +380,27 @@ impl FindFiles {
                 self.focus = true;
             }
             ui.add_space(6.0);
-            toggle(ui, pal, &mut self.case, "Aa", "Учитывать регистр");
-            toggle(ui, pal, &mut self.word, "ab", "Слово целиком");
-            toggle(ui, pal, &mut self.regex, ".*", "Регулярное выражение");
+            toggle(ui, pal, &mut self.case, "Aa", tr!("Учитывать регистр"));
+            toggle(ui, pal, &mut self.word, "ab", tr!("Слово целиком"));
+            toggle(ui, pal, &mut self.regex, ".*", tr!("Регулярное выражение"));
         });
-        form_row(ui, pal, "Заменить на", |ui| {
+        form_row(ui, pal, tr!("Заменить на"), |ui| {
             let hint = if self.regex { "$1, ${name}" } else { "" };
             ui.add(
                 form_field(&mut self.replace, hint)
                     .desired_width(crate::widgets::field_width(ui, 0.0)),
             );
         });
-        form_row(ui, pal, "Папка", |ui| {
+        form_row(ui, pal, tr!("Папка"), |ui| {
             let hint = project
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "выберите папку".into());
+                .unwrap_or_else(|| tr!("выберите папку").into());
             ui.add(
                 form_field(&mut self.dir, hint)
                     .desired_width(crate::widgets::field_width(ui, 94.0)),
             );
             if ui
-                .add(Button::new("Выбрать…").min_size(egui::vec2(88.0, FORM_ROW)))
+                .add(Button::new(tr!("Выбрать…")).min_size(egui::vec2(88.0, FORM_ROW)))
                 .clicked()
             {
                 let mut dialog = rfd::FileDialog::new();
@@ -400,10 +412,13 @@ impl FindFiles {
                 }
             }
         });
-        form_row(ui, pal, "Файлы", |ui| {
+        form_row(ui, pal, tr!("Файлы"), |ui| {
             ui.add(
-                form_field(&mut self.mask, "все; или маски через запятую: *.php, *.js")
-                    .desired_width(crate::widgets::field_width(ui, 0.0)),
+                form_field(
+                    &mut self.mask,
+                    tr!("все; или маски через запятую: *.php, *.js"),
+                )
+                .desired_width(crate::widgets::field_width(ui, 0.0)),
             );
         });
         ui.add_space(10.0);
@@ -412,18 +427,29 @@ impl FindFiles {
             let size = egui::vec2(0.0, FORM_ROW);
             let ready = !self.query.is_empty() && !busy && root.is_some();
             go |= ui
-                .add_enabled(ready, crate::widgets::primary("Найти", pal).min_size(size))
+                .add_enabled(
+                    ready,
+                    crate::widgets::primary(tr!("Найти"), pal).min_size(size),
+                )
                 .lit(ui)
                 .clicked();
-            if busy && ui.add(Button::new("Остановить").min_size(size)).clicked() {
+            if busy
+                && ui
+                    .add(Button::new(tr!("Остановить")).min_size(size))
+                    .clicked()
+            {
                 self.cancel();
-                self.note = "Остановлено".to_owned();
+                self.note = tr!("Остановлено").to_owned();
             }
             let fresh = !self.hits.is_empty() && self.searched == self.query && !busy;
             if self.confirm {
                 let paths: std::collections::BTreeSet<&PathBuf> =
                     self.hits.iter().map(|h| &h.path).collect();
-                let label = format!("Да, заменить в {} файлах", paths.len());
+                let label = tf!(
+                    "Да, заменить в {} файлах",
+                    "Yes, replace in {} files",
+                    paths.len()
+                );
                 if ui
                     .add(
                         Button::new(RichText::new(label).color(Color32::WHITE))
@@ -436,15 +462,15 @@ impl FindFiles {
                     let dirty = self.dirty.clone();
                     self.start_replace(dirty, ui.ctx());
                 }
-                if ui.add(Button::new("Отмена")).clicked() {
+                if ui.add(Button::new(tr!("Отмена"))).clicked() {
                     self.confirm = false;
                 }
             } else if ui
                 .add_enabled(
                     fresh,
-                    Button::new("Заменить во всех найденных…").min_size(size),
+                    Button::new(tr!("Заменить во всех найденных…")).min_size(size),
                 )
-                .on_disabled_hover_text("Сначала выполните поиск")
+                .on_disabled_hover_text(tr!("Сначала выполните поиск"))
                 .clicked()
             {
                 self.confirm = true;
@@ -452,13 +478,15 @@ impl FindFiles {
         });
         if self.confirm {
             ui.label(
-                RichText::new("Файлы будут перезаписаны на диске. Отменить замену нельзя.")
-                    .color(pal.warn),
+                RichText::new(tr!(
+                    "Файлы будут перезаписаны на диске. Отменить замену нельзя."
+                ))
+                .color(pal.warn),
             );
         }
         let Some(root) = root else {
             ui.label(
-                RichText::new("Откройте папку проекта или выберите папку для поиска.")
+                RichText::new(tr!("Откройте папку проекта или выберите папку для поиска."))
                     .color(pal.subtext),
             );
             return out;
@@ -467,7 +495,7 @@ impl FindFiles {
             if root.is_dir() {
                 self.start(&root, ui.ctx());
             } else {
-                self.note = "Папка не найдена".to_owned();
+                self.note = tr!("Папка не найдена").to_owned();
             }
         }
         if !self.note.is_empty() {

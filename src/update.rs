@@ -180,11 +180,11 @@ fn fetch_to(release: &Release, target: &Path) -> Result<PathBuf, String> {
     let (name, url) = release
         .file
         .as_ref()
-        .ok_or("в выпуске нет файла для этой системы")?;
+        .ok_or(tr!("в выпуске нет файла для этой системы"))?;
     let sums_url = release
         .sums
         .as_ref()
-        .ok_or("в выпуске нет файла контрольных сумм")?;
+        .ok_or(tr!("в выпуске нет файла контрольных сумм"))?;
     let agent = agent();
     let sums = agent
         .get(sums_url)
@@ -193,7 +193,7 @@ fn fetch_to(release: &Release, target: &Path) -> Result<PathBuf, String> {
         .body_mut()
         .read_to_string()
         .map_err(|e| e.to_string())?;
-    let expected = expected_sum(&sums, name).ok_or("нет контрольной суммы для файла")?;
+    let expected = expected_sum(&sums, name).ok_or(tr!("нет контрольной суммы для файла"))?;
     let mut data = Vec::new();
     agent
         .get(url)
@@ -209,7 +209,7 @@ fn fetch_to(release: &Release, target: &Path) -> Result<PathBuf, String> {
         .map(|b| format!("{b:02x}"))
         .collect();
     if actual != expected {
-        return Err("контрольная сумма скачанного файла не совпала".into());
+        return Err(tr!("контрольная сумма скачанного файла не совпала").into());
     }
     std::fs::write(target, &data).map_err(|e| e.to_string())?;
     Ok(target.to_path_buf())

@@ -73,15 +73,15 @@ pub fn formats() -> Vec<Format> {
 }
 
 fn target(paths: &[PathBuf], format: Format) -> Result<PathBuf, String> {
-    let first = paths.first().ok_or("нечего архивировать")?;
-    let dir = first.parent().ok_or("нет родительской папки")?;
+    let first = paths.first().ok_or(tr!("нечего архивировать"))?;
+    let dir = first.parent().ok_or(tr!("нет родительской папки"))?;
     let base = if paths.len() == 1 {
         first
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "архив".into())
+            .unwrap_or_else(|| tr!("архив").into())
     } else {
-        "архив".into()
+        tr!("архив").into()
     };
     let ext = format.ext();
     let first_try = dir.join(format!("{base}{ext}"));
@@ -91,7 +91,7 @@ fn target(paths: &[PathBuf], format: Format) -> Result<PathBuf, String> {
     (2..)
         .map(|n| dir.join(format!("{base} ({n}){ext}")))
         .find(|p| !p.exists())
-        .ok_or_else(|| "не удалось подобрать имя".into())
+        .ok_or_else(|| tr!("не удалось подобрать имя").into())
 }
 
 fn walk(root: &Path, base: &Path, out: &mut Vec<(PathBuf, String, bool)>) -> std::io::Result<()> {
@@ -150,10 +150,10 @@ fn zip(paths: &[PathBuf], to: &Path) -> Result<(), String> {
             (8u16, encoder.finish().map_err(|e| e.to_string())?)
         };
         if data.len() as u64 >= u32::MAX as u64 || offset >= u32::MAX as u64 {
-            return Err("ZIP больше 4 ГБ не поддерживается — выберите TAR.GZ".into());
+            return Err(tr!("ZIP больше 4 ГБ не поддерживается — выберите TAR.GZ").into());
         }
         if count == u16::MAX {
-            return Err("слишком много файлов для ZIP — выберите TAR.GZ".into());
+            return Err(tr!("слишком много файлов для ZIP — выберите TAR.GZ").into());
         }
         let name_bytes = name.as_bytes();
         let header = |sig: u32, central_dir: bool| {
@@ -273,8 +273,9 @@ fn tar_gz(paths: &[PathBuf], to: &Path) -> Result<(), String> {
             std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let copied = std::io::copy(&mut source, &mut out).map_err(err)?;
         if copied != size {
-            return Err(format!(
+            return Err(tf!(
                 "{}: файл изменился во время архивирования",
+                "{}: the file changed while archiving",
                 path.display()
             ));
         }
@@ -286,11 +287,11 @@ fn tar_gz(paths: &[PathBuf], to: &Path) -> Result<(), String> {
 }
 
 fn external(tool: PathBuf, args: &[&str], paths: &[PathBuf], to: &Path) -> Result<(), String> {
-    let dir = paths[0].parent().ok_or("нет родительской папки")?;
+    let dir = paths[0].parent().ok_or(tr!("нет родительской папки"))?;
     let mut command = Command::new(tool);
     command.current_dir(dir).args(args).arg(to);
     for path in paths {
-        command.arg(path.file_name().ok_or("пустое имя")?);
+        command.arg(path.file_name().ok_or(tr!("пустое имя"))?);
     }
     #[cfg(windows)]
     {
@@ -303,7 +304,7 @@ fn external(tool: PathBuf, args: &[&str], paths: &[PathBuf], to: &Path) -> Resul
     } else {
         let text = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         Err(if text.is_empty() {
-            format!("код завершения {}", output.status)
+            tf!("код завершения {}", "exit code {}", output.status)
         } else {
             text
         })
@@ -316,13 +317,13 @@ pub fn create(paths: &[PathBuf], format: Format) -> Result<PathBuf, String> {
         Format::Zip => zip(paths, &to),
         Format::TarGz => tar_gz(paths, &to),
         Format::SevenZip => external(
-            seven_zip().ok_or("7-Zip не найден")?,
+            seven_zip().ok_or(tr!("7-Zip не найден"))?,
             &["a", "-y"],
             paths,
             &to,
         ),
         Format::Rar => external(
-            winrar().ok_or("WinRAR не найден")?,
+            winrar().ok_or(tr!("WinRAR не найден"))?,
             &["a", "-r", "-y"],
             paths,
             &to,
@@ -339,7 +340,7 @@ pub fn remote_command(dir: &str, names: &[String], zip: bool) -> String {
     let base = if names.len() == 1 {
         names[0].clone()
     } else {
-        "архив".into()
+        tr!("архив").into()
     };
     let ext = if zip { ".zip" } else { ".tar.gz" };
     let list: Vec<String> = names.iter().map(|n| quote(n)).collect();

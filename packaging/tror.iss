@@ -27,17 +27,43 @@ RestartApplications=no
 WizardStyle=modern
 
 [Languages]
-Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
+Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
+
+[CustomMessages]
+ru.MenuTask=Пункт «Открыть в TrorPad» в меню файлов и папок
+en.MenuTask="Open in TrorPad" entry in the file and folder menu
+ru.AssocTask=Открывать в TrorPad по умолчанию
+en.AssocTask=Open with TrorPad by default
+ru.AssocGroup=Ассоциации файлов:
+en.AssocGroup=File associations:
+ru.AssocText=Текст и журналы
+en.AssocText=Text and logs
+ru.AssocWeb=Веб
+en.AssocWeb=Web
+ru.AssocPhp=PHP и шаблоны
+en.AssocPhp=PHP and templates
+ru.AssocCode=Скрипты и данные
+en.AssocCode=Scripts and data
+ru.OpenIn=Открыть в TrorPad
+en.OpenIn=Open in TrorPad
+ru.FileType=Файл TrorPad
+en.FileType=TrorPad file
+ru.AskSettings=Удалить настройки TrorPad (тема, раскладка панелей, недавние файлы, сочетания клавиш)?
+en.AskSettings=Delete TrorPad settings (theme, panel layout, recent files, shortcuts)?
+ru.AskProfiles=Удалить профили подключений (хосты SFTP/FTP, базы данных, консоль) и сохранённые пароли?
+en.AskProfiles=Delete connection profiles (SFTP/FTP hosts, databases, console) and saved passwords?
+ru.AskData=Удалить остальные данные (история запросов, несохранённые правки, резервные копии, плагины)?
+en.AskData=Delete other data (query history, unsaved edits, backups, plugins)?
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; Flags: unchecked
-Name: "menu"; Description: "Пункт «Открыть в TrorPad» в меню файлов и папок"
-Name: "assoc"; Description: "Открывать в TrorPad по умолчанию"; GroupDescription: "Ассоциации файлов:"; Flags: unchecked
-Name: "assoc\text"; Description: "Текст и журналы (.txt, .log, .md, .ini, .cfg, .conf, .env)"
-Name: "assoc\web"; Description: "Веб (.html, .htm, .css, .scss, .js, .ts, .json, .xml, .svg)"
-Name: "assoc\php"; Description: "PHP и шаблоны (.php, .phtml, .tpl, .twig)"
-Name: "assoc\code"; Description: "Скрипты и данные (.sh, .py, .sql, .yml, .yaml, .csv)"
+Name: "menu"; Description: "{cm:MenuTask}"
+Name: "assoc"; Description: "{cm:AssocTask}"; GroupDescription: "{cm:AssocGroup}"; Flags: unchecked
+Name: "assoc\text"; Description: "{cm:AssocText} (.txt, .log, .md, .ini, .cfg, .conf, .env)"
+Name: "assoc\web"; Description: "{cm:AssocWeb} (.html, .htm, .css, .scss, .js, .ts, .json, .xml, .svg)"
+Name: "assoc\php"; Description: "{cm:AssocPhp} (.php, .phtml, .tpl, .twig)"
+Name: "assoc\code"; Description: "{cm:AssocCode} (.sh, .py, .sql, .yml, .yaml, .csv)"
 
 [InstallDelete]
 Type: files; Name: "{app}\tror.exe"
@@ -55,14 +81,14 @@ Name: "{autodesktop}\TrorPad"; Filename: "{app}\trorpad.exe"; Tasks: desktopicon
 [Registry]
 Root: HKA; Subkey: "Software\Classes\*\shell\Tror"; Flags: deletekey dontcreatekey
 Root: HKA; Subkey: "Software\Classes\Directory\shell\Tror"; Flags: deletekey dontcreatekey
-Root: HKA; Subkey: "Software\Classes\*\shell\TrorPad"; ValueType: string; ValueData: "Открыть в TrorPad"; Flags: uninsdeletekey; Tasks: menu
+Root: HKA; Subkey: "Software\Classes\*\shell\TrorPad"; ValueType: string; ValueData: "{cm:OpenIn}"; Flags: uninsdeletekey; Tasks: menu
 Root: HKA; Subkey: "Software\Classes\*\shell\TrorPad"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\trorpad.exe"; Tasks: menu
 Root: HKA; Subkey: "Software\Classes\*\shell\TrorPad\command"; ValueType: string; ValueData: """{app}\trorpad.exe"" ""%1"""; Tasks: menu
-Root: HKA; Subkey: "Software\Classes\Directory\shell\TrorPad"; ValueType: string; ValueData: "Открыть в TrorPad"; Flags: uninsdeletekey; Tasks: menu
+Root: HKA; Subkey: "Software\Classes\Directory\shell\TrorPad"; ValueType: string; ValueData: "{cm:OpenIn}"; Flags: uninsdeletekey; Tasks: menu
 Root: HKA; Subkey: "Software\Classes\Directory\shell\TrorPad"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\trorpad.exe"; Tasks: menu
 Root: HKA; Subkey: "Software\Classes\Directory\shell\TrorPad\command"; ValueType: string; ValueData: """{app}\trorpad.exe"" ""%1"""; Tasks: menu
 
-Root: HKA; Subkey: "Software\Classes\TrorPad.File"; ValueType: string; ValueData: "Файл TrorPad"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\TrorPad.File"; ValueType: string; ValueData: "{cm:FileType}"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\TrorPad.File\DefaultIcon"; ValueType: string; ValueData: "{app}\trorpad.exe,0"
 Root: HKA; Subkey: "Software\Classes\TrorPad.File\shell\open\command"; ValueType: string; ValueData: """{app}\trorpad.exe"" ""%1"""
 Root: HKA; Subkey: "Software\Classes\Applications\trorpad.exe"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "TrorPad"; Flags: uninsdeletekey
@@ -170,9 +196,9 @@ begin
   Dir := ExpandConstant('{userappdata}\Tror\data');
   if not DirExists(Dir) then
     Exit;
-  Settings := MsgBox('Удалить настройки TrorPad (тема, раскладка панелей, недавние файлы, сочетания клавиш)?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
-  Profiles := MsgBox('Удалить профили подключений (хосты SFTP/FTP, базы данных, консоль) и сохранённые пароли?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
-  Data := MsgBox('Удалить остальные данные (история запросов, несохранённые правки, плагины)?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+  Settings := MsgBox(CustomMessage('AskSettings'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+  Profiles := MsgBox(CustomMessage('AskProfiles'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+  Data := MsgBox(CustomMessage('AskData'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
   if Profiles then
   begin
     Exec(ExpandConstant('{app}\trorpad.exe'), '--forget-passwords', '', SW_HIDE, ewWaitUntilTerminated, Code);
@@ -185,6 +211,7 @@ begin
     DeleteFile(Dir + '\db_history.json');
     DelTree(Dir + '\recover', True, True, True);
     DelTree(Dir + '\plugins', True, True, True);
+    DelTree(Dir + '\backups', True, True, True);
   end;
   if Settings and Profiles and Data then
     DelTree(ExpandConstant('{userappdata}\Tror'), True, True, True);

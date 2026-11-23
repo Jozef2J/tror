@@ -19,11 +19,9 @@ const KEEP: &[&str] = &[
     "strong",
     "i",
     "em",
-    "u",
     "s",
     "strike",
     "del",
-    "ins",
     "sub",
     "sup",
     "a",
@@ -105,36 +103,7 @@ fn fragment(html: &str) -> &str {
     html
 }
 
-fn plain_color(v: &str) -> bool {
-    let v = v.trim().to_ascii_lowercase().replace(' ', "");
-    matches!(
-        v.as_str(),
-        "black"
-            | "windowtext"
-            | "auto"
-            | "#000"
-            | "#000000"
-            | "rgb(0,0,0)"
-            | "inherit"
-            | "initial"
-            | "transparent"
-            | "white"
-            | "window"
-            | "#fff"
-            | "#ffffff"
-            | "rgb(255,255,255)"
-            | "rgba(0,0,0,0)"
-            | "none"
-    )
-}
-
-struct Clean {
-    style: Vec<(String, String)>,
-    wrap: Vec<&'static str>,
-}
-
-fn clean_style(raw: Option<&str>) -> Clean {
-    let mut style = Vec::new();
+fn clean_style(raw: Option<&str>) -> Vec<&'static str> {
     let mut wrap = Vec::new();
     for part in raw.unwrap_or_default().split(';') {
         let Some((k, v)) = part.split_once(':') else {
@@ -150,42 +119,15 @@ fn clean_style(raw: Option<&str>) -> Clean {
                 wrap.push("strong")
             }
             "font-style" if lv == "italic" || lv == "oblique" => wrap.push("em"),
-            "text-decoration" | "text-decoration-line" => {
-                if lv.contains("underline") {
-                    wrap.push("u");
-                }
-                if lv.contains("line-through") {
-                    wrap.push("s");
-                }
+            "text-decoration" | "text-decoration-line" if lv.contains("line-through") => {
+                wrap.push("s")
             }
             "vertical-align" if lv == "super" => wrap.push("sup"),
             "vertical-align" if lv == "sub" => wrap.push("sub"),
-            "text-align" if !matches!(lv.as_str(), "left" | "start" | "initial" | "inherit") => {
-                style.push((k, v))
-            }
-            "color" | "background" | "background-color"
-                if !plain_color(&v) && !lv.contains("mso") =>
-            {
-                style.push((
-                    if k == "background" {
-                        "background-color".into()
-                    } else {
-                        k
-                    },
-                    v,
-                ))
-            }
             _ => {}
         }
     }
-    Clean { style, wrap }
-}
-
-fn style_text(style: &[(String, String)]) -> Option<String> {
-    (!style.is_empty()).then(|| {
-        let parts: Vec<String> = style.iter().map(|(k, v)| format!("{k}: {v}")).collect();
-        format!("{};", parts.join("; "))
-    })
+    wrap
 }
 
 fn open_tag(tag: &str, attrs: &Attrs) -> String {
@@ -426,50 +368,20 @@ pub fn clean(source: &str) -> String {
                     kept.set(key, Some(v.to_owned()));
                 }
             }
-            let mut wrap = clean.wrap;
-            let mut style = clean.style;
+            let mut wrap = clean;
             let mut tag = name.clone();
             match name.as_str() {
-                "span" => {
-                    if style.is_empty() {
-                        tag.clear();
-                    }
-                }
+                "span" => tag.clear(),
                 "b" | "strong"
                     if attrs
                         .style("font-weight")
                         .is_some_and(|w| w == "normal" || w == "400") =>
                 {
                     tag.clear();
-                    style.clear();
                 }
                 "a" if kept.get("href").is_none() && kept.get("name").is_none() => tag.clear(),
-                "b" | "strong" | "i" | "em" | "u" | "s" | "strike" | "del" | "ins" | "sub"
-                | "sup" => {
-                    style.retain(|(k, _)| k != "text-align");
-                }
+                "b" | "strong" | "i" | "em" | "s" | "strike" | "del" | "sub" | "sup" => {}
                 _ => wrap.clear(),
-            }
-            if !matches!(
-                name.as_str(),
-                "span"
-                    | "p"
-                    | "h1"
-                    | "h2"
-                    | "h3"
-                    | "h4"
-                    | "h5"
-                    | "h6"
-                    | "td"
-                    | "th"
-                    | "li"
-                    | "blockquote"
-                    | "div"
-            ) {
-                style.retain(|(k, _)| k == "color" || k == "background-color");
-            }
-            if !tag.is_empty() {
-                kept.set("style", style_text(&style));
             }
             if BLOCK.contains(&name.as_str()) {
                 out.before_content();
@@ -561,5 +473,14 @@ mod tests {
         let g = r#"<meta charset="utf-8"><b style="font-weight:normal;" id="docs-internal-guid-1"><p dir="ltr" style="line-height:1.38;margin-top:0pt"><span style="font-size:11pt;font-family:Arial;color:#000000;font-weight:700;font-style:normal">Жирный</span><span style="font-weight:400;font-style:italic"> курсив</span></p></b>"#;
         let html = clean(g);
         assert_eq!(html, "<p><strong>Жирный</strong><em> курсив</em></p>");
+    }
+
+    #[test]
+    fn text_formatting_is_dropped() {
+        let w = r#"<h2 style="color:red;text-align:center">Заголовок</h2><p style="text-align:center"><span style="color:#ff0000;background:yellow;font-family:Arial;font-size:20pt;text-decoration:underline">Красный</span> <u>подчёркнутый</u> <font color="blue">синий</font> <a href="https://x.y" style="color:green">ссылка</a></p><ul><li style="color:red">пункт</li></ul>"#;
+        assert_eq!(
+            clean(w),
+            r#"<h2>Заголовок</h2><p>Красный подчёркнутый синий <a href="https://x.y">ссылка</a></p><ul><li>пункт</li></ul>"#
+        );
     }
 }

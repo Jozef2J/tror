@@ -173,7 +173,7 @@ pub fn port_field(ui: &mut Ui, port: &mut u16, width: f32) -> egui::Response {
         TextEdit::singleline(&mut text)
             .desired_width(width)
             .char_limit(5)
-            .hint_text("порт"),
+            .hint_text(tr!("порт")),
     );
     let digits: String = text.chars().filter(char::is_ascii_digit).collect();
     if digits != text {
@@ -452,12 +452,15 @@ pub fn perm_grid(ui: &mut Ui, pal: &Palette, mode: &mut u32, octal: &mut String)
         .spacing([18.0, 6.0])
         .show(ui, |ui| {
             ui.label("");
-            for label in ["чтение", "запись", "выполнение"] {
+            for label in [tr!("чтение"), tr!("запись"), tr!("выполнение")] {
                 ui.label(RichText::new(label).small().color(pal.subtext));
             }
             ui.end_row();
-            for (shift, who) in [(6, "Владелец"), (3, "Группа"), (0, "Остальные")]
-            {
+            for (shift, who) in [
+                (6, tr!("Владелец")),
+                (3, tr!("Группа")),
+                (0, tr!("Остальные")),
+            ] {
                 ui.label(who);
                 for bit in [4u32, 2, 1] {
                     let mask = bit << shift;
@@ -478,7 +481,7 @@ pub fn perm_grid(ui: &mut Ui, pal: &Palette, mode: &mut u32, octal: &mut String)
         *octal = format!("{:03o}", *mode & 0o7777);
     }
     ui.horizontal(|ui| {
-        ui.label("Числом");
+        ui.label(tr!("Числом"));
         let field = ui.add(
             TextEdit::singleline(octal)
                 .desired_width(60.0)
@@ -845,7 +848,7 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3], sort: &mut So
         if ui
             .add_enabled(
                 sort.key != SortKey::None,
-                egui::Button::new("Сбросить сортировку"),
+                egui::Button::new(tr!("Сбросить сортировку")),
             )
             .clicked()
         {
@@ -860,9 +863,9 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3], sort: &mut So
     let mut right = rect.right() - 6.0;
     let mut name_right = rect.right();
     for (index, label, key) in [
-        (2, "Изменён", SortKey::Date),
-        (1, "Права", SortKey::Perm),
-        (0, "Размер", SortKey::Size),
+        (2, tr!("Изменён"), SortKey::Date),
+        (1, tr!("Права"), SortKey::Perm),
+        (0, tr!("Размер"), SortKey::Size),
     ] {
         let width = fit[index];
         if width <= 0.0 {
@@ -887,7 +890,7 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3], sort: &mut So
             if ui
                 .add_enabled(
                     sort.key != SortKey::None,
-                    egui::Button::new("Сбросить сортировку"),
+                    egui::Button::new(tr!("Сбросить сортировку")),
                 )
                 .clicked()
             {
@@ -973,7 +976,7 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3], sort: &mut So
     } else {
         pal.faint
     };
-    let galley = painter.layout_no_wrap("Имя".to_owned(), font, color);
+    let galley = painter.layout_no_wrap(tr!("Имя").to_owned(), font, color);
     let width = galley.size().x;
     painter.galley(
         egui::pos2(rect.left() + 6.0, rect.center().y - galley.size().y / 2.0),
@@ -992,7 +995,7 @@ pub fn column_header(ui: &mut Ui, pal: &Palette, shown: [bool; 3], sort: &mut So
         if ui
             .add_enabled(
                 sort.key != SortKey::None,
-                egui::Button::new("Сбросить сортировку"),
+                egui::Button::new(tr!("Сбросить сортировку")),
             )
             .clicked()
         {
@@ -1052,7 +1055,7 @@ pub fn profile_list(
     let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
     let field = ui.add(
         TextEdit::singleline(&mut filter)
-            .hint_text("Поиск…")
+            .hint_text(tr!("Поиск…"))
             .margin(egui::Margin::symmetric(8, 4))
             .min_size(egui::vec2(0.0, 26.0))
             .align(egui::Align2::LEFT_CENTER)
@@ -1090,7 +1093,7 @@ pub fn profile_list(
         .auto_shrink([false, true])
         .show(ui, |ui| {
             if shown.is_empty() {
-                ui.weak("Ничего не найдено");
+                ui.weak(tr!("Ничего не найдено"));
             }
             for index in shown {
                 let (name, kind) = &names[index];
@@ -1193,16 +1196,16 @@ pub fn profile_context(
 
 pub fn profile_menu(ui: &mut Ui, id: egui::Id, index: usize, name: &str) -> Option<ProfileAction> {
     let mut action = None;
-    if ui.button("Редактировать…").clicked() {
+    if ui.button(tr!("Редактировать…")).clicked() {
         action = Some(ProfileAction::Edit(index));
         ui.close();
     }
-    if ui.button("Переименовать…").clicked() {
+    if ui.button(tr!("Переименовать…")).clicked() {
         let ask = ProfileAsk::Rename(index, name.to_owned());
         ui.data_mut(|d| d.insert_temp(id.with("ask"), ask));
         ui.close();
     }
-    if ui.button("Удалить…").clicked() {
+    if ui.button(tr!("Удалить…")).clicked() {
         ui.data_mut(|d| d.insert_temp(id.with("ask"), ProfileAsk::Delete(index)));
         ui.close();
     }
@@ -1225,7 +1228,7 @@ pub fn profile_dialogs(
             match &mut ask {
                 ProfileAsk::Rename(index, name) => {
                     ui.label(
-                        RichText::new("Переименовать профиль")
+                        RichText::new(tr!("Переименовать профиль"))
                             .size(15.5)
                             .color(pal.text),
                     );
@@ -1235,28 +1238,35 @@ pub fn profile_dialogs(
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        let ok = ui.add(primary("Переименовать", pal)).clicked() || enter;
+                        let ok = ui.add(primary(tr!("Переименовать"), pal)).clicked() || enter;
                         if ok && !name.trim().is_empty() {
                             action = Some(ProfileAction::Rename(*index, name.trim().to_owned()));
                         }
-                        if ui.add(secondary("Отмена", pal)).clicked() {
+                        if ui.add(secondary(tr!("Отмена"), pal)).clicked() {
                             done = true;
                         }
                     });
                 }
                 ProfileAsk::Delete(index) => {
                     let title = names.get(*index).map(|n| n.0.clone()).unwrap_or_default();
-                    ui.label(RichText::new("Удалить профиль?").size(15.5).color(pal.text));
+                    ui.label(
+                        RichText::new(tr!("Удалить профиль?"))
+                            .size(15.5)
+                            .color(pal.text),
+                    );
                     ui.add_space(6.0);
                     ui.label(
-                        RichText::new(format!("«{title}» будет удалён вместе с паролем."))
-                            .color(pal.subtext),
+                        RichText::new(tf!(
+                            "«{title}» будет удалён вместе с паролем.",
+                            "\"{title}\" will be deleted together with its password."
+                        ))
+                        .color(pal.subtext),
                     );
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui
                             .add(
-                                egui::Button::new(RichText::new("Удалить").color(pal.base))
+                                egui::Button::new(RichText::new(tr!("Удалить")).color(pal.base))
                                     .fill(pal.warn),
                             )
                             .lit(ui)
@@ -1264,7 +1274,7 @@ pub fn profile_dialogs(
                         {
                             action = Some(ProfileAction::Delete(*index));
                         }
-                        if ui.add(secondary("Отмена", pal)).clicked() {
+                        if ui.add(secondary(tr!("Отмена"), pal)).clicked() {
                             done = true;
                         }
                     });

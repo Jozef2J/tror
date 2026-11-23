@@ -87,6 +87,7 @@ enum Action {
     AddHosts,
     OpenPath(PathBuf),
     OpenProject(PathBuf),
+    ToggleVisual,
     Save,
     SaveAs,
     SaveAll,
@@ -172,13 +173,20 @@ fn tab_color(index: u8) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
+struct Conflict {
+    profile: String,
+    doc: u64,
+    path: String,
+    server: Vec<u8>,
+}
+
 pub(crate) fn size_label(bytes: usize) -> String {
     if bytes < 1024 {
-        format!("{bytes} Б")
+        tf!("{bytes} Б", "{bytes} B")
     } else if bytes < 1024 * 1024 {
-        format!("{:.1} КБ", bytes as f64 / 1024.0)
+        tf!("{:.1} КБ", "{:.1} KB", bytes as f64 / 1024.0)
     } else {
-        format!("{:.1} МБ", bytes as f64 / (1024.0 * 1024.0))
+        tf!("{:.1} МБ", "{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
 
@@ -383,6 +391,7 @@ pub struct TrorApp {
     instance: Option<std::sync::mpsc::Receiver<PathBuf>>,
     recovery: crate::recover::Recovery,
     confirm: Option<Confirm>,
+    conflict: Option<Conflict>,
     allow_close: bool,
     focus_editor: bool,
     lang_filter: String,
@@ -400,6 +409,11 @@ impl TrorApp {
         settings.migrate();
         let plugins_off = settings.plugins_off.clone();
         let panel_sizes = settings.panel_sizes.clone();
+        crate::i18n::set_english(match settings.language.as_str() {
+            "ru" => false,
+            "en" => true,
+            _ => crate::i18n::system_english(),
+        });
         crate::vault::set_in_file(settings.passwords_in_file);
         let mut dock = cc
             .storage
@@ -497,6 +511,7 @@ impl TrorApp {
             instance: None,
             recovery: Default::default(),
             confirm: None,
+            conflict: None,
             allow_close: false,
             focus_editor: true,
             lang_filter: String::new(),

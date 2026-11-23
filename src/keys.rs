@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 
-pub const COMMANDS: [(&str, &str, &str, bool); 43] = [
+pub const COMMANDS: [(&str, &str, &str, bool); 44] = [
     ("new", "Новый файл", "Ctrl+N", true),
     ("open", "Открыть файл", "Ctrl+O", true),
     ("open_folder", "Открыть папку", "Ctrl+Shift+O", true),
@@ -36,6 +36,7 @@ pub const COMMANDS: [(&str, &str, &str, bool); 43] = [
     ("macro_record", "Запись макроса: начать или остановить", "Ctrl+Shift+R", true),
     ("macro_play", "Выполнить макрос", "Ctrl+Shift+P", true),
     ("wrap", "Перенос строк", "Alt+Z", false),
+    ("visual", "Визуальный редактор", "Ctrl+Shift+E", false),
     ("theme", "Сменить тему", "", false),
     ("settings", "Настройки", "Ctrl+Comma", false),
     ("project", "Папка проекта", "F7", false),

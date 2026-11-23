@@ -110,6 +110,20 @@ impl TrorApp {
         let p = ui.painter();
         let frame = Rect::from_center_size(c, egui::vec2(16.0, 13.0));
         match kind {
+            5 => {
+                p.rect_stroke(frame, 2.5, stroke, egui::StrokeKind::Inside);
+                p.text(
+                    c + egui::vec2(0.0, -0.5),
+                    egui::Align2::CENTER_CENTER,
+                    "A",
+                    egui::FontId::proportional(10.5),
+                    color,
+                );
+                p.line_segment(
+                    [c + egui::vec2(-4.0, 4.5), c + egui::vec2(4.0, 4.5)],
+                    Stroke::new(1.2, color),
+                );
+            }
             0 => {
                 p.rect_stroke(frame, 2.5, stroke, egui::StrokeKind::Inside);
                 p.line_segment(
@@ -188,11 +202,11 @@ impl TrorApp {
         let s = &mut self.search;
         let tools_w = 4.0 * 32.0 + 3.0 * 30.0 + 10.0;
         ui.spacing_mut().item_spacing.y = 8.0;
-        form_row(ui, pal, "Найти", |ui| {
+        form_row(ui, pal, tr!("Найти"), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             let width = crate::widgets::field_width(ui, tools_w);
             let query =
-                ui.add(form_field(&mut s.query, "текст или выражение").desired_width(width));
+                ui.add(form_field(&mut s.query, tr!("текст или выражение")).desired_width(width));
             if std::mem::take(&mut s.focus_query) {
                 query.request_focus();
             }
@@ -206,7 +220,7 @@ impl TrorApp {
                 query.request_focus();
             }
             if icon_button(ui, pal, Icon::Close)
-                .on_hover_text("Очистить поиск")
+                .on_hover_text(tr!("Очистить поиск"))
                 .clicked()
             {
                 s.query.clear();
@@ -217,15 +231,15 @@ impl TrorApp {
                 changed = true;
             }
             ui.add_space(6.0);
-            changed |= toggle(ui, pal, &mut s.case, "Aa", "Учитывать регистр");
-            changed |= toggle(ui, pal, &mut s.word, "ab", "Слово целиком");
-            changed |= toggle(ui, pal, &mut s.regex, ".*", "Регулярное выражение");
+            changed |= toggle(ui, pal, &mut s.case, "Aa", tr!("Учитывать регистр"));
+            changed |= toggle(ui, pal, &mut s.word, "ab", tr!("Слово целиком"));
+            changed |= toggle(ui, pal, &mut s.regex, ".*", tr!("Регулярное выражение"));
             changed |= toggle(
                 ui,
                 pal,
                 &mut s.extended,
                 "\\n",
-                "Расширенный режим: \\n, \\r, \\t, \\0, \\xFF, \\uFFFF",
+                tr!("Расширенный режим: \\n, \\r, \\t, \\0, \\xFF, \\uFFFF"),
             );
             if changed {
                 s.pending = Some(Pending::FromAnchor);
@@ -233,19 +247,19 @@ impl TrorApp {
             }
             ui.add_space(2.0);
             if icon_button(ui, pal, Icon::Up)
-                .on_hover_text("Найти ранее (Shift+F3)")
+                .on_hover_text(tr!("Найти ранее (Shift+F3)"))
                 .clicked()
             {
                 s.pending = Some(Pending::Prev);
             }
             if icon_button(ui, pal, Icon::Down)
-                .on_hover_text("Найти далее (F3)")
+                .on_hover_text(tr!("Найти далее (F3)"))
                 .clicked()
             {
                 s.pending = Some(Pending::Next);
             }
         });
-        form_row(ui, pal, "Заменить на", |ui| {
+        form_row(ui, pal, tr!("Заменить на"), |ui| {
             let hint = if s.regex { "$1, ${name}" } else { "" };
             let replace = ui.add(
                 form_field(&mut s.replacement, hint)
@@ -261,34 +275,37 @@ impl TrorApp {
             let ready = !s.query.is_empty();
             let size = egui::vec2(0.0, FORM_ROW);
             if ui
-                .add_enabled(ready, crate::widgets::primary("Найти", pal).min_size(size))
+                .add_enabled(
+                    ready,
+                    crate::widgets::primary(tr!("Найти"), pal).min_size(size),
+                )
                 .lit(ui)
-                .on_hover_text("Найти далее (Enter, F3)")
+                .on_hover_text(tr!("Найти далее (Enter, F3)"))
                 .clicked()
             {
                 s.pending = Some(Pending::Next);
             }
             if ui
-                .add_enabled(ready, Button::new("Заменить").min_size(size))
+                .add_enabled(ready, Button::new(tr!("Заменить")).min_size(size))
                 .clicked()
             {
                 s.pending = Some(Pending::Replace);
             }
             if ui
-                .add_enabled(ready, Button::new("Заменить все").min_size(size))
+                .add_enabled(ready, Button::new(tr!("Заменить все")).min_size(size))
                 .clicked()
             {
                 s.pending = Some(Pending::ReplaceAll);
             }
             if ui
                 .add_enabled(
-                    ready && !s.matches.is_empty(),
-                    Button::new("Удалить повторения").min_size(size),
+                    ready && (!s.matches.is_empty() || s.visual.is_some_and(|v| v.1 > 0)),
+                    Button::new(tr!("Удалить повторения")).min_size(size),
                 )
-                .on_hover_text(
+                .on_hover_text(tr!(
                     "Удаляет все найденные совпадения. Если совпадение занимает строку целиком, \
-                     строка удаляется вместе с переводом строки.",
-                )
+                     строка удаляется вместе с переводом строки."
+                ))
                 .clicked()
             {
                 s.pending = Some(Pending::DeleteAll);
@@ -297,17 +314,25 @@ impl TrorApp {
                 RichText::new(error).color(pal.warn)
             } else if let Some(n) = s.last_replaced {
                 let verb = if s.deleted {
-                    "удалено"
+                    tr!("удалено")
                 } else {
-                    "заменено"
+                    tr!("заменено")
                 };
                 RichText::new(format!("{verb}: {n}")).color(pal.subtext)
             } else if s.query.is_empty() {
-                RichText::new("введите текст").color(pal.faint)
+                RichText::new(tr!("введите текст")).color(pal.faint)
             } else if s.searching() {
-                RichText::new("поиск…").color(pal.subtext)
+                RichText::new(tr!("поиск…")).color(pal.subtext)
+            } else if let Some((current, total)) = s.visual {
+                match (current, total) {
+                    (_, 0) => RichText::new(tr!("нет совпадений")).color(pal.warn),
+                    (Some(i), _) => RichText::new(tf!("{} из {total}", "{} of {total}", i + 1))
+                        .color(pal.subtext),
+                    (None, _) => RichText::new(tf!("совпадений: {total}", "matches: {total}"))
+                        .color(pal.subtext),
+                }
             } else if s.matches.is_empty() {
-                RichText::new("нет совпадений").color(pal.warn)
+                RichText::new(tr!("нет совпадений")).color(pal.warn)
             } else {
                 let total = if s.truncated {
                     format!("{}+", s.matches.len())
@@ -315,8 +340,8 @@ impl TrorApp {
                     s.matches.len().to_string()
                 };
                 match selection.and_then(|sel| s.current(sel)) {
-                    Some(i) => RichText::new(format!("{} из {total}", i + 1)),
-                    None => RichText::new(format!("совпадений: {total}")),
+                    Some(i) => RichText::new(tf!("{} из {total}", "{} of {total}", i + 1)),
+                    None => RichText::new(tf!("совпадений: {total}", "matches: {total}")),
                 }
                 .color(pal.subtext)
             };
@@ -328,7 +353,7 @@ impl TrorApp {
             return;
         };
         let matches = &self.search.matches;
-        if self.search.query.is_empty() || matches.is_empty() {
+        if self.search.query.is_empty() || matches.is_empty() || self.search.visual.is_some() {
             return;
         }
         ui.add_space(6.0);
@@ -406,7 +431,7 @@ impl TrorApp {
             .or_else(|| {
                 self.plugins
                     .busy()
-                    .map(|name| format!("Плагин «{name}» работает…"))
+                    .map(|name| tf!("Плагин «{name}» работает…", "Plugin \"{name}\" is running…"))
             });
         if toast.is_some() {
             ui.ctx()
@@ -432,7 +457,7 @@ impl TrorApp {
                         let name = match eol {
                             Eol::Lf => "LF — Unix",
                             Eol::Crlf => "CRLF — Windows",
-                            Eol::Cr => "CR — классический Mac",
+                            Eol::Cr => tr!("CR — классический Mac"),
                         };
                         if ui.selectable_label(doc.eol == eol, name).clicked() && doc.eol != eol {
                             doc.eol = eol;
@@ -442,7 +467,7 @@ impl TrorApp {
                 });
 
                 ui.menu_button(small(encoding_label(doc.encoding, doc.bom)), |ui| {
-                    ui.weak("Сохранять в кодировке");
+                    ui.weak(tr!("Сохранять в кодировке"));
                     for (name, encoding, bom) in ENCODINGS {
                         let selected = doc.encoding == *encoding && doc.bom == *bom;
                         if ui.selectable_label(selected, *name).clicked() && !selected {
@@ -453,7 +478,7 @@ impl TrorApp {
                     }
                     if doc.path.is_some() {
                         ui.separator();
-                        ui.menu_button("Переоткрыть как", |ui| {
+                        ui.menu_button(tr!("Переоткрыть как"), |ui| {
                             for (name, encoding, bom) in ENCODINGS {
                                 if *bom && *encoding == encoding_rs::UTF_8 {
                                     continue;
@@ -476,7 +501,7 @@ impl TrorApp {
                         ui.set_width(220.0);
                         ui.add(
                             TextEdit::singleline(&mut self.lang_filter)
-                                .hint_text("Язык…")
+                                .hint_text(tr!("Язык…"))
                                 .desired_width(f32::INFINITY),
                         )
                         .request_focus();
@@ -498,8 +523,9 @@ impl TrorApp {
 
                 ui.add_space(8.0);
                 let (line, col) = doc.cursor_line_col();
-                ui.label(small(format!(
+                ui.label(small(tf!(
                     "Стр {line}, Стлб {col}   ·   строк: {}   ·   {}",
+                    "Ln {line}, Col {col}   ·   lines: {}   ·   {}",
                     doc.line_count(),
                     size_label(doc.rope.len_bytes())
                 )));
@@ -509,7 +535,10 @@ impl TrorApp {
             });
         });
         if let Some(e) = error {
-            self.notify(format!("Не удалось переоткрыть: {e}"), now);
+            self.notify(
+                tf!("Не удалось переоткрыть: {e}", "Could not reopen: {e}"),
+                now,
+            );
         }
     }
 
@@ -545,7 +574,7 @@ impl TrorApp {
                     ui.label(RichText::new("TrorPad").size(34.0).color(pal.faint));
                     ui.add_space(4.0);
                     ui.label(
-                        RichText::new("Перетащите файлы сюда или начните с пустой вкладки")
+                        RichText::new(tr!("Перетащите файлы сюда или начните с пустой вкладки"))
                             .color(pal.subtext),
                     );
                     ui.add_space(14.0);
@@ -553,13 +582,13 @@ impl TrorApp {
                         Button::new(RichText::new(text).color(pal.text))
                             .min_size(egui::vec2(200.0, 32.0))
                     };
-                    if ui.add(button("Новый файл")).clicked() {
+                    if ui.add(button(tr!("Новый файл"))).clicked() {
                         actions.push(Action::New);
                     }
-                    if ui.add(button("Открыть…")).clicked() {
+                    if ui.add(button(tr!("Открыть…"))).clicked() {
                         actions.push(Action::Open);
                     }
-                    if ui.add(button("Открыть папку…")).clicked() {
+                    if ui.add(button(tr!("Открыть папку…"))).clicked() {
                         actions.push(Action::OpenFolder);
                     }
                     let recent = |ui: &mut Ui,
@@ -618,8 +647,8 @@ impl TrorApp {
                             }
                         }
                     };
-                    recent(ui, "НЕДАВНИЕ ФАЙЛЫ", &files, false, actions);
-                    recent(ui, "НЕДАВНИЕ ПАПКИ", &folders, true, actions);
+                    recent(ui, tr!("НЕДАВНИЕ ФАЙЛЫ"), &files, false, actions);
+                    recent(ui, tr!("НЕДАВНИЕ ПАПКИ"), &folders, true, actions);
                     ui.add_space(12.0);
                 });
             });

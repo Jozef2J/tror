@@ -31,10 +31,10 @@ impl Split {
 
     fn label(self) -> &'static str {
         match self {
-            Split::Single => "Один сеанс",
-            Split::Columns => "Рядом",
-            Split::Rows => "Друг под другом",
-            Split::Grid => "Сетка 2×2",
+            Split::Single => tr!("Один сеанс"),
+            Split::Columns => tr!("Рядом"),
+            Split::Rows => tr!("Друг под другом"),
+            Split::Grid => tr!("Сетка 2×2"),
         }
     }
 }
@@ -259,7 +259,7 @@ impl ConsolePanel {
         });
         session.connected = false;
         session.host_key = None;
-        session.status = "подключение…".into();
+        session.status = tr!("подключение…").into();
     }
 
     fn close(&mut self, index: usize) {
@@ -319,7 +319,7 @@ impl ConsolePanel {
                 self.store.known_hosts.insert(host, print);
             }
             if let Err(e) = self.store.save() {
-                notes.push(format!("Не удалось сохранить ключ: {e}"));
+                notes.push(tf!("Не удалось сохранить ключ: {e}", "Could not save the key: {e}"));
             }
         }
         if let Some(editor) = &mut self.editor
@@ -350,7 +350,7 @@ impl ConsolePanel {
             .cloned()
             .collect();
         if !hosts.is_empty() {
-            ui.menu_button("По профилю SFTP", |ui| {
+            ui.menu_button(tr!("По профилю SFTP"), |ui| {
                 for host in &hosts {
                     if ui.button(&host.name).clicked() {
                         open = Some(TermProfile::from_host(host));
@@ -364,7 +364,7 @@ impl ConsolePanel {
             egui::Id::unique("tror_term_profiles"),
             &names,
             None,
-            "Добавить подключение…",
+            tr!("Добавить подключение…"),
         );
         if let Some(action) = action {
             self.profile_action(action, ctx);
@@ -409,7 +409,7 @@ impl ConsolePanel {
         let mut drafts = self.store.terminals.clone();
         if new || drafts.is_empty() {
             drafts.push(TermProfile {
-                name: format!("Сервер {}", drafts.len() + 1),
+                name: tf!("Сервер {}", "Server {}", drafts.len() + 1),
                 ..Default::default()
             });
         }
@@ -562,22 +562,22 @@ impl ConsolePanel {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                let dots = crate::widgets::dots_button(ui, pal).on_hover_text("Ещё");
+                let dots = crate::widgets::dots_button(ui, pal).on_hover_text(tr!("Ещё"));
                 egui::Popup::menu(&dots)
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     .show(|ui| {
                         ui.set_min_width(220.0);
                         let has = !self.sessions.is_empty();
-                        if ui.add_enabled(has, Button::new("Переподключить")).clicked()
+                        if ui.add_enabled(has, Button::new(tr!("Переподключить"))).clicked()
                         {
                             reconnect = true;
                             ui.close();
                         }
-                        if ui.add_enabled(has, Button::new("Отключить")).clicked() {
+                        if ui.add_enabled(has, Button::new(tr!("Отключить"))).clicked() {
                             disconnect = true;
                             ui.close();
                         }
-                        if ui.add_enabled(has, Button::new("Очистить экран")).clicked()
+                        if ui.add_enabled(has, Button::new(tr!("Очистить экран"))).clicked()
                         {
                             clear = true;
                             ui.close();
@@ -585,21 +585,21 @@ impl ConsolePanel {
                         if let Some(session) = self.sessions.get(self.active) {
                             let current = session.profile.theme.clone();
                             let size = session.profile.font_size;
-                            ui.menu_button("Оформление сеанса", |ui| {
+                            ui.menu_button(tr!("Оформление сеанса"), |ui| {
                                 ui.set_min_width(220.0);
                                 ui.label(
-                                    RichText::new("Цветовая схема").small().color(pal.faint),
+                                    RichText::new(tr!("Цветовая схема")).small().color(pal.faint),
                                 );
                                 ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                                     if ui
-                                        .selectable_label(current.is_empty(), "Как в редакторе")
+                                        .selectable_label(current.is_empty(), tr!("Как в редакторе"))
                                         .clicked()
                                     {
                                         look = Some((String::new(), size));
                                     }
                                     for scheme in terminal::SCHEMES {
                                         if ui
-                                            .selectable_label(current == scheme.name, scheme.name)
+                                            .selectable_label(current == scheme.name, tr!(scheme.name))
                                             .clicked()
                                         {
                                             look = Some((scheme.name.to_owned(), size));
@@ -609,14 +609,14 @@ impl ConsolePanel {
                                 ui.separator();
                                 let base = if size > 0.0 { size } else { font_size.round() };
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("Шрифт: {base:.0} px"));
+                                    ui.label(tf!("Шрифт: {base:.0} px", "Font: {base:.0} px"));
                                     if ui.small_button(" − ").clicked() {
                                         look = Some((current.clone(), (base - 1.0).max(8.0)));
                                     }
                                     if ui.small_button(" + ").clicked() {
                                         look = Some((current.clone(), (base + 1.0).min(28.0)));
                                     }
-                                    if size > 0.0 && ui.small_button("как в редакторе").clicked()
+                                    if size > 0.0 && ui.small_button(tr!("как в редакторе")).clicked()
                                     {
                                         look = Some((current.clone(), 0.0));
                                     }
@@ -625,7 +625,7 @@ impl ConsolePanel {
                         }
                         ui.separator();
                         ui.label(
-                            RichText::new("Разделение экрана")
+                            RichText::new(tr!("Разделение экрана"))
                                 .small()
                                 .color(pal.faint),
                         );
@@ -638,17 +638,17 @@ impl ConsolePanel {
                             }
                         }
                         ui.separator();
-                        if ui.button("Настроить подключения…").clicked() {
+                        if ui.button(tr!("Настроить подключения…")).clicked() {
                             self.open_editor(false);
                             ui.close();
                         }
                     });
-                if split_icon(ui, pal, self.split, "Разделить экран между сеансами").clicked()
+                if split_icon(ui, pal, self.split, tr!("Разделить экран между сеансами")).clicked()
                 {
                     toggle_split = true;
                 }
                 let plus = crate::widgets::plus_button(ui, pal, egui::vec2(24.0, 22.0))
-                    .on_hover_text("Новый сеанс");
+                    .on_hover_text(tr!("Новый сеанс"));
                 egui::Popup::menu(&plus)
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     .show(|ui| self.quick_menu(ui, &ctx));
@@ -671,10 +671,10 @@ impl ConsolePanel {
             if disconnect {
                 session.shell = None;
                 session.connected = false;
-                session.status = "отключено".into();
+                session.status = tr!("отключено").into();
                 session
                     .screen
-                    .process("\r\n\x1b[90m[отключено]\x1b[0m\r\n".as_bytes());
+                    .process(tr!("\r\n\x1b[90m[отключено]\x1b[0m\r\n").as_bytes());
             }
             if clear {
                 session.screen.reset();
@@ -822,7 +822,7 @@ impl ConsolePanel {
         };
         if saved.is_some() {
             if let Err(e) = self.store.save() {
-                crate::trace::popup(format!("Оформление не сохранено: {e}"), false);
+                crate::trace::popup(tf!("Оформление не сохранено: {e}", "Appearance not saved: {e}"), false);
             }
             self.store_seen = Store::generation();
         }
@@ -843,7 +843,7 @@ impl ConsolePanel {
             .auto_shrink(false)
             .show(&mut child, |ui| {
                 ui.add_space(12.0);
-                ui.label(RichText::new("Нет открытых сеансов").color(pal.subtext));
+                ui.label(RichText::new(tr!("Нет открытых сеансов")).color(pal.subtext));
                 ui.add_space(6.0);
                 let mut open = None;
                 let mut action = None;
@@ -869,7 +869,7 @@ impl ConsolePanel {
                         .iter()
                         .filter(|p| p.protocol == remote::Protocol::Sftp)
                     {
-                        let text = format!("{}  ·  SFTP-профиль", host.name);
+                        let text = tf!("{}  ·  SFTP-профиль", "{}  ·  SFTP profile", host.name);
                         if ui.add(Button::new(text)).clicked() {
                             open = Some(TermProfile::from_host(host));
                         }
@@ -944,18 +944,18 @@ impl ConsolePanel {
             ui.set_width(460.0);
             if changed {
                 ui.label(
-                    RichText::new(format!("Ключ сервера «{title}» изменился"))
+                    RichText::new(tf!("Ключ сервера «{title}» изменился", "The key of server \"{title}\" has changed"))
                         .color(pal.warn)
                         .strong(),
                 );
                 ui.label(
-                    "Сохранённый ключ этого сервера отличается от присланного. Так бывает после \
-                     переустановки сервера, но так же выглядит перехват соединения.",
+                    tr!("Сохранённый ключ этого сервера отличается от присланного. Так бывает после \
+                     переустановки сервера, но так же выглядит перехват соединения."),
                 );
             } else {
-                ui.label(RichText::new(format!("Новый сервер «{title}»")).strong());
+                ui.label(RichText::new(tf!("Новый сервер «{title}»", "New server \"{title}\"")).strong());
                 ui.label(
-                    "К этому серверу вы подключаетесь впервые. Отпечаток его ключа (SHA-256):",
+                    tr!("К этому серверу вы подключаетесь впервые. Отпечаток его ключа (SHA-256):"),
                 );
             }
             ui.add_space(4.0);
@@ -963,14 +963,14 @@ impl ConsolePanel {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 let accept = if changed {
-                    "Заменить ключ и подключиться"
+                    tr!("Заменить ключ и подключиться")
                 } else {
-                    "Доверять и подключиться"
+                    tr!("Доверять и подключиться")
                 };
                 if dialog_button(ui, pal, accept, !changed) {
                     answer = Some(true);
                 }
-                if dialog_button(ui, pal, "Отмена", changed) {
+                if dialog_button(ui, pal, tr!("Отмена"), changed) {
                     answer = Some(false);
                 }
             });
@@ -989,7 +989,7 @@ impl ConsolePanel {
                 }
                 session.host_key = None;
                 session.shell = None;
-                session.status = "подключение отменено".into();
+                session.status = tr!("подключение отменено").into();
             }
             None => {}
         }
@@ -1005,7 +1005,7 @@ impl ConsolePanel {
         let mut test = false;
         let modal = dialog("tror_console_profiles", pal).show(ctx, |ui| {
             ui.set_width(660.0);
-            ui.label(RichText::new("Подключения консоли").strong());
+            ui.label(RichText::new(tr!("Подключения консоли")).strong());
             ui.add_space(8.0);
             let limit = (ui.ctx().content_rect().height() - 200.0).max(200.0);
             ScrollArea::vertical()
@@ -1018,7 +1018,7 @@ impl ConsolePanel {
                         ScrollArea::vertical().max_height(330.0).show(ui, |ui| {
                             for (i, profile) in editor.drafts.iter().enumerate() {
                                 let name = if profile.name.trim().is_empty() {
-                                    "без имени".to_owned()
+                                    tr!("без имени").to_owned()
                                 } else {
                                     format!("{}  ·  {}", profile.name, profile.protocol.label())
                                 };
@@ -1030,16 +1030,16 @@ impl ConsolePanel {
                         });
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            if ui.add(Button::new("Добавить")).clicked() {
+                            if ui.add(Button::new(tr!("Добавить"))).clicked() {
                                 editor.drafts.push(TermProfile {
-                                    name: format!("Сервер {}", editor.drafts.len() + 1),
+                                    name: tf!("Сервер {}", "Server {}", editor.drafts.len() + 1),
                                     ..Default::default()
                                 });
                                 editor.index = editor.drafts.len() - 1;
                                 editor.result = None;
                             }
                             if ui
-                                .add_enabled(!editor.drafts.is_empty(), Button::new("Удалить"))
+                                .add_enabled(!editor.drafts.is_empty(), Button::new(tr!("Удалить")))
                                 .clicked()
                             {
                                 editor.drafts.remove(editor.index);
@@ -1050,7 +1050,7 @@ impl ConsolePanel {
                     ui.add_space(10.0);
                     ui.vertical(|ui| {
                         let Some(p) = editor.drafts.get_mut(editor.index) else {
-                            ui.label(RichText::new("Добавьте подключение.").color(pal.subtext));
+                            ui.label(RichText::new(tr!("Добавьте подключение.")).color(pal.subtext));
                             return;
                         };
                         egui::Grid::new("tror_term_form")
@@ -1058,10 +1058,10 @@ impl ConsolePanel {
                             .spacing([10.0, 7.0])
                             .show(ui, |ui| {
                                 let wide = 320.0;
-                                ui.label("Название");
+                                ui.label(tr!("Название"));
                                 ui.add(TextEdit::singleline(&mut p.name).desired_width(wide));
                                 ui.end_row();
-                                ui.label("Протокол");
+                                ui.label(tr!("Протокол"));
                                 ui.horizontal(|ui| {
                                     for protocol in TermProtocol::ALL {
                                         if ui.selectable_label(p.protocol == protocol, protocol.label()).clicked()
@@ -1075,29 +1075,29 @@ impl ConsolePanel {
                                     }
                                 });
                                 ui.end_row();
-                                ui.label("Сервер");
+                                ui.label(tr!("Сервер"));
                                 ui.horizontal(|ui| {
                                     ui.add(TextEdit::singleline(&mut p.host).hint_text("example.org").desired_width(wide - 70.0));
                                     port_field(ui, &mut p.port, 60.0);
                                 });
                                 ui.end_row();
-                                ui.label("Пользователь");
+                                ui.label(tr!("Пользователь"));
                                 ui.add(TextEdit::singleline(&mut p.user).desired_width(wide));
                                 ui.end_row();
-                                ui.label("Пароль");
+                                ui.label(tr!("Пароль"));
                                 ui.horizontal(|ui| {
                                     ui.add(TextEdit::singleline(&mut p.password).password(!editor.reveal).desired_width(wide - 88.0));
-                                    let label = if editor.reveal { "Скрыть" } else { "Показать" };
+                                    let label = if editor.reveal { tr!("Скрыть") } else { tr!("Показать") };
                                     if ui.add_sized([80.0, 22.0], Button::new(label)).clicked() {
                                         editor.reveal = !editor.reveal;
                                     }
                                 });
                                 ui.end_row();
                                 if p.protocol != TermProtocol::Telnet {
-                                    ui.label("Файл ключа");
+                                    ui.label(tr!("Файл ключа"));
                                     ui.horizontal(|ui| {
                                         ui.add(TextEdit::singleline(&mut p.key_file).hint_text("RSA, ECDSA, Ed25519").desired_width(wide - 78.0));
-                                        if ui.button("Обзор…").clicked()
+                                        if ui.button(tr!("Обзор…")).clicked()
                                             && let Some(file) = rfd::FileDialog::new().pick_file()
                                         {
                                             p.key_file = file.display().to_string();
@@ -1107,12 +1107,12 @@ impl ConsolePanel {
                                     if !p.key_file.trim().is_empty() {
                                         ui.label("");
                                         match remote::key_kind(&p.key_file) {
-                                            Ok(kind) => ui.label(RichText::new(format!("ключ: {kind}")).small().color(pal.subtext)),
+                                            Ok(kind) => ui.label(RichText::new(tf!("ключ: {kind}", "key: {kind}")).small().color(pal.subtext)),
                                             Err(e) => ui.label(RichText::new(e).small().color(pal.warn)),
                                         };
                                         ui.end_row();
-                                        ui.label("Парольная фраза");
-                                        ui.add(TextEdit::singleline(&mut p.passphrase).password(!editor.reveal).hint_text("если ключ защищён").desired_width(wide));
+                                        ui.label(tr!("Парольная фраза"));
+                                        ui.add(TextEdit::singleline(&mut p.passphrase).password(!editor.reveal).hint_text(tr!("если ключ защищён")).desired_width(wide));
                                         ui.end_row();
                                     }
                                 }
@@ -1120,13 +1120,13 @@ impl ConsolePanel {
                                     ui.label("mosh-server");
                                     ui.add(TextEdit::singleline(&mut p.mosh_server).hint_text("mosh-server").desired_width(wide));
                                     ui.end_row();
-                                    ui.label("Порты UDP");
+                                    ui.label(tr!("Порты UDP"));
                                     ui.add(TextEdit::singleline(&mut p.mosh_ports).hint_text("60000:61000").desired_width(wide));
                                     ui.end_row();
                                 }
                                 if p.protocol == TermProtocol::Ssh {
-                                    ui.label("Команда при входе");
-                                    ui.add(TextEdit::singleline(&mut p.startup).hint_text("например: cd /var/www && ls").desired_width(wide));
+                                    ui.label(tr!("Команда при входе"));
+                                    ui.add(TextEdit::singleline(&mut p.startup).hint_text(tr!("например: cd /var/www && ls")).desired_width(wide));
                                     ui.end_row();
                                 }
                                 ui.label("");
@@ -1135,15 +1135,15 @@ impl ConsolePanel {
                                     if editor.probe.is_some() {
                                         ui.horizontal(|ui| {
                                             ui.spinner();
-                                            ui.label(RichText::new("проверка…").color(pal.subtext));
+                                            ui.label(RichText::new(tr!("проверка…")).color(pal.subtext));
                                         });
-                                    } else if ui.add(Button::new("Проверить подключение")).clicked() {
+                                    } else if ui.add(Button::new(tr!("Проверить подключение"))).clicked() {
                                         test = true;
                                     }
                                     if let Some(result) = &editor.result {
                                         let (text, color) = match result {
-                                            Ok(text) => (format!("Работает: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
-                                            Err(e) => (format!("Ошибка: {e}"), pal.warn),
+                                            Ok(text) => (tf!("Работает: {text}", "Works: {text}"), Color32::from_rgb(0x3f, 0xc2, 0x6e)),
+                                            Err(e) => (tf!("Ошибка: {e}", "Error: {e}"), pal.warn),
                                         };
                                         ui.label(RichText::new(text).small().color(color));
                                     }
@@ -1153,9 +1153,9 @@ impl ConsolePanel {
                             });
                         ui.add_space(4.0);
                         let note = match p.protocol {
-                            TermProtocol::Ssh => "Вход по паролю, по ключу (RSA, ECDSA, Ed25519) или через ssh-agent, если не заданы ни пароль, ни ключ.",
-                            TermProtocol::Telnet => "Telnet передаёт всё, включая пароль, без шифрования — используйте его для сетевого оборудования в своей сети. Имя и пароль, если указаны, вводятся сами в ответ на приглашение входа.",
-                            TermProtocol::Mosh => "Mosh входит по SSH, запускает на сервере mosh-server и дальше работает по UDP: сеанс переживает обрывы, смену сети и сон ноутбука. На сервере должен быть установлен mosh, а порты UDP 60000–61000 — открыты.",
+                            TermProtocol::Ssh => tr!("Вход по паролю, по ключу (RSA, ECDSA, Ed25519) или через ssh-agent, если не заданы ни пароль, ни ключ."),
+                            TermProtocol::Telnet => tr!("Telnet передаёт всё, включая пароль, без шифрования — используйте его для сетевого оборудования в своей сети. Имя и пароль, если указаны, вводятся сами в ответ на приглашение входа."),
+                            TermProtocol::Mosh => tr!("Mosh входит по SSH, запускает на сервере mosh-server и дальше работает по UDP: сеанс переживает обрывы, смену сети и сон ноутбука. На сервере должен быть установлен mosh, а порты UDP 60000–61000 — открыты."),
                         };
                         let color = if p.protocol == TermProtocol::Telnet { pal.warn } else { pal.subtext };
                         ui.label(RichText::new(note).small().color(color));
@@ -1164,14 +1164,14 @@ impl ConsolePanel {
                 });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if dialog_button(ui, pal, "Сохранить", true) {
+                if dialog_button(ui, pal, tr!("Сохранить"), true) {
                     save = true;
                 }
-                if dialog_button(ui, pal, "Сохранить и подключиться", false) {
+                if dialog_button(ui, pal, tr!("Сохранить и подключиться"), false) {
                     save = true;
                     connect = true;
                 }
-                if dialog_button(ui, pal, "Отмена", false) {
+                if dialog_button(ui, pal, tr!("Отмена"), false) {
                     cancel = true;
                 }
             });
@@ -1191,7 +1191,7 @@ impl ConsolePanel {
                 .get(editor.index)
                 .is_some_and(|p| p.host.trim().is_empty() && !self.store.terminals.contains(p))
         {
-            editor.result = Some(Err("Укажите сервер".into()));
+            editor.result = Some(Err(tr!("Укажите сервер").into()));
             save = false;
         }
         if save {
@@ -1203,7 +1203,7 @@ impl ConsolePanel {
                     .retain(|p| !p.host.trim().is_empty() || known.contains(p));
                 self.store.terminals = editor.drafts;
                 if let Err(e) = self.store.save() {
-                    crate::trace::popup(format!("Подключения не сохранены: {e}"), false);
+                    crate::trace::popup(tf!("Подключения не сохранены: {e}", "Connections not saved: {e}"), false);
                 }
                 if connect && let Some(profile) = chosen {
                     self.open(profile, ctx);
@@ -1223,18 +1223,21 @@ pub fn appearance_rows(
     font_size: &mut f32,
     wide: f32,
 ) {
-    ui.label("Цветовая схема");
+    ui.label(tr!("Цветовая схема"));
     ComboBox::from_id_salt("tror_term_theme")
         .width(wide)
         .selected_text(if theme.is_empty() {
-            "Как в редакторе"
+            tr!("Как в редакторе")
         } else {
-            theme.as_str()
+            terminal::SCHEMES
+                .iter()
+                .find(|s| s.name == theme.as_str())
+                .map_or(theme.as_str(), |s| tr!(s.name))
         })
         .show_ui(ui, |ui| {
-            ui.selectable_value(theme, String::new(), "Как в редакторе");
+            ui.selectable_value(theme, String::new(), tr!("Как в редакторе"));
             for scheme in terminal::SCHEMES {
-                ui.selectable_value(theme, scheme.name.to_owned(), scheme.name);
+                ui.selectable_value(theme, scheme.name.to_owned(), tr!(scheme.name));
             }
         });
     ui.end_row();
@@ -1257,10 +1260,10 @@ pub fn appearance_rows(
         colors.fg,
     );
     ui.end_row();
-    ui.label("Шрифт");
+    ui.label(tr!("Шрифт"));
     ui.horizontal(|ui| {
         let name = if font.trim().is_empty() {
-            "как в редакторе".to_owned()
+            tr!("как в редакторе").to_owned()
         } else {
             std::path::Path::new(font.trim())
                 .file_name()
@@ -1268,22 +1271,22 @@ pub fn appearance_rows(
                 .unwrap_or_else(|| font.clone())
         };
         ui.label(RichText::new(name).color(pal.subtext));
-        if ui.button("Выбрать…").clicked()
+        if ui.button(tr!("Выбрать…")).clicked()
             && let Some(path) = rfd::FileDialog::new()
-                .add_filter("Шрифты", &["ttf", "otf", "ttc"])
+                .add_filter(tr!("Шрифты"), &["ttf", "otf", "ttc"])
                 .pick_file()
         {
             *font = path.display().to_string();
         }
-        if !font.is_empty() && ui.button("Сбросить").clicked() {
+        if !font.is_empty() && ui.button(tr!("Сбросить")).clicked() {
             font.clear();
         }
     });
     ui.end_row();
-    ui.label("Размер шрифта");
+    ui.label(tr!("Размер шрифта"));
     ui.horizontal(|ui| {
         let mut custom = *font_size > 0.0;
-        if ui.checkbox(&mut custom, "свой").changed() {
+        if ui.checkbox(&mut custom, tr!("свой")).changed() {
             *font_size = if custom { 14.0 } else { 0.0 };
         }
         if custom {

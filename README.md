@@ -1,56 +1,61 @@
 # Tror
 
-Tror — набор инструментов для работы с сайтами. Первое приложение проекта — **TrorPad**: быстрый редактор кода на Rust в духе Notepad++: один исполняемый файл, огромные файлы без торможения, а рядом — всё, что нужно для работы с сайтом на сервере.
+**English** · [Русский](README.ru.md)
 
-- **Редактор:** файлы 50 МБ и больше, подсветка ~200 языков, подсказки, поиск и замена с регулярными выражениями — в файле и по всему проекту, макросы, восстановление несохранённого после сбоя, сравнение файлов, перенос строк, несколько файлов рядом.
-- **Серверы:** SFTP, FTP и FTPS с профилями как в NppFTP, несколько подключений и передача между ними, поиск на сервере, синхронизация папки, журнал с сырым обменом.
-- **Консоль:** сеансы SSH, Telnet и Mosh во вкладках, свои цветовые схемы и шрифты.
-- **Базы данных:** MySQL/MariaDB, PostgreSQL и SQLite, в том числе через SSH-туннель и по TLS; экспорт в CSV, JSON и SQL.
-- **Интерфейс:** любую панель можно перетащить, пристыковать к краю, открепить или вынести в отдельное окно; цвета, шрифты и горячие клавиши настраиваются.
-- **Ещё:** предпросмотр страницы в браузере (F12), плагины на любом языке через внешние программы.
+Tror is a set of tools for people who build and maintain websites. Its first app is **TrorPad**: a fast, compact code editor written in Rust. It is a single executable that opens huge files without lag and keeps everything you need for working on a live site close at hand.
 
-## Установка
+- **Editor:** files of 50 MB and more, syntax highlighting for about 200 languages, completion, search and replace with regular expressions in a file or across a project, named macros, recovery of unsaved work after a crash, file comparison, code folding, bookmarks.
+- **Visual HTML editor:** edit HTML, PHP and Twig pages as formatted text, with headings, lists, links, tables and images. PHP and Twig blocks stay untouched. Pasting from Word and Google Docs keeps the structure and drops colors and fonts; `.docx` files can be imported.
+- **Servers:** SFTP, FTP and FTPS with saved profiles, several connections at once and transfers between them, drag and drop between the server, the project and the desktop, a download window with progress, pause and cancel, server-side search, folder sync, archives, and a raw protocol log.
+- **Safe saving to servers:** before saving, TrorPad checks whether the file was changed on the server after you opened it and offers to compare or overwrite. The previous server version is kept as a local backup.
+- **Console:** SSH, Telnet and Mosh sessions in tabs, with your own color schemes and fonts. OpenSSH and PuTTY (`.ppk`) keys are supported.
+- **Databases:** MySQL/MariaDB, PostgreSQL and SQLite, including through an SSH tunnel and over TLS; query history; export to CSV, JSON and SQL.
+- **Interface:** every panel can be dragged, docked, detached or moved to its own window; colors, fonts and shortcuts are configurable. English and Russian interface.
+- **Plugins:** WebAssembly plugins with an explicit permission model and a Rust SDK (see [`sdk/`](sdk/)).
 
-Готовые файлы — на странице выпусков: https://github.com/Jozef2J/tror/releases/latest
+## Download
 
-- **Windows:** `trorpad-setup.exe` — установщик (ярлык, пункт «Открыть в TrorPad» в меню файлов), либо `trorpad.exe` — без установки. Файлы не подписаны сертификатом, поэтому SmartScreen спросит: «Подробнее» → «Выполнить в любом случае».
-- **macOS:** `TrorPad-macos.zip` → `TrorPad.app` в «Программы». Первый запуск: правый щелчок → «Открыть», либо `xattr -dr com.apple.quarantine /Applications/TrorPad.app`.
-- **Linux:** `trorpad-linux-x86_64` → `chmod +x trorpad-linux-x86_64 && ./trorpad-linux-x86_64`.
+Ready-made files are on the releases page: https://github.com/Jozef2J/tror/releases/latest
 
-Программа сама сообщает о новой версии и ставит её по кнопке (Windows и Linux; на macOS откроет страницу выпуска). Проверку можно выключить в настройках.
+- **Windows:** `trorpad-setup.exe` is the installer (shortcut and an "Open in TrorPad" entry in the file menu); `trorpad.exe` runs without installation. The files are not code-signed yet, so SmartScreen will ask: "More info" → "Run anyway".
+- **macOS:** unpack `TrorPad-macos.zip` and move `TrorPad.app` to Applications. On the first launch, right-click → "Open", or run `xattr -dr com.apple.quarantine /Applications/TrorPad.app`.
+- **Linux:** `chmod +x trorpad-linux-x86_64 && ./trorpad-linux-x86_64`.
 
-## Скорость
+TrorPad tells you when a new version is out and installs it with one click (Windows and Linux; on macOS it opens the release page). The check can be turned off in the settings.
 
-Версия 0.14.0, Linux, 2 ядра, программный рендер без видеокарты, release-сборка, файл уже в кеше диска:
+## Speed
 
-| Что | Результат |
+Every build in CI runs `trorpad --bench` and publishes the numbers in the run summary. A build fails if an operation gets slower than its limit.
+
+Version 0.14.0, Linux, 2 cores, software rendering without a GPU, release build, file already in the disk cache:
+
+| What | Result |
 | --- | --- |
-| Запуск до первого кадра | 57–74 мс |
-| Открытие SQL-дампа 64 МБ (403 тыс. строк) | 133–180 мс |
-| Открытие JSON 78 МБ одной строкой | 142 мс |
-| Кадр при наборе, прокрутке и отмене в дампе 64 МБ | в среднем 1,7–2,1 мс, худший 15–19 мс |
-| Кадр в файле 78 МБ одной строкой | в среднем 0,2 мс, худший 2,6 мс |
-| Кадр в небольшом PHP-файле | в среднем 0,6 мс |
-| «Заменить все», 403 тыс. замен в 64 МБ | 0,34 с |
-| Сохранение 64 МБ | 0,1 с |
-| Память с открытым дампом 64 МБ | ~204 МБ (пустое окно — ~123 МБ, большая часть — программный рендер) |
-| Нагрузка в простое | перерисовка только на мигание курсора, 3–4 кадра в секунду |
-| Размер исполняемого файла (Linux) | 25,9 МБ |
+| Start to first frame | 57–74 ms |
+| Opening a 64 MB SQL dump (403k lines) | 133–180 ms |
+| Opening a 78 MB single-line JSON | 142 ms |
+| Frame while typing, scrolling and undoing in the 64 MB dump | average 1.7–2.1 ms, worst 15–19 ms |
+| "Replace all", 403k replacements in 64 MB | 0.34 s |
+| Saving 64 MB | 0.1 s |
 
-Свой замер: `TROR_PERF=1 trorpad файл` печатает время открытия, время до первого кадра и статистику кадров раз в секунду.
+Your own measurement: `TROR_PERF=1 trorpad file` prints the open time, time to first frame and frame statistics once a second.
 
-## Сборка
+## Building
 
-Нужен Rust 1.95+ и компилятор C; на Linux и macOS ещё `perl` и `make` (OpenSSL собирается из исходников).
+Rust 1.95+ and a C compiler are required; on Linux and macOS also `perl` and `make` (OpenSSL is built from source).
 
 ```
-cargo run --release -- путь/к/файлу.php
+cargo run --release -- path/to/file.php
 cargo test
 ```
 
-## Важно знать
+## Good to know
 
-- Пароли профилей лежат в `connections.json` в каталоге данных программы замаскированными, но не зашифрованными — как в NppFTP.
-- Файл целиком держится в памяти; в файлах больше 2 МБ подсветка приблизительная.
-- Плагины — это запуск программ с правами пользователя; ставьте только те, которым доверяете.
-- Перетащить файл из панели наружу, в проводник, нельзя — скачивание через правый щелчок.
+- Profile passwords are stored in the operating system's credential store (Windows Credential Manager, macOS Keychain, Secret Service on Linux). The portable mode can keep them in `connections.json` instead; there they are masked, not encrypted.
+- A file is kept in memory in full; in files larger than 2 MB highlighting is approximate.
+- Plugins only get the permissions you grant them. Plugins never receive passwords.
+- TrorPad collects no telemetry. See the [privacy policy](PRIVACY.md).
+
+## Privacy
+
+TrorPad is free software that works on your computer. It does not collect, send or sell any personal data. The full text is in [PRIVACY.md](PRIVACY.md).

@@ -131,7 +131,7 @@ fn http(params: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .unwrap_or_default();
     if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err("адрес должен начинаться с http:// или https://".into());
+        return Err(tr!("адрес должен начинаться с http:// или https://").into());
     }
     let method = params
         .get("method")
@@ -224,16 +224,16 @@ fn inside(root: &Path, path: &str) -> Result<PathBuf, String> {
         root.join(candidate)
     };
     let base = root.canonicalize().map_err(|e| e.to_string())?;
-    let parent = full.parent().ok_or("неверный путь")?;
+    let parent = full.parent().ok_or(tr!("неверный путь"))?;
     let parent = parent.canonicalize().map_err(|e| e.to_string())?;
-    let target = parent.join(full.file_name().ok_or("неверный путь")?);
+    let target = parent.join(full.file_name().ok_or(tr!("неверный путь"))?);
     let real = match target.canonicalize() {
         Ok(real) => real,
         Err(_) if target.symlink_metadata().is_err() => target.clone(),
         Err(e) => return Err(e.to_string()),
     };
     if !parent.starts_with(&base) || !real.starts_with(&base) {
-        return Err("путь вне папки проекта".into());
+        return Err(tr!("путь вне папки проекта").into());
     }
     Ok(target)
 }
@@ -282,7 +282,10 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
         if host.manifest.permissions.iter().any(|x| x == p) {
             Ok(())
         } else {
-            Err(format!("нет разрешения «{p}» в plugin.json"))
+            Err(tf!(
+                "нет разрешения «{p}» в plugin.json",
+                "no \"{p}\" permission in plugin.json"
+            ))
         }
     };
     match method {
@@ -324,7 +327,10 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
         "panel" | "show_panel" => {
             let id = s("id");
             if !host.manifest.panels.iter().any(|p| p.id == id) {
-                return Err(format!("панель «{id}» не описана в plugin.json"));
+                return Err(tf!(
+                    "панель «{id}» не описана в plugin.json",
+                    "panel \"{id}\" is not described in plugin.json"
+                ));
             }
             host.effects.push(if method == "panel" {
                 Effect::Panel(id, params.get("ui").cloned().unwrap_or(Value::Null))
@@ -336,7 +342,13 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
         "setting" => settings_of(&host.dir, &host.manifest)
             .get(&s("key"))
             .cloned()
-            .ok_or_else(|| format!("настройка «{}» не описана в plugin.json", s("key"))),
+            .ok_or_else(|| {
+                tf!(
+                    "настройка «{}» не описана в plugin.json",
+                    "setting \"{}\" is not described in plugin.json",
+                    s("key")
+                )
+            }),
         "storage_get" => Ok(storage_load(&host.dir.join("storage.json"))
             .get(&s("key"))
             .cloned()
@@ -384,7 +396,7 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
                 .profiles
                 .iter()
                 .find(|p| p.name == name)
-                .ok_or_else(|| format!("профиль «{name}» не найден"))?;
+                .ok_or_else(|| tf!("профиль «{name}» не найден", "profile \"{name}\" not found"))?;
             let known = store
                 .known_hosts
                 .get(&format!("{}:{}", profile.host.trim(), profile.port))
@@ -401,7 +413,7 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
             crate::db::one_shot(&store(), &s("profile"), &s("sql"))
         }
         "decorate" => {
-            let snap = host.snap.as_ref().ok_or("нет открытого файла")?;
+            let snap = host.snap.as_ref().ok_or(tr!("нет открытого файла"))?;
             let len = snap.rope.len_chars();
             let lines = snap.rope.len_lines();
             let mut items = Vec::new();
@@ -456,7 +468,7 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
                 .snap
                 .as_ref()
                 .and_then(|s| s.root.clone())
-                .ok_or("нет открытой папки проекта")?;
+                .ok_or(tr!("нет открытой папки проекта"))?;
             let path = inside(&root, &s("path"))?;
             if method == "read_file" {
                 let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -467,7 +479,7 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
             }
         }
         _ => {
-            let snap = host.snap.as_mut().ok_or("нет открытого файла")?;
+            let snap = host.snap.as_mut().ok_or(tr!("нет открытого файла"))?;
             let len = snap.rope.len_chars();
             match method {
                 "text" => Ok(json!(snap.rope.to_string())),
@@ -512,7 +524,10 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
                     host.effects.push(Effect::Select(a, b));
                     Ok(Value::Null)
                 }
-                _ => Err(format!("неизвестный запрос «{method}»")),
+                _ => Err(tf!(
+                    "неизвестный запрос «{method}»",
+                    "unknown request \"{method}\""
+                )),
             }
         }
     }
@@ -534,7 +549,7 @@ fn call(mut caller: Caller<'_, Host>, ptr: u32, len: u32) -> u32 {
                 Err(e) => json!({ "error": e }),
             }
         }
-        None => json!({ "error": "неверное сообщение" }),
+        None => json!({ "error": tr!("неверное сообщение") }),
     };
     let bytes = serde_json::to_vec(&reply).unwrap_or_default();
     let size = bytes.len() as u32;
@@ -596,7 +611,7 @@ impl Loaded {
             .map_err(|e| e.to_string())?;
         let memory = instance
             .get_memory(&store, "memory")
-            .ok_or("нет экспорта memory")?;
+            .ok_or(tr!("нет экспорта memory"))?;
         let alloc = instance
             .get_typed_func::<u32, u32>(&store, "trorpad_alloc")
             .map_err(|e| format!("trorpad_alloc: {e}"))?;
@@ -621,7 +636,10 @@ impl Loaded {
     pub fn send(&mut self, message: &Value, snap: Option<Snapshot>) -> Outcome {
         if let Some(reason) = &self.broken {
             return Outcome {
-                error: Some(format!("плагин остановлен: {reason}")),
+                error: Some(tf!(
+                    "плагин остановлен: {reason}",
+                    "plugin stopped: {reason}"
+                )),
                 broken: true,
                 ..Outcome::default()
             };
@@ -645,14 +663,14 @@ impl Loaded {
             Err(e) => {
                 effects.retain(|e| matches!(e, Effect::Log(..)));
                 let panic = effects.iter().rev().find_map(|e| match e {
-                    Effect::Log(text, true) if text.starts_with("паника") => {
+                    Effect::Log(text, true) if text.starts_with(tr!("паника")) => {
                         Some(text.clone())
                     }
                     _ => None,
                 });
                 let reason = match panic {
                     Some(text) => text,
-                    None if e.contains("fuel") => "превышен лимит работы".to_owned(),
+                    None if e.contains("fuel") => tr!("превышен лимит работы").to_owned(),
                     None => e,
                 };
                 self.broken = Some(reason.clone());
@@ -802,8 +820,9 @@ pub fn load_enabled(dir: &Path, off: &[String]) -> (Vec<Loaded>, Vec<String>) {
                     .iter()
                     .any(|p: &Loaded| p.manifest.id == plugin.manifest.id) =>
             {
-                errors.push(format!(
+                errors.push(tf!(
                     "{}: id «{}» уже занят другим плагином",
+                    "{}: id \"{}\" is already used by another plugin",
                     dir.file_name().unwrap_or_default().to_string_lossy(),
                     plugin.manifest.id
                 ))

@@ -35,6 +35,11 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --release --locked
       - if: runner.os == 'Linux'
+        name: Speed check
+        run: |
+          set -o pipefail
+          target/release/trorpad --bench | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: runner.os == 'Linux'
         run: tar -czf trorpad-linux-x86_64.tar.gz -C target/release trorpad
       - if: runner.os == 'Linux'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

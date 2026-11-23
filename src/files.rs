@@ -66,7 +66,7 @@ pub fn transfer(paths: &[PathBuf], dir: &Path, keep: bool) -> Result<Vec<(PathBu
             continue;
         };
         if dir.starts_with(path) {
-            return Err(format!("нельзя переместить «{}» внутрь себя", path.display()));
+            return Err(tf!("нельзя переместить «{}» внутрь себя", "cannot move \"{}\" into itself", path.display()));
         }
         if path.parent() == Some(dir) && !keep {
             continue;
@@ -408,7 +408,7 @@ impl ProjectPanel {
 
     fn paste_item(&mut self, ui: &mut Ui, dir: &Path) {
         if let Some((paths, keep)) = self.clip.clone()
-            && ui.button("Вставить").clicked()
+            && ui.button(tr!("Вставить")).clicked()
         {
             self.out.push(ProjectEvent::Move(paths, dir.to_path_buf(), keep));
             if !keep {
@@ -419,11 +419,11 @@ impl ProjectPanel {
     }
 
     fn create_items(&mut self, ui: &mut Ui, dir: &Path) {
-        if ui.button("Новый файл…").clicked() {
+        if ui.button(tr!("Новый файл…")).clicked() {
             self.prompt = Some(Prompt::NewFile(dir.to_path_buf(), String::new()));
             ui.close();
         }
-        if ui.button("Новая папка…").clicked() {
+        if ui.button(tr!("Новая папка…")).clicked() {
             self.prompt = Some(Prompt::NewFolder(dir.to_path_buf(), String::new()));
             ui.close();
         }
@@ -435,25 +435,25 @@ impl ProjectPanel {
         {
             self.archiving = None;
             self.out.push(ProjectEvent::Toast(match result {
-                Ok(path) => format!("Архив создан: {}", path.display()),
-                Err(e) => format!("Не удалось создать архив: {e}"),
+                Ok(path) => tf!("Архив создан: {}", "Archive created: {}", path.display()),
+                Err(e) => tf!("Не удалось создать архив: {e}", "Could not create the archive: {e}"),
             }));
             self.reload();
         }
         ui.take_available_width();
         ui.add_space(8.0);
         let Some(root) = self.root.clone() else {
-            ui.label(RichText::new("Папка проекта не открыта.").color(pal.subtext));
+            ui.label(RichText::new(tr!("Папка проекта не открыта.")).color(pal.subtext));
             ui.add_space(4.0);
             if ui
-                .add(Button::new("Открыть папку…"))
+                .add(Button::new(tr!("Открыть папку…")))
                 .clicked()
             {
                 self.pick_root();
             }
             if !recent.is_empty() {
                 ui.add_space(8.0);
-                ui.label(RichText::new("Недавние").small().color(pal.faint));
+                ui.label(RichText::new(tr!("Недавние")).small().color(pal.faint));
                 for path in recent.iter().take(8) {
                     let name = path
                         .file_name()
@@ -504,20 +504,20 @@ impl ProjectPanel {
                     .on_hover_text(hover);
                 },
             );
-            if refresh_button(ui, pal).on_hover_text("Обновить").clicked() {
+            if refresh_button(ui, pal).on_hover_text(tr!("Обновить")).clicked() {
                 refresh = true;
             }
-            let dots = dots_button(ui, pal).on_hover_text("Ещё");
+            let dots = dots_button(ui, pal).on_hover_text(tr!("Ещё"));
             egui::Popup::menu(&dots)
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     .show(|ui| {
                 ui.set_min_width(230.0);
-                if ui.button("Открыть другую папку…").clicked() {
+                if ui.button(tr!("Открыть другую папку…")).clicked() {
                     ui.close();
                     self.pick_root();
                 }
                 if !recent.is_empty() {
-                    ui.menu_button("Недавние папки", |ui| {
+                    ui.menu_button(tr!("Недавние папки"), |ui| {
                         for path in recent {
                             if ui.button(path.display().to_string()).clicked() && path.is_dir() {
                                 self.set_root(path.clone());
@@ -526,29 +526,29 @@ impl ProjectPanel {
                         }
                     });
                 }
-                if ui.button("Закрыть папку").clicked() {
+                if ui.button(tr!("Закрыть папку")).clicked() {
                     self.close();
                     ui.close();
                 }
                 ui.separator();
                 let dir = if self.tree { root.clone() } else { self.cwd.clone() };
                 self.create_items(ui, &dir);
-                if ui.button("Показать в файловом менеджере").clicked() {
+                if ui.button(tr!("Показать в файловом менеджере")).clicked() {
                     let _ = crate::preview::open_folder(&dir);
                     ui.close();
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label("Вид:");
-                    if ui.selectable_label(!self.tree, "список").clicked() {
+                    ui.label(tr!("Вид:"));
+                    if ui.selectable_label(!self.tree, tr!("список")).clicked() {
                         self.out.push(ProjectEvent::View(false));
                     }
-                    if ui.selectable_label(self.tree, "дерево").clicked() {
+                    if ui.selectable_label(self.tree, tr!("дерево")).clicked() {
                         self.out.push(ProjectEvent::View(true));
                     }
                 });
-                ui.checkbox(&mut self.show_size, "Показывать размер");
-                ui.checkbox(&mut self.show_date, "Показывать дату изменения");
+                ui.checkbox(&mut self.show_size, tr!("Показывать размер"));
+                ui.checkbox(&mut self.show_date, tr!("Показывать дату изменения"));
             });
         });
         if refresh {
@@ -575,7 +575,7 @@ impl ProjectPanel {
         {
             let text = match paths.len() {
                 1 => paths[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                n => format!("файлов: {n}"),
+                n => tf!("файлов: {n}", "files: {n}"),
             };
             egui::Area::new(ui.scope_id().with("tror_project_drag"))
                 .order(egui::Order::Tooltip)
@@ -784,14 +784,14 @@ impl ProjectPanel {
                                 .filter(|(_, d)| !d)
                                 .map(|(p, _)| p.clone())
                                 .collect();
-                            if !files.is_empty() && ui.button("Открыть").clicked() {
+                            if !files.is_empty() && ui.button(tr!("Открыть")).clicked() {
                                 open.extend(files.iter().cloned());
                             }
                             let picked: Vec<PathBuf> = chosen.iter().map(|(p, _)| p.clone()).collect();
-                            if ui.button("Вырезать").clicked() {
+                            if ui.button(tr!("Вырезать")).clicked() {
                                 self.clip = Some((picked.clone(), false));
                             }
-                            if ui.button("Копировать").clicked() {
+                            if ui.button(tr!("Копировать")).clicked() {
                                 self.clip = Some((picked, true));
                             }
                             if chosen.len() == 1 && is_dir {
@@ -808,15 +808,15 @@ impl ProjectPanel {
                             }
                             if let Some(peer) = self.peer.clone() {
                                 let paths: Vec<PathBuf> = chosen.iter().map(|(p, _)| p.clone()).collect();
-                                if ui.button(format!("Копировать в «{peer}»")).clicked() {
+                                if ui.button(tf!("Копировать в «{peer}»", "Copy to \"{peer}\"")).clicked() {
                                     self.out.push(ProjectEvent::Transfer(paths.clone(), true));
                                 }
-                                if ui.button(format!("Переместить в «{peer}»")).clicked() {
+                                if ui.button(tf!("Переместить в «{peer}»", "Move to \"{peer}\"")).clicked() {
                                     self.out.push(ProjectEvent::Transfer(paths, false));
                                 }
                             }
                             if let Some(target) = &self.upload_target
-                                && ui.button(format!("Загрузить на сервер ({target})")).clicked()
+                                && ui.button(tf!("Загрузить на сервер ({target})", "Upload to server ({target})")).clicked()
                             {
                                 self.out.push(ProjectEvent::Upload(
                                     chosen.iter().map(|(p, _)| p.clone()).collect(),
@@ -826,7 +826,7 @@ impl ProjectPanel {
                             if self.archiving.is_none()
                                 && chosen.iter().all(|(p, _)| p.parent().map(Path::to_path_buf) == parent)
                             {
-                                ui.menu_button("Архивировать", |ui| {
+                                ui.menu_button(tr!("Архивировать"), |ui| {
                                     for format in crate::archive::formats() {
                                         if ui.button(format.label()).clicked() {
                                             let paths: Vec<PathBuf> =
@@ -838,19 +838,19 @@ impl ProjectPanel {
                                                 ctx.request_repaint();
                                             });
                                             self.archiving = Some(rx);
-                                            self.out.push(ProjectEvent::Toast("Архивирование…".into()));
+                                            self.out.push(ProjectEvent::Toast(tr!("Архивирование…").into()));
                                             ui.close();
                                         }
                                     }
                                 });
                             }
                             ui.separator();
-                            if ui.button("Копировать путь").clicked() {
+                            if ui.button(tr!("Копировать путь")).clicked() {
                                 let text: Vec<String> =
                                     chosen.iter().map(|(p, _)| p.display().to_string()).collect();
                                 ui.ctx().copy_text(text.join("\n"));
                             }
-                            if ui.button("Показать в файловом менеджере").clicked() {
+                            if ui.button(tr!("Показать в файловом менеджере")).clicked() {
                                 let dir = if is_dir {
                                     path.clone()
                                 } else {
@@ -858,7 +858,7 @@ impl ProjectPanel {
                                 };
                                 let _ = crate::preview::open_folder(&dir);
                             }
-                            if chosen.len() == 1 && ui.button("Права и атрибуты…").clicked()
+                            if chosen.len() == 1 && ui.button(tr!("Права и атрибуты…")).clicked()
                                 && let Ok(meta) = std::fs::metadata(&path)
                             {
                                 let mode = mode_of(&meta);
@@ -877,7 +877,7 @@ impl ProjectPanel {
                                     recursive: false,
                                 });
                             }
-                            if chosen.len() == 1 && ui.button("Переименовать…").clicked() {
+                            if chosen.len() == 1 && ui.button(tr!("Переименовать…")).clicked() {
                                 self.prompt = Some(Prompt::Rename(
                                     path.clone(),
                                     path.file_name()
@@ -885,7 +885,7 @@ impl ProjectPanel {
                                         .unwrap_or_default(),
                                 ));
                             }
-                            if ui.button("Удалить…").clicked() {
+                            if ui.button(tr!("Удалить…")).clicked() {
                                 self.prompt = Some(Prompt::Delete(
                                     chosen.iter().map(|(p, _)| p.clone()).collect(),
                                 ));
@@ -933,13 +933,13 @@ impl ProjectPanel {
         {
             let name = match paths.len() {
                 1 => paths[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                n => format!("файлов: {n}"),
+                n => tf!("файлов: {n}", "files: {n}"),
             };
             let folder = to
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| to.display().to_string());
-            let verb = if command { "копировать в" } else { "переместить в" };
+            let verb = if command { tr!("копировать в") } else { tr!("переместить в") };
             egui::Area::new(ui.scope_id().with("tror_project_move"))
                 .order(egui::Order::Tooltip)
                 .fixed_pos(pos + egui::vec2(14.0, 10.0))
@@ -1008,11 +1008,11 @@ impl ProjectPanel {
             self.paste_item(ui, &dir);
             self.create_items(ui, &dir);
             ui.separator();
-            if ui.button("Обновить").clicked() {
+            if ui.button(tr!("Обновить")).clicked() {
                 self.scanned.clear();
                 ui.close();
             }
-            if ui.button("Показать в файловом менеджере").clicked() {
+            if ui.button(tr!("Показать в файловом менеджере")).clicked() {
                 let _ = crate::preview::open_folder(&dir);
                 ui.close();
             }
@@ -1045,8 +1045,7 @@ impl ProjectPanel {
         let modal = dialog("tror_local_attrs", pal).show(ctx, |ui| {
             ui.set_width(380.0);
             ui.label(
-                RichText::new(format!(
-                    "Свойства «{}»",
+                RichText::new(tf!("Свойства «{}»", "Properties of \"{}\"",
                     state
                         .path
                         .file_name()
@@ -1060,40 +1059,40 @@ impl ProjectPanel {
                 .num_columns(2)
                 .spacing([14.0, 4.0])
                 .show(ui, |ui| {
-                    ui.label(RichText::new("Путь").color(pal.subtext));
+                    ui.label(RichText::new(tr!("Путь")).color(pal.subtext));
                     ui.add(egui::Label::new(state.path.display().to_string()).truncate());
                     ui.end_row();
                     if !state.is_dir {
-                        ui.label(RichText::new("Размер").color(pal.subtext));
+                        ui.label(RichText::new(tr!("Размер")).color(pal.subtext));
                         ui.label(if state.size < 1024 {
                             size_label(state.size as usize)
                         } else {
-                            format!("{} ({} Б)", size_label(state.size as usize), state.size)
+                            tf!("{} ({} Б)", "{} ({} B)", size_label(state.size as usize), state.size)
                         });
                         ui.end_row();
                     }
                     if let Some(mtime) = state.mtime {
-                        ui.label(RichText::new("Изменён").color(pal.subtext));
+                        ui.label(RichText::new(tr!("Изменён")).color(pal.subtext));
                         ui.label(date_label(mtime));
                         ui.end_row();
                     }
                 });
             ui.add_space(8.0);
             if cfg!(unix) {
-                ui.label(RichText::new("Права доступа").family(crate::theme::medium()));
+                ui.label(RichText::new(tr!("Права доступа")).family(crate::theme::medium()));
                 widgets::perm_grid(ui, pal, &mut state.mode, &mut state.octal);
             } else {
-                ui.checkbox(&mut state.readonly, "Только чтение");
+                ui.checkbox(&mut state.readonly, tr!("Только чтение"));
             }
             if state.is_dir {
-                ui.checkbox(&mut state.recursive, "Применить ко всему содержимому");
+                ui.checkbox(&mut state.recursive, tr!("Применить ко всему содержимому"));
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if dialog_button(ui, pal, "Применить", true) {
+                if dialog_button(ui, pal, tr!("Применить"), true) {
                     apply = true;
                 }
-                if dialog_button(ui, pal, "Отмена", false) {
+                if dialog_button(ui, pal, tr!("Отмена"), false) {
                     cancel = true;
                 }
             });
@@ -1107,8 +1106,8 @@ impl ProjectPanel {
                 set_mode(&state.path, state.mode, state.readonly)
             };
             self.out.push(ProjectEvent::Toast(match result {
-                Ok(()) => format!("Права изменены: {count}"),
-                Err(e) => format!("Права не изменены: {e}"),
+                Ok(()) => tf!("Права изменены: {count}", "Permissions changed: {count}"),
+                Err(e) => tf!("Права не изменены: {e}", "Permissions not changed: {e}"),
             }));
         } else if cancel || modal.should_close() {
             self.attrs = None;
@@ -1124,26 +1123,25 @@ impl ProjectPanel {
         let modal = dialog("tror_local_prompt", pal).show(ctx, |ui| {
             ui.set_width(360.0);
             let (title, input, action) = match prompt {
-                Prompt::NewFile(dir, name) => (format!("Новый файл в {}", dir.display()), Some(name), "Создать"),
-                Prompt::NewFolder(dir, name) => (format!("Новая папка в {}", dir.display()), Some(name), "Создать"),
-                Prompt::Rename(_, name) => ("Переименовать".to_owned(), Some(name), "Переименовать"),
+                Prompt::NewFile(dir, name) => (tf!("Новый файл в {}", "New file in {}", dir.display()), Some(name), tr!("Создать")),
+                Prompt::NewFolder(dir, name) => (tf!("Новая папка в {}", "New folder in {}", dir.display()), Some(name), tr!("Создать")),
+                Prompt::Rename(_, name) => (tr!("Переименовать").to_owned(), Some(name), tr!("Переименовать")),
                 Prompt::Delete(items) => {
                     let text = if items.len() == 1 {
-                        format!(
-                            "Удалить «{}» с диска?",
+                        tf!("Удалить «{}» с диска?", "Delete \"{}\" from disk?",
                             items[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
                         )
                     } else {
-                        format!("Удалить с диска выбранные объекты ({})?", items.len())
+                        tf!("Удалить с диска выбранные объекты ({})?", "Delete the selected items from disk ({})?", items.len())
                     };
                     ui.label(text);
                     if items.iter().any(|p| p.is_dir()) {
                         ui.label(
-                            RichText::new("Папки удаляются вместе со всем содержимым, мимо корзины. Отменить это нельзя.")
+                            RichText::new(tr!("Папки удаляются вместе со всем содержимым, мимо корзины. Отменить это нельзя."))
                                 .color(pal.warn),
                         );
                     }
-                    (String::new(), None, "Удалить")
+                    (String::new(), None, tr!("Удалить"))
                 }
             };
             if let Some(input) = input {
@@ -1160,7 +1158,7 @@ impl ProjectPanel {
                 if dialog_button(ui, pal, action, true) {
                     confirmed = true;
                 }
-                if dialog_button(ui, pal, "Отмена", false) {
+                if dialog_button(ui, pal, tr!("Отмена"), false) {
                     cancelled = true;
                 }
             });
@@ -1176,12 +1174,12 @@ impl ProjectPanel {
                     self.invalidate(&dir);
                     self.expanded.insert(dir.clone());
                     if path.exists() {
-                        Err(format!("{name} уже существует"))
+                        Err(tf!("{name} уже существует", "{name} already exists"))
                     } else {
                         std::fs::write(&path, b"")
                             .map(|()| {
                                 self.out.push(ProjectEvent::Open(vec![path.clone()]));
-                                format!("Создан файл {name}")
+                                tf!("Создан файл {name}", "File {name} created")
                             })
                             .map_err(|e| e.to_string())
                     }
@@ -1190,7 +1188,7 @@ impl ProjectPanel {
                     self.invalidate(&dir);
                     self.expanded.insert(dir.clone());
                     std::fs::create_dir(dir.join(&name))
-                        .map(|()| format!("Создана папка {name}"))
+                        .map(|()| tf!("Создана папка {name}", "Folder {name} created"))
                         .map_err(|e| e.to_string())
                 }),
                 Some(Prompt::Rename(from, name)) => valid(&name).map(|name| {
@@ -1198,10 +1196,10 @@ impl ProjectPanel {
                     self.invalidate(&parent);
                     let to = parent.join(&name);
                     if to.exists() {
-                        Err(format!("{name} уже существует"))
+                        Err(tf!("{name} уже существует", "{name} already exists"))
                     } else {
                         std::fs::rename(&from, &to)
-                            .map(|()| format!("Переименовано в {name}"))
+                            .map(|()| tf!("Переименовано в {name}", "Renamed to {name}"))
                             .map_err(|e| e.to_string())
                     }
                 }),
@@ -1227,7 +1225,7 @@ impl ProjectPanel {
                     }
                     Some(match error {
                         Some(e) => Err(e),
-                        None => Ok(format!("Удалено: {removed}")),
+                        None => Ok(tf!("Удалено: {removed}", "Deleted: {removed}")),
                     })
                 }
                 None => None,
@@ -1235,7 +1233,7 @@ impl ProjectPanel {
             if let Some(result) = result {
                 self.out.push(ProjectEvent::Toast(match result {
                     Ok(text) => text,
-                    Err(e) => format!("Не получилось: {e}"),
+                    Err(e) => tf!("Не получилось: {e}", "Failed: {e}"),
                 }));
             }
         } else if cancelled || modal.should_close() {

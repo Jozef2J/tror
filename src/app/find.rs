@@ -59,7 +59,7 @@ impl TrorApp {
             }
         }
         let mut builder = egui::ViewportBuilder::default()
-            .with_title(TITLE)
+            .with_title(tr!(TITLE))
             .with_decorations(false)
             .with_resizable(false)
             .with_taskbar(false)
@@ -77,7 +77,7 @@ impl TrorApp {
             let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
             self.find.focused = focused;
             if !self.find.owned {
-                self.find.owned = super::owner::adopt(TITLE);
+                self.find.owned = super::owner::adopt(tr!(TITLE));
             }
             if std::mem::take(&mut self.find.focus) {
                 self.find.tries = 30;
@@ -154,7 +154,7 @@ impl TrorApp {
                 ui,
                 pal,
                 &mut files,
-                &[(false, "В документе"), (true, "В файлах")],
+                &[(false, tr!("В документе")), (true, tr!("В файлах"))],
                 104.0,
             ) {
                 self.search.files = files;
@@ -167,7 +167,7 @@ impl TrorApp {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icon_button(ui, pal, Icon::Close)
-                    .on_hover_text("Закрыть (Esc, Ctrl+F)")
+                    .on_hover_text(tr!("Закрыть (Esc, Ctrl+F)"))
                     .clicked()
                 {
                     actions.push(Action::CloseSearch);
@@ -178,15 +178,15 @@ impl TrorApp {
     }
 
     fn files_search(&mut self, ui: &mut Ui, pal: &Palette) {
-        let mut scopes: Vec<(usize, String)> = vec![(0, "Проект".to_owned())];
+        let mut scopes: Vec<(usize, String)> = vec![(0, tr!("Проект").to_owned())];
         if self.project2.root.is_some() {
-            scopes.push((1, "Проект 2".to_owned()));
+            scopes.push((1, tr!("Проект 2").to_owned()));
         }
         for (index, remote) in self.remotes.iter().enumerate() {
             if let Some((profile, _)) = remote.selected_profile()
                 && remote.connected()
             {
-                scopes.push((2 + index, format!("Сервер: {}", profile.name)));
+                scopes.push((2 + index, tf!("Сервер: {}", "Server: {}", profile.name)));
             }
         }
         if !scopes.iter().any(|s| s.0 == self.find.scope) {
@@ -194,7 +194,7 @@ impl TrorApp {
         }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
-            crate::widgets::form_label(ui, pal, "Где искать");
+            crate::widgets::form_label(ui, pal, tr!("Где искать"));
             let current = scopes
                 .iter()
                 .find(|s| s.0 == self.find.scope)
@@ -261,7 +261,7 @@ fn set_alpha(alpha: u8) -> bool {
         1
     }
     let mut search = Search {
-        title: TITLE.encode_utf16().collect(),
+        title: tr!(TITLE).encode_utf16().collect(),
         pid: unsafe { GetCurrentProcessId() },
         found: std::ptr::null_mut(),
     };
@@ -286,7 +286,7 @@ fn set_alpha(alpha: u8) -> bool {
     let app = NSApplication::sharedApplication(mtm);
     let mut found = false;
     for window in app.windows().iter() {
-        if window.title().to_string() == TITLE {
+        if window.title().to_string() == tr!(TITLE) {
             window.setAlphaValue(alpha as f64 / 255.0);
             found = true;
         }

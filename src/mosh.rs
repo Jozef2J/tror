@@ -34,10 +34,10 @@ impl Crypto {
         }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(text)
-            .map_err(|_| "сервер прислал неверный ключ сеанса")?;
+            .map_err(|_| tr!("сервер прислал неверный ключ сеанса"))?;
         let key: [u8; 16] = bytes
             .try_into()
-            .map_err(|_| "сервер прислал ключ сеанса неверной длины")?;
+            .map_err(|_| tr!("сервер прислал ключ сеанса неверной длины"))?;
         Ok(Self {
             cipher: Cipher::new(&key.into()),
         })
@@ -480,17 +480,17 @@ fn bootstrap(
     for locale in ["en_US.UTF-8", "C.UTF-8"] {
         let command = format!("{server} new -s -c 256{ports} -l LANG={locale} -l LC_ALL={locale}");
         trace::client(format!("[MOSH] exec: {command}"));
-        let _ = events.send(ShellEvent::Status("запуск mosh-server…".into()));
+        let _ = events.send(ShellEvent::Status(tr!("запуск mosh-server…").into()));
         wake();
         let mut channel = session
             .channel_session()
-            .map_err(|e| format!("не удалось открыть канал: {e}"))?;
+            .map_err(|e| tf!("не удалось открыть канал: {e}", "could not open a channel: {e}"))?;
         channel
             .request_pty("xterm-256color", None, Some((size.0 as u32, size.1 as u32, 0, 0)))
-            .map_err(|e| format!("сервер не дал терминал: {e}"))?;
+            .map_err(|e| tf!("сервер не дал терминал: {e}", "the server gave no terminal: {e}"))?;
         channel
             .exec(&command)
-            .map_err(|e| format!("не удалось запустить mosh-server: {e}"))?;
+            .map_err(|e| tf!("не удалось запустить mosh-server: {e}", "could not start mosh-server: {e}"))?;
         let mut output = Vec::new();
         let mut buf = [0u8; 4096];
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -513,7 +513,7 @@ fn bootstrap(
         let text = String::from_utf8_lossy(&output).into_owned();
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             if line.starts_with("MOSH CONNECT") {
-                trace::server("[MOSH] MOSH CONNECT <порт> <ключ>");
+                trace::server(tr!("[MOSH] MOSH CONNECT <порт> <ключ>"));
             } else {
                 trace::server(format!("[MOSH] {}", line.trim()));
             }
@@ -529,15 +529,14 @@ fn bootstrap(
     }
     let lower = last_output.to_lowercase();
     Err(
-        if lower.contains("not found") || lower.contains("не найден") || lower.contains("no such file") {
-            format!(
-                "на сервере не найден {server}: установите пакет mosh (apt install mosh / yum install mosh) или укажите путь к mosh-server в профиле"
+        if lower.contains("not found") || lower.contains(tr!("не найден")) || lower.contains("no such file") {
+            tf!("на сервере не найден {server}: установите пакет mosh (apt install mosh / yum install mosh) или укажите путь к mosh-server в профиле", "{server} not found on the server: install the mosh package (apt install mosh / yum install mosh) or set the path to mosh-server in the profile"
             )
         } else if lower.contains("utf-8") || lower.contains("locale") {
-            "mosh-server не нашёл на сервере локаль UTF-8 (нужна en_US.UTF-8 или C.UTF-8)".into()
+            tr!("mosh-server не нашёл на сервере локаль UTF-8 (нужна en_US.UTF-8 или C.UTF-8)").into()
         } else {
             let tail: String = last_output.trim().chars().take(300).collect();
-            format!("mosh-server не запустился{}", if tail.is_empty() { String::new() } else { format!(": {tail}") })
+            tf!("mosh-server не запустился{}", "mosh-server did not start{}", if tail.is_empty() { String::new() } else { format!(": {tail}") })
         },
     )
 }
@@ -554,9 +553,9 @@ fn run(
     let ip = profile
         .address()
         .to_socket_addrs()
-        .map_err(|e| format!("не удалось найти хост: {e}"))?
+        .map_err(|e| tf!("не удалось найти хост: {e}", "could not resolve the host: {e}"))?
         .next()
-        .ok_or("не удалось найти хост")?
+        .ok_or(tr!("не удалось найти хост"))?
         .ip();
     let target = SocketAddr::new(ip, port);
     let socket = UdpSocket::bind(if ip.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" })
@@ -581,7 +580,7 @@ fn run(
                 Ok(ShellCmd::TrustHost(_)) => {}
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    return Ok("отключено (сеанс mosh на сервере завершится сам)".into());
+                    return Ok(tr!("отключено (сеанс mosh на сервере завершится сам)").into());
                 }
             }
         }
@@ -616,12 +615,11 @@ fn run(
         if heard.elapsed() > SILENT && !warned {
             warned = true;
             let text = if ever_heard {
-                format!(
-                    "нет связи с сервером {} с — mosh переподключится сам, когда сеть вернётся",
+                tf!("нет связи с сервером {} с — mosh переподключится сам, когда сеть вернётся", "no connection to the server for {} s — mosh will reconnect by itself when the network is back",
                     heard.elapsed().as_secs()
                 )
             } else {
-                format!("сервер не отвечает по UDP {port} — проверьте, что порт открыт в файрволе")
+                tf!("сервер не отвечает по UDP {port} — проверьте, что порт открыт в файрволе", "the server does not answer on UDP {port} — check that the port is open in the firewall")
             };
             let _ = events.send(ShellEvent::Status(text));
             wake();

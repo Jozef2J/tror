@@ -183,7 +183,7 @@ pub fn install_fonts(
                 true
             }
             Ok(_) => {
-                failed = Some(format!("{} — не файл шрифта TTF/OTF", path.display()));
+                failed = Some(tf!("{} — не файл шрифта TTF/OTF", "{} — not a TTF/OTF font file", path.display()));
                 false
             }
             Err(e) => {

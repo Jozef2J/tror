@@ -52,7 +52,7 @@ pub fn decode(bytes: Vec<u8>, forced: Option<&'static Encoding>) -> Result<Decod
         (None, Some((enc, len))) => (Some(enc), len),
         (None, None) => {
             if memchr::memchr(0, &bytes).is_some() {
-                return Err("похоже на бинарный файл".into());
+                return Err(tr!("похоже на бинарный файл").into());
             }
             (None, 0)
         }
@@ -224,6 +224,8 @@ pub struct Document {
     pub remote: Option<(String, String)>,
     pub missing: bool,
     pub missing_ack: bool,
+    pub server_hash: Option<u64>,
+    pub pending_hash: Option<u64>,
     pub untitled: u32,
     pub name: Option<String>,
     pub pinned: bool,
@@ -284,6 +286,8 @@ impl Document {
             remote: None,
             missing: false,
             missing_ack: false,
+            server_hash: None,
+            pending_hash: None,
             pinned: false,
             untitled,
             name: None,
@@ -337,8 +341,10 @@ impl Document {
     }
 
     pub fn open_remote(id: u64, profile: &str, path: &str, bytes: Vec<u8>) -> Result<Self, String> {
+        let hash = crate::remote::content_hash(&bytes);
         let decoded = decode(bytes, None)?;
         let mut doc = Self::empty(id, 0);
+        doc.server_hash = Some(hash);
         doc.remote = Some((profile.to_owned(), path.to_owned()));
         doc.apply_decoded(decoded);
         Ok(doc)
@@ -481,7 +487,7 @@ impl Document {
         let path = self
             .path
             .clone()
-            .ok_or("файл не сохранён на этом компьютере")?;
+            .ok_or(tr!("файл не сохранён на этом компьютере"))?;
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         let decoded = decode(bytes, Some(encoding))?;
         self.apply_decoded(decoded);
@@ -489,7 +495,7 @@ impl Document {
     }
 
     pub fn save(&mut self) -> Result<(), String> {
-        let path = self.path.clone().ok_or("не задан путь")?;
+        let path = self.path.clone().ok_or(tr!("не задан путь"))?;
         std::fs::write(&path, self.encoded()).map_err(|e| e.to_string())?;
         self.remote = None;
         self.mark_saved(self.version);
@@ -516,7 +522,7 @@ impl Document {
             None => self
                 .name
                 .clone()
-                .unwrap_or_else(|| format!("Новый {}", self.untitled)),
+                .unwrap_or_else(|| tf!("Новый {}", "New {}", self.untitled)),
         }
     }
 

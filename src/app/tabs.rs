@@ -140,36 +140,6 @@ impl TrorApp {
         };
         let active = index == self.active;
         if crate::visual::supports(&self.docs[index]) {
-            let mut visual = self.visual.contains_key(&id);
-            egui::Frame::new()
-                .fill(pal.mantle)
-                .inner_margin(egui::Margin::symmetric(8, 4))
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    let switched = ui
-                        .horizontal(|ui| {
-                            crate::widgets::segmented(
-                                ui,
-                                pal,
-                                &mut visual,
-                                &[(false, "Код"), (true, "Визуально")],
-                                86.0,
-                            )
-                        })
-                        .inner;
-                    if switched {
-                        if visual {
-                            if self.docs[index].syntax == "Plain Text" {
-                                self.docs[index].syntax = "HTML".into();
-                            }
-                            let editor = crate::visual::Visual::new(&self.docs[index]);
-                            self.visual.insert(id, editor);
-                        } else {
-                            self.visual.remove(&id);
-                            self.focus_editor = true;
-                        }
-                    }
-                });
             if let Some(editor) = self.visual.get_mut(&id) {
                 if active && ui.ctx().viewport_id() == egui::ViewportId::ROOT {
                     self.find.anchor =
@@ -177,7 +147,8 @@ impl TrorApp {
                 }
                 let focus = active && !modal_open && !self.search.open;
                 let size = self.settings.look.font_size;
-                editor.ui(ui, &mut self.docs[index], pal, size, focus);
+                let search = active.then_some(&mut self.search);
+                editor.ui(ui, &mut self.docs[index], pal, size, focus, search);
                 if let Some(text) = editor.notice.take() {
                     let now = ui.input(|i| i.time);
                     self.notify(text, now);
@@ -194,6 +165,9 @@ impl TrorApp {
             }
         } else {
             self.visual.remove(&id);
+        }
+        if active {
+            self.search.visual = None;
         }
         let pane = ui.available_rect_before_wrap();
         let look = &self.settings.look;
@@ -265,17 +239,17 @@ impl TrorApp {
             ui.add_space(8.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(8.0);
-                if ui.add(Button::new("Очистить")).clicked() {
+                if ui.add(Button::new(tr!("Очистить"))).clicked() {
                     self.log.clear();
                 }
-                if ui.add(Button::new("Копировать всё")).clicked() {
+                if ui.add(Button::new(tr!("Копировать всё"))).clicked() {
                     let text: Vec<&str> = self.log.iter().map(|(t, _)| t.as_str()).collect();
                     ui.ctx().copy_text(text.join("\n"));
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.add(
                         egui::Label::new(
-                            RichText::new("Сырой обмен с сервером: команды и ответы FTP, этапы SSH/SFTP, запросы к базе")
+                            RichText::new(tr!("Сырой обмен с сервером: команды и ответы FTP, этапы SSH/SFTP, запросы к базе"))
                                 .small()
                                 .color(pal.faint),
                         )
@@ -348,18 +322,18 @@ impl Viewer<'_> {
             ui.add_enabled(enabled, Button::new(text).shortcut_text(shortcut))
                 .clicked()
         };
-        if row(ui, "Закрыть", key("close_tab"), true) {
+        if row(ui, tr!("Закрыть"), key("close_tab"), true) {
             cmd = Some(TabCmd::Close);
         }
-        if row(ui, "Закрыть остальные", String::new(), order.len() > 1) {
+        if row(ui, tr!("Закрыть остальные"), String::new(), order.len() > 1) {
             cmd = Some(TabCmd::CloseOthers);
         }
-        if row(ui, "Закрыть вкладки слева", String::new(), at > 0) {
+        if row(ui, tr!("Закрыть вкладки слева"), String::new(), at > 0) {
             cmd = Some(TabCmd::CloseLeft);
         }
         if row(
             ui,
-            "Закрыть вкладки справа",
+            tr!("Закрыть вкладки справа"),
             String::new(),
             at + 1 < order.len(),
         ) {
@@ -367,21 +341,21 @@ impl Viewer<'_> {
         }
         ui.separator();
         let pin = if pinned {
-            "Открепить вкладку"
+            tr!("Открепить вкладку")
         } else {
-            "Закрепить вкладку"
+            tr!("Закрепить вкладку")
         };
         if row(ui, pin, String::new(), true) {
             cmd = Some(TabCmd::Pin);
         }
         ui.separator();
-        if row(ui, "Сохранить", key("save"), true) {
+        if row(ui, tr!("Сохранить"), key("save"), true) {
             cmd = Some(TabCmd::Save);
         }
-        if row(ui, "Сохранить как…", key("save_as"), true) {
+        if row(ui, tr!("Сохранить как…"), key("save_as"), true) {
             cmd = Some(TabCmd::SaveAs);
         }
-        if row(ui, "Переименовать…", String::new(), true) {
+        if row(ui, tr!("Переименовать…"), String::new(), true) {
             cmd = Some(TabCmd::Rename);
         }
         ui.separator();
@@ -396,28 +370,39 @@ impl Viewer<'_> {
             (None, Some(p)) => p.parent().map(|d| d.display().to_string()),
             _ => None,
         };
-        if row(ui, "Копировать полный путь", String::new(), full.is_some())
-            && let Some(text) = &full
+        if row(
+            ui,
+            tr!("Копировать полный путь"),
+            String::new(),
+            full.is_some(),
+        ) && let Some(text) = &full
         {
             ui.ctx().copy_text(text.clone());
         }
-        if row(ui, "Копировать имя файла", String::new(), true) {
+        if row(ui, tr!("Копировать имя файла"), String::new(), true) {
             ui.ctx().copy_text(name.clone());
         }
-        if row(ui, "Копировать путь к папке", String::new(), dir.is_some())
-            && let Some(text) = &dir
+        if row(
+            ui,
+            tr!("Копировать путь к папке"),
+            String::new(),
+            dir.is_some(),
+        ) && let Some(text) = &dir
         {
             ui.ctx().copy_text(text.clone());
         }
-        if path.is_some() && remote.is_none() && row(ui, "Показать в папке", String::new(), true)
+        if path.is_some()
+            && remote.is_none()
+            && row(ui, tr!("Показать в папке"), String::new(), true)
         {
             cmd = Some(TabCmd::Reveal);
         }
         ui.separator();
         ui.add_enabled_ui(location.is_some(), |ui| {
-            ui.menu_button("Цвет вкладки", |ui| {
+            ui.menu_button(tr!("Цвет вкладки"), |ui| {
                 ui.set_min_width(170.0);
                 for (i, (label, _)) in TAB_COLORS.iter().enumerate() {
+                    let label = tr!(*label);
                     let swatch = tab_color(i as u8);
                     let response =
                         ui.selectable_label(color == Some(i as u8), format!("     {label}"));
@@ -433,29 +418,29 @@ impl Viewer<'_> {
                 }
                 ui.separator();
                 if ui
-                    .add_enabled(color.is_some(), Button::new("Без цвета"))
+                    .add_enabled(color.is_some(), Button::new(tr!("Без цвета")))
                     .clicked()
                 {
                     cmd = Some(TabCmd::Color(None));
                 }
             });
         });
-        ui.menu_button("Область вкладок", |ui| {
+        ui.menu_button(tr!("Область вкладок"), |ui| {
             ui.set_min_width(230.0);
             let alone = order.len() < 2;
             if ui
-                .add_enabled(!alone, Button::new("Новая область справа"))
+                .add_enabled(!alone, Button::new(tr!("Новая область справа")))
                 .clicked()
             {
                 cmd = Some(TabCmd::NewGroup(egui_stack::Split::Right));
             }
             if ui
-                .add_enabled(!alone, Button::new("Новая область снизу"))
+                .add_enabled(!alone, Button::new(tr!("Новая область снизу")))
                 .clicked()
             {
                 cmd = Some(TabCmd::NewGroup(egui_stack::Split::Below));
             }
-            if ui.button("Переместить в другую область").clicked() {
+            if ui.button(tr!("Переместить в другую область")).clicked() {
                 cmd = Some(TabCmd::OtherGroup);
             }
         });

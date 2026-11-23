@@ -104,15 +104,16 @@ mod imp {
                 let keep = moving || storm;
                 place(hwnd, if keep { &before } else { &suggested });
                 crate::trace::line(
-                    format!(
+                    tf!(
                         "[DPI] {} dpi, {}: окно {}×{} в ({}, {})",
+                        "[DPI] {} dpi, {}: window {}×{} at ({}, {})",
                         wparam & 0xFFFF,
                         if storm {
-                            "частая смена — геометрия сохранена"
+                            tr!("частая смена — геометрия сохранена")
                         } else if moving {
-                            "перетаскивание — геометрия сохранена"
+                            tr!("перетаскивание — геометрия сохранена")
                         } else {
-                            "прямоугольник Windows"
+                            tr!("прямоугольник Windows")
                         },
                         if keep {
                             before.right - before.left

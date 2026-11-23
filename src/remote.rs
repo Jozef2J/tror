@@ -15,6 +15,51 @@ const MASK: &[u8] = b"tror-profile-mask";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
 const IO_TIMEOUT_MS: u32 = 30_000;
 const KEEPALIVE: Duration = Duration::from_secs(25);
+const CHECK_LIMIT: u64 = 8 * 1024 * 1024;
+const KEEP_BACKUPS: usize = 10;
+
+pub fn content_hash(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub fn backups_dir() -> Option<PathBuf> {
+    eframe::storage_dir("Tror").map(|dir| dir.join("backups"))
+}
+
+pub fn backup(profile: &str, path: &str, data: &[u8]) -> Result<PathBuf, String> {
+    let root = backups_dir().ok_or(tr!("нет папки данных программы"))?;
+    let host: String = profile
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .collect();
+    let file = crate::sync::local_path(&root.join(host), path.trim_start_matches('/'))
+        .ok_or(tr!("небезопасное имя файла"))?;
+    let dir = file.parent().ok_or(tr!("нет каталога"))?.to_path_buf();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let target = dir.join(format!("{name}~{stamp}"));
+    std::fs::write(&target, data).map_err(|e| e.to_string())?;
+    let prefix = format!("{name}~");
+    let mut old: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|e| e.path())
+        .collect();
+    old.sort();
+    let extra = old.len().saturating_sub(KEEP_BACKUPS);
+    for path in &old[..extra] {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(target)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
 pub enum Protocol {
@@ -38,7 +83,7 @@ impl Protocol {
             Protocol::Sftp => "SFTP",
             Protocol::Ftp => "FTP",
             Protocol::Ftps => "FTPS",
-            Protocol::FtpsImplicit => "FTPS неявный",
+            Protocol::FtpsImplicit => tr!("FTPS неявный"),
         }
     }
 
@@ -190,7 +235,7 @@ impl Store {
             }
             Err(e) => {
                 store.locked = true;
-                crate::trace::line(format!("[Пароли] системное хранилище недоступно: {e}"), true);
+                crate::trace::line(tf!("[Пароли] системное хранилище недоступно: {e}", "[Passwords] the system store is not available: {e}"), true);
             }
         }
         store
@@ -218,7 +263,7 @@ impl Store {
     pub fn switch_vault(path: Option<PathBuf>, in_file: bool) -> Result<(), String> {
         let store = Store::load(path);
         if store.locked {
-            return Err("системное хранилище недоступно".into());
+            return Err(tr!("системное хранилище недоступно").into());
         }
         crate::vault::set_in_file(in_file);
         if store.path.is_some() {
@@ -228,7 +273,7 @@ impl Store {
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let path = self.path.as_deref().ok_or("нет каталога настроек")?;
+        let path = self.path.as_deref().ok_or(tr!("нет каталога настроек"))?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
@@ -379,29 +424,44 @@ impl TermProfile {
     }
 }
 
-const DSA_NOTE: &str = "ключ DSA: этот тип устарел, в OpenSSH 10 удалён, и библиотека SSH программы входить по нему не умеет — создайте ключ Ed25519 (ssh-keygen -t ed25519)";
+pub(crate) const DSA_NOTE: &str = "ключ DSA: этот тип устарел, в OpenSSH 10 удалён, и библиотека SSH программы входить по нему не умеет — создайте ключ Ed25519 (ssh-keygen -t ed25519)";
 
 pub fn key_kind(path: &str) -> Result<String, String> {
     use base64::Engine;
     let text = std::fs::read_to_string(path.trim()).map_err(|e| e.to_string())?;
-    if text.starts_with("PuTTY-User-Key-File") {
-        return Err("ключ в формате PuTTY (.ppk) — экспортируйте его в PuTTYgen: Conversions → Export OpenSSH key".into());
+    if crate::ppk::is_ppk(&text) {
+        let first = text.lines().next().unwrap_or_default();
+        let kind = first.split(':').nth(1).unwrap_or_default().trim();
+        if kind == "ssh-dss" {
+            return Err(tr!(DSA_NOTE).into());
+        }
+        let name = match kind {
+            "ssh-ed25519" => "Ed25519".to_owned(),
+            "ssh-rsa" => "RSA".to_owned(),
+            k => format!("ECDSA {}", k.trim_start_matches("ecdsa-sha2-")),
+        };
+        let locked = !text.lines().any(|l| l.trim() == "Encryption: none");
+        return Ok(if locked {
+            tf!("PuTTY .ppk, {name}, защищён парольной фразой", "PuTTY .ppk, {name}, protected with a passphrase")
+        } else {
+            format!("PuTTY .ppk, {name}")
+        });
     }
     let header = text
         .lines()
         .find(|l| l.starts_with("-----BEGIN "))
-        .ok_or("это не закрытый ключ OpenSSH или PEM")?;
+        .ok_or(tr!("это не закрытый ключ OpenSSH или PEM"))?;
     let encrypted = text.contains("ENCRYPTED");
     let lock = |name: &str| {
         if encrypted {
-            format!("{name}, защищён парольной фразой")
+            tf!("{name}, защищён парольной фразой", "{name}, protected with a passphrase")
         } else {
             name.to_owned()
         }
     };
     Ok(match header {
         h if h.contains("RSA PRIVATE KEY") => lock("RSA"),
-        h if h.contains("DSA PRIVATE KEY") => return Err(DSA_NOTE.into()),
+        h if h.contains("DSA PRIVATE KEY") => return Err(tr!(DSA_NOTE).into()),
         h if h.contains("EC PRIVATE KEY") => lock("ECDSA"),
         h if h.contains("OPENSSH PRIVATE KEY") => {
             let body: String = text
@@ -415,7 +475,7 @@ pub fn key_kind(path: &str) -> Result<String, String> {
                 .map_err(|e| e.to_string())?;
             let magic = b"openssh-key-v1\0";
             if !bytes.starts_with(magic) {
-                return Err("повреждённый ключ OpenSSH".into());
+                return Err(tr!("повреждённый ключ OpenSSH").into());
             }
             let mut at = magic.len();
             fn field(bytes: &[u8], at: &mut usize) -> Option<Vec<u8>> {
@@ -424,11 +484,11 @@ pub fn key_kind(path: &str) -> Result<String, String> {
                 *at += 4 + len;
                 Some(value)
             }
-            let cipher = field(&bytes, &mut at).ok_or("повреждённый ключ OpenSSH")?;
+            let cipher = field(&bytes, &mut at).ok_or(tr!("повреждённый ключ OpenSSH"))?;
             field(&bytes, &mut at);
             field(&bytes, &mut at);
             at += 4;
-            let public = field(&bytes, &mut at).ok_or("повреждённый ключ OpenSSH")?;
+            let public = field(&bytes, &mut at).ok_or(tr!("повреждённый ключ OpenSSH"))?;
             let len = public
                 .get(..4)
                 .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
@@ -437,20 +497,20 @@ pub fn key_kind(path: &str) -> Result<String, String> {
             let name = match kind.as_ref() {
                 "ssh-ed25519" => "Ed25519".to_owned(),
                 "ssh-rsa" => "RSA".to_owned(),
-                "ssh-dss" => return Err(DSA_NOTE.into()),
+                "ssh-dss" => return Err(tr!(DSA_NOTE).into()),
                 k if k.starts_with("ecdsa-sha2-") => format!("ECDSA {}", &k[11..]),
-                k if k.starts_with("sk-") => format!("{k} (ключ безопасности)"),
+                k if k.starts_with("sk-") => tf!("{k} (ключ безопасности)", "{k} (security key)"),
                 k => k.to_owned(),
             };
             if cipher != b"none" {
-                format!("{name}, защищён парольной фразой")
+                tf!("{name}, защищён парольной фразой", "{name}, protected with a passphrase")
             } else {
                 name
             }
         }
-        h if h.contains("ENCRYPTED PRIVATE KEY") => "PKCS#8, защищён парольной фразой".into(),
+        h if h.contains("ENCRYPTED PRIVATE KEY") => tr!("PKCS#8, защищён парольной фразой").into(),
         h if h.contains("PRIVATE KEY") => "PKCS#8".into(),
-        _ => return Err("это не закрытый ключ".into()),
+        _ => return Err(tr!("это не закрытый ключ").into()),
     })
 }
 
@@ -496,6 +556,7 @@ pub enum Cmd {
         path: String,
         data: Vec<u8>,
         doc: Option<(u64, u64)>,
+        expect: Option<u64>,
     },
     Mkdir(String),
     Rename(String, String),
@@ -548,6 +609,11 @@ pub enum Event {
     Uploaded {
         path: String,
         doc: Option<(u64, u64)>,
+    },
+    Conflict {
+        path: String,
+        doc: (u64, u64),
+        server: Vec<u8>,
     },
     Changed(String),
     Progress {
@@ -619,11 +685,11 @@ fn tcp(profile: &Profile) -> Result<TcpStream, String> {
     let address = profile
         .address()
         .to_socket_addrs()
-        .map_err(|e| format!("не удалось найти хост: {e}"))?
+        .map_err(|e| tf!("не удалось найти хост: {e}", "could not resolve the host: {e}"))?
         .next()
-        .ok_or("не удалось найти хост")?;
+        .ok_or(tr!("не удалось найти хост"))?;
     TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
-        .map_err(|e| format!("нет соединения: {e}"))
+        .map_err(|e| tf!("нет соединения: {e}", "no connection: {e}"))
 }
 
 fn fingerprint(session: &ssh2::Session) -> Option<String> {
@@ -642,7 +708,7 @@ pub(crate) fn open_session(
     session.set_timeout(IO_TIMEOUT_MS);
     session
         .handshake()
-        .map_err(|e| format!("ошибка SSH: {e}"))?;
+        .map_err(|e| tf!("ошибка SSH: {e}", "SSH error: {e}"))?;
     if let Some(banner) = session.banner() {
         trace::server(format!("[SSH] remote version: {}", banner.trim()));
     }
@@ -658,7 +724,7 @@ pub(crate) fn open_session(
             method(ssh2::MethodType::MacSc),
         ),
     );
-    let print = fingerprint(&session).ok_or("сервер не прислал ключ")?;
+    let print = fingerprint(&session).ok_or(tr!("сервер не прислал ключ"))?;
     let mut accepted = None;
     if known == Some(print.as_str()) {
         trace::server(format!("[SSH] host key SHA256:{print} (known)"));
@@ -670,7 +736,7 @@ pub(crate) fn open_session(
         );
         if !confirm(&print, known.is_some()) {
             trace::line("[SSH] host key rejected", true);
-            return Err("ключ сервера не подтверждён".into());
+            return Err(tr!("ключ сервера не подтверждён").into());
         }
         trace::line("[SSH] host key accepted", false);
         accepted = Some(print);
@@ -685,7 +751,7 @@ pub(crate) fn open_session(
         if !Path::new(key).is_file() {
             Err(ssh2::Error::new(
                 ssh2::ErrorCode::Session(-16),
-                "файл ключа не найден",
+                tr!("файл ключа не найден"),
             ))
         } else {
             let phrase = if !profile.passphrase.is_empty() {
@@ -693,9 +759,20 @@ pub(crate) fn open_session(
             } else {
                 (!profile.password.is_empty()).then_some(profile.password.as_str())
             };
-            let public = PathBuf::from(format!("{key}.pub"));
-            let public = public.is_file().then_some(public.as_path());
-            session.userauth_pubkey_file(user, public, Path::new(key), phrase)
+            let text = std::fs::read_to_string(key).unwrap_or_default();
+            if crate::ppk::is_ppk(&text) {
+                match crate::ppk::to_openssh(&text, phrase.unwrap_or_default()) {
+                    Ok(pem) => session.userauth_pubkey_memory(user, None, &pem, None),
+                    Err(e) => {
+                        trace::line(format!("[SSH] key file: {e}"), true);
+                        return Err(tf!("вход не выполнен: {e}", "login failed: {e}"));
+                    }
+                }
+            } else {
+                let public = PathBuf::from(format!("{key}.pub"));
+                let public = public.is_file().then_some(public.as_path());
+                session.userauth_pubkey_file(user, public, Path::new(key), phrase)
+            }
         }
     } else if !profile.password.is_empty() {
         trace::client(format!("[SSH] userauth password as {user}"));
@@ -722,10 +799,10 @@ pub(crate) fn open_session(
             && let Err(why) = key_kind(key)
         {
             trace::line(format!("[SSH] key file: {why}"), true);
-            return Err(format!("вход не выполнен: {why}"));
+            return Err(tf!("вход не выполнен: {why}", "login failed: {why}"));
         }
     }
-    auth.map_err(|e| format!("вход не выполнен: {e}"))?;
+    auth.map_err(|e| tf!("вход не выполнен: {e}", "login failed: {e}"))?;
     trace::server("[SSH] authenticated");
     Ok((session, accepted))
 }
@@ -748,7 +825,7 @@ fn connect_sftp(
     let (session, accepted) = open_session(profile, known, &confirm)?;
     let sftp = session
         .sftp()
-        .map_err(|e| format!("SFTP недоступен: {e}"))?;
+        .map_err(|e| tf!("SFTP недоступен: {e}", "SFTP is not available: {e}"))?;
     let home = sftp
         .realpath(Path::new("."))
         .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -802,17 +879,17 @@ fn run_shell(
     let (session, fingerprint) = open_session(profile, known, &confirm)?;
     let mut channel = session
         .channel_session()
-        .map_err(|e| format!("не удалось открыть канал: {e}"))?;
+        .map_err(|e| tf!("не удалось открыть канал: {e}", "could not open a channel: {e}"))?;
     channel
         .request_pty(
             "xterm-256color",
             None,
             Some((size.0 as u32, size.1 as u32, 0, 0)),
         )
-        .map_err(|e| format!("сервер не дал терминал: {e}"))?;
+        .map_err(|e| tf!("сервер не дал терминал: {e}", "the server gave no terminal: {e}"))?;
     channel
         .shell()
-        .map_err(|e| format!("сервер не запустил оболочку: {e}"))?;
+        .map_err(|e| tf!("сервер не запустил оболочку: {e}", "the server did not start a shell: {e}"))?;
     trace::client(format!(
         "[SSH] channel session: pty xterm-256color {}x{}, shell started",
         size.0, size.1
@@ -839,10 +916,10 @@ fn run_shell(
                 active = true;
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => return Err(format!("соединение прервано: {e}")),
+            Err(e) => return Err(tf!("соединение прервано: {e}", "connection interrupted: {e}")),
         }
         if channel.eof() {
-            return Ok("сеанс завершён".into());
+            return Ok(tr!("сеанс завершён").into());
         }
         if !pending.is_empty() {
             match channel.write(&pending) {
@@ -851,7 +928,7 @@ fn run_shell(
                     active = true;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(format!("соединение прервано: {e}")),
+                Err(e) => return Err(tf!("соединение прервано: {e}", "connection interrupted: {e}")),
             }
         }
         if let Some((cols, rows)) = resize
@@ -874,7 +951,7 @@ fn run_shell(
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    return Ok("отключено".into());
+                    return Ok(tr!("отключено").into());
                 }
             }
         }
@@ -883,7 +960,7 @@ fn run_shell(
                 Ok(cmd) => handle(cmd),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Ok("отключено".into());
+                    return Ok(tr!("отключено").into());
                 }
             }
         }
@@ -923,9 +1000,9 @@ fn connect_ftp(profile: &Profile) -> Result<(Backend, String), String> {
         let address = profile
             .address()
             .to_socket_addrs()
-            .map_err(|e| format!("не удалось найти хост: {e}"))?
+            .map_err(|e| tf!("не удалось найти хост: {e}", "could not resolve the host: {e}"))?
             .next()
-            .ok_or("не удалось найти хост")?;
+            .ok_or(tr!("не удалось найти хост"))?;
         trace::line(
             format!(
                 "[FTPS] implicit TLS on {address}, certificate check {}",
@@ -938,7 +1015,7 @@ fn connect_ftp(profile: &Profile) -> Result<(Backend, String), String> {
             tls_connector(profile)?,
             profile.host.trim(),
         )
-        .map_err(|e| format!("защищённое соединение не установлено: {e}"))?;
+        .map_err(|e| tf!("защищённое соединение не установлено: {e}", "secure connection not established: {e}"))?;
         trace::server("[FTPS] TLS session established");
         ftp
     } else {
@@ -947,7 +1024,7 @@ fn connect_ftp(profile: &Profile) -> Result<(Backend, String), String> {
             .set_read_timeout(Some(Duration::from_millis(IO_TIMEOUT_MS as u64)))
             .ok();
         let mut ftp = suppaftp::NativeTlsFtpStream::connect_with_stream(stream)
-            .map_err(|e| format!("ошибка FTP: {e}"))?;
+            .map_err(|e| tf!("ошибка FTP: {e}", "FTP error: {e}"))?;
         if profile.protocol == Protocol::Ftps {
             trace::line(
                 format!(
@@ -958,7 +1035,7 @@ fn connect_ftp(profile: &Profile) -> Result<(Backend, String), String> {
             );
             ftp = ftp
                 .into_secure(tls_connector(profile)?, profile.host.trim())
-                .map_err(|e| format!("защищённое соединение не установлено: {e}"))?;
+                .map_err(|e| tf!("защищённое соединение не установлено: {e}", "secure connection not established: {e}"))?;
             trace::server("[FTPS] TLS session established");
         }
         ftp
@@ -970,7 +1047,7 @@ fn connect_ftp(profile: &Profile) -> Result<(Backend, String), String> {
         profile.user.trim()
     };
     ftp.login(user, profile.password.as_str())
-        .map_err(|e| format!("вход не выполнен: {e}"))?;
+        .map_err(|e| tf!("вход не выполнен: {e}", "login failed: {e}"))?;
     ftp.transfer_type(suppaftp::types::FileType::Binary)
         .map_err(|e| e.to_string())?;
     let home = ftp.pwd().unwrap_or_else(|_| "/".into());
@@ -1219,7 +1296,7 @@ impl Backend {
                     .list(&dir)?
                     .into_iter()
                     .find(|e| e.name == name)
-                    .ok_or("объект не найден")?;
+                    .ok_or(tr!("объект не найден"))?;
                 let mut ids = entry.owner.split(':').map(|v| v.parse().ok());
                 Ok(Attrs {
                     perm: entry.perm,
@@ -1285,13 +1362,13 @@ impl Backend {
     }
 
     fn extract(&mut self, path: &str, dest: Option<&str>) -> Result<(), String> {
-        let command = extract_command(path, dest).ok_or("неизвестный формат архива")?;
-        self.exec(&command, "распаковка")
+        let command = extract_command(path, dest).ok_or(tr!("неизвестный формат архива"))?;
+        self.exec(&command, tr!("распаковка"))
     }
 
     fn exec(&mut self, command: &str, what: &str) -> Result<(), String> {
         let Backend::Sftp { session, .. } = self else {
-            return Err(format!("{what}: доступно только по SFTP"));
+            return Err(tf!("{what}: доступно только по SFTP", "{what}: available over SFTP only"));
         };
         let mut channel = session.channel_session().map_err(|e| e.to_string())?;
         channel.exec(command).map_err(|e| e.to_string())?;
@@ -1305,7 +1382,7 @@ impl Backend {
             Ok(code) => {
                 let text = err.trim();
                 Err(if text.is_empty() {
-                    format!("код завершения {code}")
+                    tf!("код завершения {code}", "exit code {code}")
                 } else {
                     text.to_owned()
                 })
@@ -1409,6 +1486,7 @@ fn execute(
     backend: &mut Backend,
     cmd: &Cmd,
     progress: &dyn Fn(u64, u64),
+    keep: &dyn Fn(&str, &[u8]),
 ) -> Result<(Event, String), String> {
     Ok(match cmd {
         Cmd::TrustHost(_) => (Event::Log(String::new(), false), String::new()),
@@ -1434,7 +1512,34 @@ fn execute(
                 summary,
             )
         }
-        Cmd::Upload { path, data, doc } => {
+        Cmd::Upload {
+            path,
+            data,
+            doc,
+            expect,
+        } => {
+            if doc.is_some()
+                && let Ok(attrs) = backend.stat(path)
+                && !attrs.is_dir
+                && attrs.size.is_none_or(|size| size <= CHECK_LIMIT)
+            {
+                let server = backend.download(path, &|_, _| {})?;
+                if let (Some(expect), Some(doc)) = (expect, doc)
+                    && content_hash(&server) != *expect
+                {
+                    return Ok((
+                        Event::Conflict {
+                            path: path.clone(),
+                            doc: *doc,
+                            server,
+                        },
+                        "changed on server, not written".into(),
+                    ));
+                }
+                if server != *data {
+                    keep(path, &server);
+                }
+            }
             backend.upload(path, data, progress)?;
             (
                 Event::Uploaded {
@@ -1497,11 +1602,11 @@ fn execute(
             (Event::Changed(parent(path)), "ok".into())
         }
         Cmd::Archive { dir, names, zip } => {
-            backend.exec(&crate::archive::remote_command(dir, names, *zip), "архивирование")?;
+            backend.exec(&crate::archive::remote_command(dir, names, *zip), tr!("архивирование"))?;
             (Event::Changed(dir.clone()), "archived".into())
         }
         Cmd::Copy(from, to) => {
-            backend.exec(&format!("cp -a -- {} {}", quote(from), quote(to)), "копирование на сервере")?;
+            backend.exec(&format!("cp -a -- {} {}", quote(from), quote(to)), tr!("копирование на сервере"))?;
             (Event::Changed(parent(to)), "copied".into())
         }
         Cmd::Extract { path, dest } => {
@@ -1581,6 +1686,11 @@ fn serve(
             send(Event::Progress { done, total });
         }
     };
+    let keep = |path: &str, data: &[u8]| {
+        if let Err(e) = backup(&profile.name, path, data) {
+            trace::line(tf!("[Копии] не удалось сохранить копию {path}: {e}", "[Backups] could not save a copy of {path}: {e}"), true);
+        }
+    };
     let sftp = profile.protocol == Protocol::Sftp;
     let tag = match profile.protocol {
         Protocol::Sftp => "[SFTP]",
@@ -1637,11 +1747,12 @@ fn serve(
         if matches!(cmd, Cmd::TrustHost(_)) {
             continue;
         }
-        if sftp {
+        let quiet = matches!(cmd, Cmd::Download(_));
+        if sftp && !quiet {
             trace::client(describe(&cmd));
         }
         let mut result = if alive {
-            execute(&mut backend, &cmd, &progress)
+            execute(&mut backend, &cmd, &progress, &keep)
         } else {
             Err("connection closed".into())
         };
@@ -1658,10 +1769,10 @@ fn serve(
                         known = fingerprint;
                     }
                     log(format!("{tag} reconnected, retrying"), false);
-                    if sftp {
+                    if sftp && !quiet {
                         trace::client(describe(&cmd));
                     }
-                    result = execute(&mut backend, &cmd, &progress);
+                    result = execute(&mut backend, &cmd, &progress, &keep);
                 }
                 Err(e) => {
                     log(format!("{tag} reconnect failed: {e}"), true);
@@ -1672,7 +1783,7 @@ fn serve(
         }
         match result {
             Ok((event, summary)) => {
-                if sftp {
+                if sftp && !quiet {
                     trace::server(format!("[SFTP] {summary}"));
                 }
                 send(event);
@@ -1943,8 +2054,7 @@ fn search_walk(
             break;
         }
         dirs += 1;
-        emit(SearchEvent::Status(format!(
-            "просмотрено каталогов: {dirs}"
+        emit(SearchEvent::Status(tf!("просмотрено каталогов: {dirs}", "folders scanned: {dirs}"
         )));
         let Ok(entries) = backend.list(&dir) else {
             continue;
@@ -2020,7 +2130,7 @@ pub fn search(
                 Protocol::Sftp => {
                     let (session, _) = open_session(&profile, known.as_deref(), &|_, _| false)?;
                     if let Some(hits) = search_remote_shell(&session, &params, &flag, &emit)? {
-                        return Ok((hits, "поиск командами сервера"));
+                        return Ok((hits, tr!("поиск командами сервера")));
                     }
                     let sftp = session.sftp().map_err(|e| e.to_string())?;
                     let mut backend = Backend::Sftp {
@@ -2029,14 +2139,14 @@ pub fn search(
                     };
                     Ok((
                         search_walk(&mut backend, &params, &flag, &emit),
-                        "обход каталогов",
+                        tr!("обход каталогов"),
                     ))
                 }
                 _ => {
                     let (mut backend, _) = connect_ftp(&profile)?;
                     Ok((
                         search_walk(&mut backend, &params, &flag, &emit),
-                        "обход каталогов",
+                        tr!("обход каталогов"),
                     ))
                 }
             }
@@ -2044,14 +2154,13 @@ pub fn search(
         match run() {
             Ok((hits, how)) => {
                 let stopped = if flag.load(Ordering::Relaxed) {
-                    ", остановлен"
+                    tr!(", остановлен")
                 } else if hits >= MAX_HITS {
-                    ", показаны первые результаты"
+                    tr!(", показаны первые результаты")
                 } else {
                     ""
                 };
-                emit(SearchEvent::Done(format!(
-                    "найдено: {hits} ({how}{stopped})"
+                emit(SearchEvent::Done(tf!("найдено: {hits} ({how}{stopped})", "found: {hits} ({how}{stopped})"
                 )));
             }
             Err(e) => emit(SearchEvent::Failed(e)),
@@ -2156,7 +2265,7 @@ pub fn tunnel(
     port: u16,
 ) -> Result<Tunnel, String> {
     let (session, _) = open_session(profile, known, &|_, _| false).map_err(|e| {
-        format!("{e} (для туннеля сначала подключитесь к хосту «{}» в панели хостов и подтвердите его ключ)", profile.name)
+        tf!("{e} (для туннеля сначала подключитесь к хосту «{}» в панели хостов и подтвердите его ключ)", "{e} (for a tunnel, first connect to host \"{}\" in the hosts panel and confirm its key)", profile.name)
     })?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -2201,8 +2310,7 @@ fn ssh_probe(profile: &Profile, known: Option<&str>) -> Result<(ssh2::Session, S
     match open_session(profile, known, &confirm) {
         Ok((session, new_key)) => {
             let note = match new_key {
-                Some(print) => format!(
-                    "; ключ сервера новый (SHA-256 {}…) — при подключении его попросят подтвердить",
+                Some(print) => tf!("; ключ сервера новый (SHA-256 {}…) — при подключении его попросят подтвердить", "; the server key is new (SHA-256 {}…) — you will be asked to confirm it when connecting",
                     &print[..16.min(print.len())]
                 ),
                 None => String::new(),
@@ -2210,14 +2318,14 @@ fn ssh_probe(profile: &Profile, known: Option<&str>) -> Result<(ssh2::Session, S
             Ok((session, note))
         }
         Err(_) if changed_key.get() => Err(
-            "ключ сервера изменился — подключитесь и сверьте отпечаток, пароль не отправлялся".into(),
+            tr!("ключ сервера изменился — подключитесь и сверьте отпечаток, пароль не отправлялся").into(),
         ),
         Err(e) => Err(e),
     }
 }
 
 fn timed(started: std::time::Instant, result: Result<String, String>) -> Result<String, String> {
-    let result = result.map(|text| format!("{text} ({} мс)", started.elapsed().as_millis()));
+    let result = result.map(|text| tf!("{text} ({} мс)", "{text} ({} ms)", started.elapsed().as_millis()));
     match &result {
         Ok(text) => trace::server(format!("[TEST] ok: {text}")),
         Err(e) => trace::line(format!("[TEST] failed: {e}"), true),
@@ -2235,30 +2343,28 @@ pub fn test(profile: &Profile, known: Option<String>) -> Result<String, String> 
     ));
     let result = match profile.protocol {
         Protocol::Sftp => ssh_probe(profile, known.as_deref()).and_then(|(session, note)| {
-            let sftp = session.sftp().map_err(|e| format!("SFTP недоступен: {e}"))?;
+            let sftp = session.sftp().map_err(|e| tf!("SFTP недоступен: {e}", "SFTP is not available: {e}"))?;
             let home = sftp
                 .realpath(Path::new("."))
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| "/".into());
             let start = profile.directory.trim();
             if !start.is_empty() && sftp.stat(Path::new(start)).is_err() {
-                return Err(format!(
-                    "вход выполнен, но начальной папки {start} нет на сервере"
+                return Err(tf!("вход выполнен, но начальной папки {start} нет на сервере", "logged in, but the start folder {start} does not exist on the server"
                 ));
             }
-            Ok(format!("вход выполнен, домашняя папка {home}{note}"))
+            Ok(tf!("вход выполнен, домашняя папка {home}{note}", "logged in, home folder {home}{note}"))
         }),
         _ => connect_ftp(profile).and_then(|(mut backend, home)| {
             let start = profile.directory.trim();
             if !start.is_empty() && backend.list(start).is_err() {
-                return Err(format!(
-                    "вход выполнен, но начальной папки {start} нет на сервере"
+                return Err(tf!("вход выполнен, но начальной папки {start} нет на сервере", "logged in, but the start folder {start} does not exist on the server"
                 ));
             }
             if let Backend::Ftp(ftp) = &mut backend {
                 let _ = ftp.quit();
             }
-            Ok(format!("вход выполнен, папка {home}"))
+            Ok(tf!("вход выполнен, папка {home}", "logged in, folder {home}"))
         }),
     };
     timed(started, result)
@@ -2277,11 +2383,11 @@ pub fn test_terminal(profile: &TermProfile, known: Option<String>) -> Result<Str
             let address = profile
                 .address()
                 .to_socket_addrs()
-                .map_err(|e| format!("не удалось найти хост: {e}"))?
+                .map_err(|e| tf!("не удалось найти хост: {e}", "could not resolve the host: {e}"))?
                 .next()
-                .ok_or("не удалось найти хост")?;
+                .ok_or(tr!("не удалось найти хост"))?;
             let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
-                .map_err(|e| format!("нет соединения: {e}"))?;
+                .map_err(|e| tf!("нет соединения: {e}", "no connection: {e}"))?;
             stream
                 .set_read_timeout(Some(Duration::from_millis(1500)))
                 .ok();
@@ -2300,13 +2406,13 @@ pub fn test_terminal(profile: &TermProfile, known: Option<String>) -> Result<Str
                 .take(80)
                 .collect::<String>();
             Ok(if line.is_empty() {
-                "порт открыт, сервер принял соединение".to_owned()
+                tr!("порт открыт, сервер принял соединение").to_owned()
             } else {
-                format!("порт открыт, сервер ответил: «{line}»")
+                tf!("порт открыт, сервер ответил: «{line}»", "port open, the server replied: \"{line}\"")
             })
         })(),
         TermProtocol::Ssh => ssh_probe(&profile.ssh(), known.as_deref())
-            .map(|(_, note)| format!("вход выполнен{note}")),
+            .map(|(_, note)| tf!("вход выполнен{note}", "logged in{note}")),
         TermProtocol::Mosh => ssh_probe(&profile.ssh(), known.as_deref()).and_then(|(session, note)| {
             let server = if profile.mosh_server.trim().is_empty() {
                 "mosh-server"
@@ -2322,11 +2428,10 @@ pub fn test_terminal(profile: &TermProfile, known: Option<String>) -> Result<Str
             let _ = channel.wait_close();
             let path = out.lines().next().unwrap_or("").trim().to_owned();
             if path.is_empty() {
-                Err(format!(
-                    "вход по SSH выполнен, но {server} на сервере не найден — установите пакет mosh"
+                Err(tf!("вход по SSH выполнен, но {server} на сервере не найден — установите пакет mosh", "logged in over SSH, but {server} was not found on the server — install the mosh package"
                 ))
             } else {
-                Ok(format!("вход выполнен, найден {path}{note}"))
+                Ok(tf!("вход выполнен, найден {path}{note}", "logged in, found {path}{note}"))
             }
         }),
     };
@@ -2631,6 +2736,7 @@ mod tests {
                 path: file.clone(),
                 data: body.clone(),
                 doc: Some((7, 9)),
+                expect: None,
             })
             .unwrap();
         let Event::Uploaded { doc, .. } = next() else {
@@ -2656,6 +2762,7 @@ mod tests {
                 path: deep.clone(),
                 data: big.clone(),
                 doc: None,
+                expect: None,
             })
             .unwrap();
         assert!(matches!(next(), Event::Uploaded { .. }));
@@ -2982,5 +3089,21 @@ mod live_keys {
         assert!(wrong.contains("вход не выполнен"), "{wrong}");
         let dsa = shell_with("k_dsa_pem", "").unwrap_err();
         assert!(dsa.contains("DSA"), "{dsa}");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_ppk_keys() {
+        assert_eq!(shell_with("p_ed25519.ppk", "").unwrap(), "PuTTY .ppk, Ed25519");
+        assert_eq!(
+            shell_with("p_rsa_v3.ppk", "pp3").unwrap(),
+            "PuTTY .ppk, RSA, защищён парольной фразой"
+        );
+        assert_eq!(
+            shell_with("p_ecdsa_v2.ppk", "pp3").unwrap(),
+            "PuTTY .ppk, ECDSA nistp384, защищён парольной фразой"
+        );
+        let wrong = shell_with("p_rsa_v3.ppk", "nope").unwrap_err();
+        assert!(wrong.contains("неверная парольная фраза"), "{wrong}");
     }
 }

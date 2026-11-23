@@ -87,9 +87,9 @@ impl Pane {
 
     pub fn title(self) -> String {
         match self {
-            Pane::Hosts2 => "Подключение 2".into(),
-            Pane::HostsN(n) => format!("Подключение {}", n as usize + 1),
-            Pane::Plugin(key) => plugin_pane(key).map_or_else(|| "Плагин".into(), |p| p.0),
+            Pane::Hosts2 => tr!("Подключение 2").into(),
+            Pane::HostsN(n) => tf!("Подключение {}", "Connection {}", n as usize + 1),
+            Pane::Plugin(key) => plugin_pane(key).map_or_else(|| tr!("Плагин").into(), |p| p.0),
             other => other.label().into(),
         }
     }
@@ -98,17 +98,17 @@ impl Pane {
         match self {
             Pane::Welcome => "TrorPad",
             Pane::Doc(_) => "",
-            Pane::Hosts => "Удалённые хосты",
+            Pane::Hosts => tr!("Удалённые хосты"),
             Pane::Hosts2 | Pane::HostsN(_) | Pane::Plugin(_) => "",
-            Pane::Project => "Проект",
-            Pane::Project2 => "Проект 2",
-            Pane::Console => "Консоль",
-            Pane::Log => "Журнал",
-            Pane::ServerSearch => "Поиск на сервере",
-            Pane::Settings => "Настройки",
-            Pane::Diff => "Сравнение",
-            Pane::Db => "База данных",
-            Pane::Preview => "Предпросмотр",
+            Pane::Project => tr!("Проект"),
+            Pane::Project2 => tr!("Проект 2"),
+            Pane::Console => tr!("Консоль"),
+            Pane::Log => tr!("Журнал"),
+            Pane::ServerSearch => tr!("Поиск на сервере"),
+            Pane::Settings => tr!("Настройки"),
+            Pane::Diff => tr!("Сравнение"),
+            Pane::Db => tr!("База данных"),
+            Pane::Preview => tr!("Предпросмотр"),
         }
     }
 
@@ -134,14 +134,14 @@ pub fn new() -> DockState<Pane> {
 
 pub fn translate(dock: &mut DockState<Pane>) {
     let t = &mut dock.translations;
-    t.tab_context_menu.close_button = "Закрыть".into();
-    t.tab_context_menu.eject_button = "Сделать плавающей панелью".into();
-    t.tab_context_menu.hide_tab_bar_button = "Скрыть заголовок".into();
-    t.tab_context_menu.show_tab_bar_button = "Показать заголовок".into();
-    t.leaf.close_button_disabled_tooltip = "Здесь есть вкладки, которые нельзя закрыть".into();
-    t.leaf.close_all_button = "Закрыть окно".into();
-    t.leaf.close_all_button_disabled_tooltip = "В окне есть вкладки, которые нельзя закрыть".into();
-    t.leaf.minimize_button = "Свернуть окно".into();
+    t.tab_context_menu.close_button = tr!("Закрыть").into();
+    t.tab_context_menu.eject_button = tr!("Сделать плавающей панелью").into();
+    t.tab_context_menu.hide_tab_bar_button = tr!("Скрыть заголовок").into();
+    t.tab_context_menu.show_tab_bar_button = tr!("Показать заголовок").into();
+    t.leaf.close_button_disabled_tooltip = tr!("Здесь есть вкладки, которые нельзя закрыть").into();
+    t.leaf.close_all_button = tr!("Закрыть окно").into();
+    t.leaf.close_all_button_disabled_tooltip = tr!("В окне есть вкладки, которые нельзя закрыть").into();
+    t.leaf.minimize_button = tr!("Свернуть окно").into();
 }
 
 pub fn has(dock: &DockState<Pane>, pane: Pane) -> bool {

@@ -60,6 +60,7 @@ pub struct SearchState {
     pub error: Option<String>,
     pub last_replaced: Option<usize>,
     pub deleted: bool,
+    pub visual: Option<(Option<usize>, usize)>,
     re: Option<Regex>,
     key: Option<Key>,
     job: Option<Job>,
@@ -141,6 +142,18 @@ pub fn escape(text: &str) -> String {
 }
 
 impl SearchState {
+    pub fn pattern(&self) -> Result<Regex, String> {
+        self.build()
+    }
+
+    pub fn replace_with(&self, re: &Regex, found: &str) -> String {
+        if self.regex {
+            re.replace(found, self.replacement.as_str()).into_owned()
+        } else {
+            self.replacement_text()
+        }
+    }
+
     fn replacement_text(&self) -> String {
         if self.extended && !self.regex {
             unescape(&self.replacement)
@@ -168,7 +181,7 @@ impl SearchState {
             .case_insensitive(!self.case)
             .multi_line(true)
             .build()
-            .map_err(|_| "некорректное регулярное выражение".to_owned())
+            .map_err(|_| tr!("некорректное регулярное выражение").to_owned())
     }
 
     pub fn update(&mut self, doc: &Document, ctx: Option<&egui::Context>) {
