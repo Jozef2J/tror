@@ -347,6 +347,52 @@ impl LineLayout {
     }
 }
 
+pub static TAB: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(4);
+
+pub fn code_family() -> egui::FontFamily {
+    egui::FontFamily::Name("code-tabs".into())
+}
+
+fn tab_stops(job: &mut LayoutJob, char_w: f32) {
+    if !job.text.contains('\t') {
+        return;
+    }
+    let width = TAB.load(std::sync::atomic::Ordering::Relaxed).max(1) as usize;
+    let mut gaps: Vec<(usize, f32)> = Vec::new();
+    let mut col = 0;
+    for (at, ch) in job.text.char_indices() {
+        if ch == '\t' {
+            let next = (col / width + 1) * width;
+            gaps.push((at + 1, (next - col - 1) as f32 * char_w));
+            col = next;
+        } else {
+            col += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(job.sections.len() + gaps.len());
+    for section in std::mem::take(&mut job.sections) {
+        let (start, end) = (section.byte_range.start.0, section.byte_range.end.0);
+        let mut from = start;
+        let mut lead = section.leading_space
+            + gaps.iter().find(|(at, _)| *at == start).map_or(0.0, |g| g.1);
+        for &(at, gap) in gaps.iter().filter(|(at, _)| *at > start && *at < end) {
+            out.push(LayoutSection {
+                leading_space: lead,
+                byte_range: ByteIndex(from)..ByteIndex(at),
+                format: section.format.clone(),
+            });
+            from = at;
+            lead = gap;
+        }
+        out.push(LayoutSection {
+            leading_space: lead,
+            byte_range: ByteIndex(from)..ByteIndex(end),
+            format: section.format,
+        });
+    }
+    job.sections = out;
+}
+
 fn plain_job(text: String, m: &Metrics, color: egui::Color32, wrap_width: f32) -> LayoutJob {
     let mut job = LayoutJob::single_section(
         text,
@@ -416,7 +462,7 @@ fn layout_line(ui: &Ui, doc: &Document, line: usize, m: &Metrics) -> LineLayout 
             });
         }
     }
-    let job = if sections.is_empty() {
+    let mut job = if sections.is_empty() {
         plain_job(text, m, default, wrap_width)
     } else {
         let mut job = LayoutJob {
@@ -427,6 +473,9 @@ fn layout_line(ui: &Ui, doc: &Document, line: usize, m: &Metrics) -> LineLayout 
         job.wrap.max_width = wrap_width;
         job
     };
+    if c0 == 0 {
+        tab_stops(&mut job, m.char_w);
+    }
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let mut starts = Vec::new();
     if m.wrap {
@@ -664,8 +713,9 @@ fn process_events(ui: &Ui, doc: &mut Document, m: &Metrics, events: Vec<Event>) 
                 }
             }
             Event::Ime(ImeEvent::Commit(text)) => {
-                if !text.is_empty() {
-                    doc.insert_text(&text);
+                let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+                if !clean.is_empty() {
+                    doc.insert_text(&clean);
                 }
             }
             Event::Paste(text) => {
@@ -1015,7 +1065,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         complete,
         decos,
     } = view;
-    let font = FontId::monospace(font_size);
+    let font = FontId::new(font_size, code_family());
     let (char_w, font_h) = ui.fonts_mut(|f| (f.glyph_width(&font, '0'), f.row_height(&font)));
     let row_h = (font_size * line_spacing).round().max(font_h.ceil());
     let lines = doc.line_count();
@@ -2180,6 +2230,22 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tabs_jump_to_stops() {
+        let spans = |text: &str| {
+            let mut job = LayoutJob::single_section(text.to_owned(), TextFormat::default());
+            tab_stops(&mut job, 10.0);
+            job.sections
+                .iter()
+                .map(|s| (s.byte_range.start.0, s.byte_range.end.0, s.leading_space))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(spans("ab\tc"), vec![(0, 3, 0.0), (3, 4, 10.0)]);
+        assert_eq!(spans("abc\tc"), vec![(0, 4, 0.0), (4, 5, 0.0)]);
+        assert_eq!(spans("\t\tx"), vec![(0, 1, 0.0), (1, 2, 30.0), (2, 3, 30.0)]);
+        assert_eq!(spans("abcd\tx"), vec![(0, 5, 0.0), (5, 6, 30.0)]);
+    }
 
     #[test]
     fn finds_links_and_line_spans() {

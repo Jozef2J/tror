@@ -251,8 +251,29 @@ pub fn install_fonts(
     for name in ["user-code", "jbmono"] {
         if let Some(data) = fonts.font_data.get_mut(name) {
             std::sync::Arc::make_mut(data).tweak.tab_size = tab_width.max(1) as f32;
+            let mut single = (**data).clone();
+            single.tweak.tab_size = 1.0;
+            fonts
+                .font_data
+                .insert(format!("{name}-tab"), std::sync::Arc::new(single));
         }
     }
+    let code: Vec<String> = fonts
+        .families
+        .get(&FontFamily::Monospace)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|n| {
+            if n == "user-code" || n == "jbmono" {
+                format!("{n}-tab")
+            } else {
+                n
+            }
+        })
+        .collect();
+    fonts.families.insert(crate::editor::code_family(), code);
+    crate::editor::TAB.store(tab_width.max(1), std::sync::atomic::Ordering::Relaxed);
     ctx.set_fonts(fonts);
     if let Ok(mut list) = TERM_FONTS.lock() {
         list.clear();

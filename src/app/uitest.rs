@@ -330,3 +330,38 @@ fn ui_quick_open_and_command_palette() {
     harness.run_steps(3);
     assert!(!harness.state().jump.open);
 }
+
+#[test]
+#[ignore]
+fn ui_tab_indents_selected_lines() {
+    let home = sandbox("indent");
+    let file = home.join("a.php");
+    std::fs::write(&file, "<?php\none();\ntwo();\nthree();\n").unwrap();
+    let mut harness = app();
+    harness.state_mut().open_path(&file, 0.0);
+    harness.run_steps(3);
+    let text = |harness: &Harness<'_, TrorApp>| {
+        let state = harness.state();
+        state.docs[state.active].rope.to_string()
+    };
+    harness.key_press(egui::Key::ArrowDown);
+    harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowDown);
+    harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowDown);
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Tab);
+    harness.run_steps(2);
+    assert_eq!(text(&harness), "<?php\n\tone();\n\ttwo();\nthree();\n");
+    harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+    harness.run_steps(2);
+    assert_eq!(text(&harness), "<?php\none();\ntwo();\nthree();\n");
+    harness.key_press(egui::Key::Escape);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Home);
+    harness.key_press(egui::Key::ArrowDown);
+    let add = egui::Modifiers::COMMAND | egui::Modifiers::ALT;
+    harness.key_press_modifiers(add, egui::Key::ArrowDown);
+    harness.key_press_modifiers(add, egui::Key::ArrowDown);
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Tab);
+    harness.run_steps(2);
+    assert_eq!(text(&harness), "<?php\n\tone();\n\ttwo();\n\tthree();\n");
+}

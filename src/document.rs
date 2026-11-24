@@ -815,7 +815,11 @@ impl Document {
     pub fn indent(&mut self) {
         let unit = indent_unit();
         if self.multi() {
-            self.insert_each(&unit);
+            if self.cursors().iter().all(|(a, h)| a == h) {
+                self.insert_each(&unit);
+            } else {
+                self.shift_lines(false);
+            }
             return;
         }
         let lines = self.selected_lines();
@@ -833,7 +837,72 @@ impl Document {
         self.select_lines(lines);
     }
 
+    fn outdent_width(&self, line: usize) -> usize {
+        let mut remove = 0;
+        for c in self.rope.line(line).chars().take(4) {
+            match c {
+                '\t' if remove == 0 => return 1,
+                ' ' => remove += 1,
+                _ => break,
+            }
+        }
+        remove
+    }
+
+    fn shift_lines(&mut self, outdent: bool) {
+        let unit = indent_unit();
+        let cursors = self.cursors();
+        let mut lines = Vec::new();
+        for &(a, h) in &cursors {
+            let (lo, hi) = (a.min(h), a.max(h));
+            let first = self.rope.char_to_line(lo);
+            let mut last = self.rope.char_to_line(hi);
+            if last > first && self.rope.line_to_char(last) == hi {
+                last -= 1;
+            }
+            lines.extend(first..=last);
+        }
+        lines.sort_unstable();
+        lines.dedup();
+        self.checkpoint(EditKind::Other);
+        let mut changes: Vec<(usize, isize)> = Vec::new();
+        for &line in lines.iter().rev() {
+            let at = self.rope.line_to_char(line);
+            if outdent {
+                let remove = self.outdent_width(line);
+                if remove > 0 {
+                    self.apply(at..at + remove, "");
+                    changes.push((at, -(remove as isize)));
+                }
+            } else if self.line_len(line) > 0 {
+                self.apply(at..at, &unit);
+                changes.push((at, unit.chars().count() as isize));
+            }
+        }
+        let map = |p: usize| {
+            let mut q = p as isize;
+            for &(at, delta) in &changes {
+                if p >= at {
+                    q += if delta < 0 {
+                        -((p - at) as isize).min(-delta)
+                    } else {
+                        delta
+                    };
+                }
+            }
+            q.max(0) as usize
+        };
+        let moved = cursors.iter().map(|&(a, h)| (map(a), map(h))).collect();
+        self.block = None;
+        self.set_cursors(moved, 0);
+        self.reveal = true;
+    }
+
     pub fn outdent(&mut self) {
+        if self.multi() {
+            self.shift_lines(true);
+            return;
+        }
         let lines = self.selected_lines();
         let single = lines.len() < 2;
         let head = self.sel.1;
@@ -841,17 +910,7 @@ impl Document {
         let mut removed_before_head = 0;
         for line in lines.clone() {
             let at = self.rope.line_to_char(line);
-            let mut remove = 0;
-            for c in self.rope.line(line).chars().take(4) {
-                match c {
-                    '\t' if remove == 0 => {
-                        remove = 1;
-                        break;
-                    }
-                    ' ' => remove += 1,
-                    _ => break,
-                }
-            }
+            let remove = self.outdent_width(line);
             if remove > 0 {
                 self.apply(at..at + remove, "");
                 removed_before_head = remove.min(head.saturating_sub(at));
@@ -1608,6 +1667,20 @@ mod tests {
         spaces.outdent();
         assert_eq!(text(&spaces), "  x");
         assert_eq!(spaces.sel, (2, 2));
+    }
+
+    #[test]
+    fn indent_with_cursor_on_each_line() {
+        let mut doc = Document::from_text("one\ntwo\nthree");
+        doc.set_cursors(vec![(0, 0), (4, 4), (8, 8)], 2);
+        doc.indent();
+        assert_eq!(text(&doc), "\tone\n\ttwo\n\tthree");
+        doc.outdent();
+        assert_eq!(text(&doc), "one\ntwo\nthree");
+        doc.set_cursors(vec![(0, 2), (4, 6)], 1);
+        doc.indent();
+        assert_eq!(text(&doc), "\tone\n\ttwo\nthree");
+        assert_eq!(doc.cursors(), vec![(6, 8), (1, 3)]);
     }
 
     #[test]
