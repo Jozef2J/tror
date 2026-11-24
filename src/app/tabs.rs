@@ -108,6 +108,10 @@ impl TrorApp {
                     None => {}
                 }
             }
+            TabCmd::CompareServer => {
+                self.active = index;
+                self.compare_server(now);
+            }
             TabCmd::Reveal => {
                 if let Some(dir) = self.docs[index].path.as_ref().and_then(|p| p.parent()) {
                     let _ = preview::open_folder(dir);
@@ -396,6 +400,16 @@ impl Viewer<'_> {
             && row(ui, tr!("Показать в папке"), String::new(), true)
         {
             cmd = Some(TabCmd::Reveal);
+        }
+        if remote.is_some()
+            && row(
+                ui,
+                tr!("Сравнить с версией на сервере"),
+                key("compare_server"),
+                true,
+            )
+        {
+            cmd = Some(TabCmd::CompareServer);
         }
         ui.separator();
         ui.add_enabled_ui(location.is_some(), |ui| {

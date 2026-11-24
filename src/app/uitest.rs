@@ -258,3 +258,75 @@ fn ui_find_and_replace_in_document() {
         "cost2 cost2 cost"
     );
 }
+
+#[test]
+#[ignore]
+fn ui_import_filezilla_sites() {
+    let home = sandbox("import");
+    let dir = home.join("config").join("filezilla");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("sitemanager.xml"),
+        "<FileZilla3><Servers><Server><Host>shop.example.de</Host><Port>22</Port><Protocol>1</Protocol><User>web</User><Pass encoding=\"base64\">c2VjcmV0</Pass><Name>Магазин</Name></Server></Servers></FileZilla3>",
+    )
+    .unwrap();
+    let mut harness = app();
+    {
+        let state = harness.state_mut();
+        let floats = state.settings.floats.clone();
+        dock::show(&mut state.dock, Pane::Hosts, &floats);
+    }
+    harness.run_steps(3);
+    harness.get_by_label("Создать профиль").click();
+    harness.run_steps(3);
+    harness.get_by_label("Импорт…").hover();
+    harness.run_steps(2);
+    harness.get_by_label("Импорт…").click();
+    harness.run_steps(4);
+    harness.get_by_label("Из FileZilla").click();
+    harness.run_steps(3);
+    harness.get_by_label_contains("Добавлено подключений: 1");
+    harness.get_by_label("Сохранить").click();
+    harness.run_steps(3);
+    let profiles = &harness.state().remotes[0].store.profiles;
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].host, "shop.example.de");
+    assert_eq!(profiles[0].password, "secret");
+}
+
+#[test]
+#[ignore]
+fn ui_quick_open_and_command_palette() {
+    let home = sandbox("jump");
+    std::fs::create_dir_all(home.join("site/local/templates")).unwrap();
+    std::fs::write(
+        home.join("site/local/templates/product_card.php"),
+        "<?php\n",
+    )
+    .unwrap();
+    std::fs::write(home.join("site/index.php"), "<?php\n").unwrap();
+    let mut harness = app();
+    harness.state_mut().project.set_root(home.join("site"));
+    harness.run_steps(2);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::P);
+    harness.run_steps(2);
+    wait(&mut harness, "список файлов", |h| {
+        h.state().jump.files.len() == 2
+    });
+    harness.event(egui::Event::Text("prodc".into()));
+    harness.run_steps(2);
+    harness.get_by_label("product_card.php");
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(3);
+    let state = harness.state();
+    assert!(!state.jump.open);
+    assert_eq!(state.docs[state.active].title(), "product_card.php");
+    harness.key_press(egui::Key::F1);
+    harness.run_steps(2);
+    harness.event(egui::Event::Text("журн".into()));
+    harness.run_steps(2);
+    harness.get_by_label("Журнал");
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(3);
+    assert!(!harness.state().jump.open);
+}

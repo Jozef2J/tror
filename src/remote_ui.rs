@@ -33,6 +33,11 @@ pub enum PanelEvent {
         names: Vec<String>,
     },
     Toast(String),
+    Compare {
+        profile: String,
+        path: String,
+        server: Vec<u8>,
+    },
     Console(Box<remote::TermProfile>),
     Relay {
         target: u8,
@@ -82,6 +87,7 @@ struct ProfileEditor {
     reveal: bool,
     probe: Option<Receiver<Result<String, String>>>,
     result: Option<Result<String, String>>,
+    note: Option<Result<String, String>>,
 }
 
 struct Saver {
@@ -226,6 +232,7 @@ pub struct RemotePanel {
     host_key: Option<(String, bool)>,
     editor: Option<ProfileEditor>,
     save_to: HashMap<String, PathBuf>,
+    compare: HashSet<String>,
     batch: Option<Batch>,
     pub out_drag: Option<(PathBuf, Vec<PathBuf>)>,
     pub drag_done: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
@@ -313,6 +320,7 @@ impl RemotePanel {
             attrs: None,
             host_key: None,
             editor: None,
+            compare: HashSet::new(),
             save_to: HashMap::new(),
             batch: None,
             out_drag: None,
@@ -325,6 +333,42 @@ impl RemotePanel {
             drop_dirs: Vec::new(),
             external_hover: None,
         }
+    }
+
+    pub fn quick_files(&self) -> Option<(String, Vec<String>)> {
+        if !self.connected {
+            return None;
+        }
+        let name = self.store.profiles.get(self.selected)?.name.clone();
+        let mut files: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| remote::join(&self.cwd, &e.name))
+            .collect();
+        for (dir, list) in &self.children {
+            files.extend(list.iter().filter(|e| !e.is_dir).map(|e| remote::join(dir, &e.name)));
+        }
+        files.sort();
+        files.dedup();
+        Some((name, files))
+    }
+
+    pub fn connected_profile(&self) -> Option<&str> {
+        self.connected
+            .then(|| self.conn.as_ref().map(|c| c.profile.as_str()))
+            .flatten()
+    }
+
+    pub fn compare_remote(&mut self, path: String) {
+        let name = remote::file_name(&path).to_owned();
+        self.compare.insert(path.clone());
+        self.send(Cmd::Download(path), tf!("Скачивание {name}…", "Downloading {name}…"));
+    }
+
+    pub fn open_remote(&mut self, path: String) {
+        let name = remote::file_name(&path).to_owned();
+        self.send(Cmd::Download(path), tf!("Скачивание {name}…", "Downloading {name}…"));
     }
 
     pub fn selected_profile(&self) -> Option<(&Profile, Option<String>)> {
@@ -1054,6 +1098,14 @@ impl RemotePanel {
                         });
                         continue;
                     }
+                    if self.compare.remove(&path) {
+                        out.push(PanelEvent::Compare {
+                            profile: profile.clone(),
+                            path,
+                            server: data,
+                        });
+                        continue;
+                    }
                     let in_batch = self.batch.as_ref().is_some_and(|b| b.sizes.contains_key(&path));
                     match self.save_to.remove(&path) {
                         Some(local) if in_batch => {
@@ -1079,7 +1131,7 @@ impl RemotePanel {
                             }
                         }
                         Some(local) => {
-                            let (text, error) = match std::fs::write(&local, data) {
+                            let (text, error) = match crate::document::write_safely(&local, &data) {
                                 Ok(()) => {
                                     if let Some(mtime) = self.sync_times.remove(&local) {
                                         crate::sync::set_mtime(&local, mtime);
@@ -1308,6 +1360,7 @@ impl RemotePanel {
             reveal: false,
             probe: None,
             result: None,
+            note: None,
         });
     }
 
@@ -3595,6 +3648,50 @@ impl RemotePanel {
                                 editor.index = editor.index.saturating_sub(1);
                             }
                         });
+                        ui.menu_button(tr!("Импорт…"), |ui| {
+                            let mut found = None;
+                            if let Some(path) = crate::import::filezilla_file() {
+                                if ui.button(tr!("Из FileZilla")).clicked() {
+                                    found = Some(std::fs::read_to_string(path).map(|t| crate::import::filezilla(&t)));
+                                }
+                            } else if ui.button(tr!("Из файла FileZilla (sitemanager.xml)…")).clicked()
+                                && let Some(path) = rfd::FileDialog::new().add_filter("XML", &["xml"]).pick_file()
+                            {
+                                found = Some(std::fs::read_to_string(path).map(|t| crate::import::filezilla(&t)));
+                            }
+                            if cfg!(windows) && ui.button(tr!("Из WinSCP")).clicked() {
+                                found = Some(Ok(crate::import::winscp(&crate::import::winscp_sessions())));
+                            }
+                            if ui.button(tr!("Из файла WinSCP.ini…")).clicked()
+                                && let Some(path) = rfd::FileDialog::new().add_filter("INI", &["ini"]).pick_file()
+                            {
+                                found = Some(std::fs::read_to_string(path).map(|t| crate::import::winscp(&crate::import::winscp_ini(&t))));
+                            }
+                            if let Some(found) = found {
+                                ui.close();
+                                editor.note = Some(match found {
+                                    Ok(list) => {
+                                        let added = merge_profiles(&mut editor.drafts, list);
+                                        if added > 0 {
+                                            editor.index = editor.drafts.len() - 1;
+                                        }
+                                        if added == 0 {
+                                            Err(tr!("Новых подключений не найдено").to_owned())
+                                        } else {
+                                            Ok(tf!("Добавлено подключений: {added}. Проверьте их и нажмите «Сохранить».", "Connections added: {added}. Check them and press \"Save\"."))
+                                        }
+                                    }
+                                    Err(e) => Err(e.to_string()),
+                                });
+                            }
+                        });
+                        if let Some(note) = &editor.note {
+                            let (text, color) = match note {
+                                Ok(text) => (text.as_str(), crate::widgets::ok_color(ui)),
+                                Err(text) => (text.as_str(), pal.warn),
+                            };
+                            ui.add(egui::Label::new(RichText::new(text).small().color(color)).wrap());
+                        }
                     });
                     ui.add_space(10.0);
                     ui.vertical(|ui| {
@@ -3831,6 +3928,26 @@ impl RemotePanel {
             self.editor = None;
         }
     }
+}
+
+fn merge_profiles(drafts: &mut Vec<Profile>, found: Vec<Profile>) -> usize {
+    if drafts.len() == 1 && drafts[0].host.trim().is_empty() {
+        drafts.clear();
+    }
+    let mut added = 0;
+    for profile in found {
+        let same = drafts.iter().any(|d| {
+            d.host.eq_ignore_ascii_case(&profile.host)
+                && d.port == profile.port
+                && d.user == profile.user
+                && d.protocol == profile.protocol
+        });
+        if !same {
+            drafts.push(profile);
+            added += 1;
+        }
+    }
+    added
 }
 
 #[cfg(test)]

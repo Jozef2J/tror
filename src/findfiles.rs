@@ -169,6 +169,14 @@ fn wanted(name: &str, masks: &[String]) -> bool {
 }
 
 pub fn files(root: &Path, mask: &str, stop: &AtomicBool, gitignore: bool) -> Vec<PathBuf> {
+    walk(root, mask, stop, gitignore, MAX_FILE)
+}
+
+pub fn all_files(root: &Path, stop: &AtomicBool) -> Vec<PathBuf> {
+    walk(root, "", stop, true, u64::MAX)
+}
+
+fn walk(root: &Path, mask: &str, stop: &AtomicBool, gitignore: bool, max: u64) -> Vec<PathBuf> {
     let masks: Vec<String> = mask
         .split([',', ';', ' '])
         .map(str::trim)
@@ -210,7 +218,7 @@ pub fn files(root: &Path, mask: &str, stop: &AtomicBool, gitignore: bool) -> Vec
                 }
             } else if kind.is_file()
                 && wanted(&name, &masks)
-                && item.metadata().is_ok_and(|m| m.len() <= MAX_FILE)
+                && (max == u64::MAX || item.metadata().is_ok_and(|m| m.len() <= max))
             {
                 out.push(item.path());
             }

@@ -30,6 +30,7 @@ mod files;
 mod find;
 mod frame;
 mod hosts;
+mod jump;
 mod look;
 mod menu;
 mod modals;
@@ -91,6 +92,8 @@ enum Action {
     OpenProject(PathBuf),
     ToggleVisual,
     Print,
+    Jump(&'static str),
+    CompareServer,
     Save,
     SaveAs,
     SaveAll,
@@ -160,6 +163,7 @@ enum TabCmd {
     NewGroup(egui_stack::Split),
     OtherGroup,
     Reveal,
+    CompareServer,
 }
 
 pub const TAB_COLORS: [(&str, u32); 6] = [
@@ -391,6 +395,7 @@ pub struct TrorApp {
     ctx: egui::Context,
     checked: (u64, bool),
     goto: Option<String>,
+    jump: jump::Jump,
     plugin_dialog: Option<plugin_ui::PluginDialog>,
     plugin_panels: std::collections::HashMap<u64, plugin_ui::PluginPanel>,
     find_files: crate::findfiles::FindFiles,
@@ -511,6 +516,7 @@ impl TrorApp {
             ctx: cc.egui_ctx.clone(),
             checked: (0, false),
             goto: None,
+            jump: Default::default(),
             plugin_dialog: None,
             plugin_panels: Default::default(),
             find_files: Default::default(),

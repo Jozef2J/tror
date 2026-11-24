@@ -88,6 +88,20 @@ impl TrorApp {
                         server,
                     });
                 }
+                PanelEvent::Compare {
+                    profile,
+                    path,
+                    server,
+                } => {
+                    let now = ctx.input(|i| i.time);
+                    if let Some(index) = self.docs.iter().position(|d| {
+                        d.remote
+                            .as_ref()
+                            .is_some_and(|(p, r)| *p == profile && *r == path)
+                    }) {
+                        self.show_server_diff(index, &profile, &path, server, now);
+                    }
+                }
                 PanelEvent::Console(profile) => {
                     self.console.open(*profile, ctx);
                     dock::show(&mut self.dock, Pane::Console, &self.settings.floats);

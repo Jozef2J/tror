@@ -1,6 +1,81 @@
 use super::*;
 
 impl TrorApp {
+    pub(super) fn compare_server(&mut self, now: f64) {
+        let Some((profile, path)) = self.docs.get(self.active).and_then(|d| d.remote.clone())
+        else {
+            self.notify(tr!("Этот файл открыт не с сервера"), now);
+            return;
+        };
+        match self
+            .remotes
+            .iter_mut()
+            .find(|r| r.connected_profile() == Some(profile.as_str()))
+        {
+            Some(panel) => panel.compare_remote(path),
+            None => self.notify(
+                tf!(
+                    "Подключитесь к серверу «{profile}», чтобы сравнить",
+                    "Connect to \"{profile}\" to compare"
+                ),
+                now,
+            ),
+        }
+    }
+
+    pub(super) fn command(&self, id: &str) -> Action {
+        match id {
+            "new" => Action::New,
+            "open" => Action::Open,
+            "open_folder" => Action::OpenFolder,
+            "project" => Action::Toggle(Pane::Project),
+            "save" => Action::Save,
+            "save_as" => Action::SaveAs,
+            "save_all" => Action::SaveAll,
+            "print" => Action::Print,
+            "quick_open" => Action::Jump(""),
+            "palette" => Action::Jump(">"),
+            "close_tab" => Action::CloseTab(self.active),
+            "reopen" => Action::Reopen,
+            "next_tab" => Action::NextTab,
+            "prev_tab" => Action::PrevTab,
+            "find" => Action::Find,
+            "replace" => Action::Replace,
+            "find_next" => Action::FindNext,
+            "find_prev" => Action::FindPrev,
+            "goto" => Action::GotoLine,
+            "duplicate_line" => Action::Edit("duplicate_line"),
+            "delete_line" => Action::Edit("delete_line"),
+            "line_up" => Action::Edit("line_up"),
+            "line_down" => Action::Edit("line_down"),
+            "upper" => Action::Edit("upper"),
+            "lower" => Action::Edit("lower"),
+            "trim" => Action::Edit("trim"),
+            "bookmark" => Action::Edit("bookmark"),
+            "bookmark_next" => Action::Edit("bookmark_next"),
+            "bookmark_prev" => Action::Edit("bookmark_prev"),
+            "fold" => Action::Fold(0),
+            "unfold" => Action::Fold(1),
+            "fold_all" => Action::Fold(2),
+            "unfold_all" => Action::Fold(3),
+            "wrap" => Action::ToggleWrap,
+            "visual" => Action::ToggleVisual,
+            "theme" => Action::ToggleTheme,
+            "settings" => Action::Show(Pane::Settings),
+            "hosts" => Action::Toggle(Pane::Hosts),
+            "console" => Action::Toggle(Pane::Console),
+            "log" => Action::Toggle(Pane::Log),
+            "server_search" => Action::FindFiles,
+            "db" => Action::Toggle(Pane::Db),
+            "compare" => Action::Compare,
+            "compare_server" => Action::CompareServer,
+            "find_files" => Action::FindFiles,
+            "macro_record" => Action::MacroRecord,
+            "macro_play" => Action::MacroPlay,
+            _ => Action::Preview,
+        }
+    }
+
     pub(super) fn open_search(&mut self, replace: bool) {
         self.search.open = true;
         self.search.files = false;
@@ -64,6 +139,14 @@ impl TrorApp {
                 }
             }
             Action::OpenPath(path) => self.open_path(&path, now),
+            Action::CompareServer => {
+                let now = ctx.input(|i| i.time);
+                self.compare_server(now);
+            }
+            Action::Jump(prefix) => {
+                let root = self.project.root.clone();
+                self.jump.show(prefix, root);
+            }
             Action::Print => {
                 let Some(doc) = self.docs.get(self.active) else {
                     return;
@@ -537,53 +620,7 @@ impl TrorApp {
             if shortcut.modifiers.alt {
                 ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
             }
-            actions.push(match id {
-                "new" => Action::New,
-                "open" => Action::Open,
-                "open_folder" => Action::OpenFolder,
-                "project" => Action::Toggle(Pane::Project),
-                "save" => Action::Save,
-                "save_as" => Action::SaveAs,
-                "save_all" => Action::SaveAll,
-                "print" => Action::Print,
-                "close_tab" => Action::CloseTab(self.active),
-                "reopen" => Action::Reopen,
-                "next_tab" => Action::NextTab,
-                "prev_tab" => Action::PrevTab,
-                "find" => Action::Find,
-                "replace" => Action::Replace,
-                "find_next" => Action::FindNext,
-                "find_prev" => Action::FindPrev,
-                "goto" => Action::GotoLine,
-                "duplicate_line" => Action::Edit("duplicate_line"),
-                "delete_line" => Action::Edit("delete_line"),
-                "line_up" => Action::Edit("line_up"),
-                "line_down" => Action::Edit("line_down"),
-                "upper" => Action::Edit("upper"),
-                "lower" => Action::Edit("lower"),
-                "trim" => Action::Edit("trim"),
-                "bookmark" => Action::Edit("bookmark"),
-                "bookmark_next" => Action::Edit("bookmark_next"),
-                "bookmark_prev" => Action::Edit("bookmark_prev"),
-                "fold" => Action::Fold(0),
-                "unfold" => Action::Fold(1),
-                "fold_all" => Action::Fold(2),
-                "unfold_all" => Action::Fold(3),
-                "wrap" => Action::ToggleWrap,
-                "visual" => Action::ToggleVisual,
-                "theme" => Action::ToggleTheme,
-                "settings" => Action::Show(Pane::Settings),
-                "hosts" => Action::Toggle(Pane::Hosts),
-                "console" => Action::Toggle(Pane::Console),
-                "log" => Action::Toggle(Pane::Log),
-                "server_search" => Action::FindFiles,
-                "db" => Action::Toggle(Pane::Db),
-                "compare" => Action::Compare,
-                "find_files" => Action::FindFiles,
-                "macro_record" => Action::MacroRecord,
-                "macro_play" => Action::MacroPlay,
-                _ => Action::Preview,
-            });
+            actions.push(self.command(id));
         }
         for (shortcut, action) in extra {
             if ctx.input_mut(|i| crate::keys::consume(i, &shortcut)) {

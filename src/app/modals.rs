@@ -564,38 +564,51 @@ impl TrorApp {
             return;
         };
         match choice {
-            0 => match Document::open_remote(
-                self.next_id,
+            0 => self.show_server_diff(
+                index,
                 &conflict.profile,
                 &conflict.path,
                 conflict.server,
-            ) {
-                Ok(mut server) => {
-                    self.next_id += 1;
-                    server.remote = None;
-                    server.name = Some(tf!("{name} (сервер)", "{name} (server)"));
-                    server.syntax = self.docs[index].syntax.clone();
-                    let local = self.docs[index].id;
-                    let id = server.id;
-                    self.diff.left = Some(id);
-                    self.diff.right = Some(local);
-                    self.docs.push(server);
-                    dock::show(&mut self.dock, Pane::Doc(id), &self.settings.floats);
-                    dock::show(&mut self.dock, Pane::Diff, &self.settings.floats);
-                }
-                Err(e) => self.notify(
-                    tf!(
-                        "Не удалось открыть версию с сервера: {e}",
-                        "Could not open the server version: {e}"
-                    ),
-                    now,
-                ),
-            },
+                now,
+            ),
             1 => {
                 self.docs[index].server_hash = None;
                 self.save(index, now);
             }
             _ => self.notify(tr!("Сохранение отменено"), now),
+        }
+    }
+
+    pub(super) fn show_server_diff(
+        &mut self,
+        index: usize,
+        profile: &str,
+        path: &str,
+        server: Vec<u8>,
+        now: f64,
+    ) {
+        let name = crate::remote::file_name(path).to_owned();
+        match Document::open_remote(self.next_id, profile, path, server) {
+            Ok(mut server) => {
+                self.next_id += 1;
+                server.remote = None;
+                server.name = Some(tf!("{name} (сервер)", "{name} (server)"));
+                server.syntax = self.docs[index].syntax.clone();
+                let local = self.docs[index].id;
+                let id = server.id;
+                self.diff.left = Some(id);
+                self.diff.right = Some(local);
+                self.docs.push(server);
+                dock::show(&mut self.dock, Pane::Doc(id), &self.settings.floats);
+                dock::show(&mut self.dock, Pane::Diff, &self.settings.floats);
+            }
+            Err(e) => self.notify(
+                tf!(
+                    "Не удалось открыть версию с сервера: {e}",
+                    "Could not open the server version: {e}"
+                ),
+                now,
+            ),
         }
     }
 }

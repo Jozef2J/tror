@@ -22,6 +22,9 @@ impl TrorApp {
                 if item(ui, tr!("Открыть…"), &key("open"), true) {
                     actions.push(Action::Open);
                 }
+                if item(ui, tr!("Быстрое открытие…"), &key("quick_open"), true) {
+                    actions.push(Action::Jump(""));
+                }
                 if item(ui, tr!("Открыть папку…"), &key("open_folder"), true) {
                     actions.push(Action::OpenFolder);
                 }
@@ -272,6 +275,10 @@ impl TrorApp {
             });
             ui.menu_button(tr!("Вид"), |ui| {
                 ui.set_min_width(260.0);
+                if item(ui, tr!("Палитра команд…"), &key("palette"), true) {
+                    actions.push(Action::Jump(">"));
+                }
+                ui.separator();
                 let theme = if self.settings.look.dark {
                     tr!("Светлая тема")
                 } else {

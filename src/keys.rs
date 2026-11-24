@@ -2,14 +2,16 @@ use std::collections::BTreeMap;
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 
-pub const COMMANDS: [(&str, &str, &str, bool); 45] = [
+pub const COMMANDS: [(&str, &str, &str, bool); 48] = [
     ("new", "Новый файл", "Ctrl+N", true),
     ("open", "Открыть файл", "Ctrl+O", true),
     ("open_folder", "Открыть папку", "Ctrl+Shift+O", true),
     ("save", "Сохранить", "Ctrl+S", true),
     ("save_as", "Сохранить как", "Ctrl+Shift+S", true),
     ("save_all", "Сохранить все", "", true),
-    ("print", "Печать", "Ctrl+P", true),
+    ("print", "Печать", "Ctrl+Alt+Shift+P", true),
+    ("quick_open", "Быстрое открытие файла", "Ctrl+P", false),
+    ("palette", "Палитра команд", "F1", false),
     ("close_tab", "Закрыть вкладку", "Ctrl+W", true),
     ("reopen", "Открыть закрытую вкладку", "Ctrl+Shift+T", true),
     ("next_tab", "Следующая вкладка", "Ctrl+Tab", true),
@@ -47,6 +49,7 @@ pub const COMMANDS: [(&str, &str, &str, bool); 45] = [
     ("server_search", "Поиск на сервере", "", false),
     ("db", "База данных", "", false),
     ("compare", "Сравнить файлы", "", false),
+    ("compare_server", "Сравнить с версией на сервере", "", false),
     ("preview", "Предпросмотр в браузере", "F12", false),
 ];
 

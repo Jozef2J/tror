@@ -259,6 +259,7 @@ impl eframe::App for TrorApp {
         }
         self.check_missing(&ctx);
         let modal_open = self.goto.is_some()
+            || self.jump.open
             || self.plugin_dialog.is_some()
             || self.macro_dialog.is_some()
             || self.rename.is_some()
@@ -768,6 +769,7 @@ impl eframe::App for TrorApp {
         }
 
         self.goto_modal(&ctx, &pal);
+        self.jump_modal(&ctx, &pal);
         self.plugin_modal(&ctx, &pal);
         self.plugin_manager(&ctx, &pal);
         self.macro_modal(&ctx, &pal);

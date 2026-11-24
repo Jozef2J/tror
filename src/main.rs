@@ -17,6 +17,7 @@ mod files;
 mod findfiles;
 mod fold;
 mod highlight;
+mod import;
 mod keys;
 mod marks;
 mod local;
