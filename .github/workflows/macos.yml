@@ -51,6 +51,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: packaging/macos.sh
@@ -67,3 +68,16 @@ jobs:
           shasum -a 256 TrorPad-macos.zip >> SHA256SUMS.new
           mv SHA256SUMS.new SHA256SUMS
           gh release upload "v$VERSION" SHA256SUMS --clobber
+          git fetch origin main
+          git checkout -B packages origin/main
+          python3 packaging/packages.py mac "$VERSION" "$(shasum -a 256 TrorPad-macos.zip | cut -d' ' -f1)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks
+          if ! git diff --cached --quiet; then
+            git commit -m "Homebrew cask for $VERSION"
+            for attempt in 1 2 3 4 5; do
+              git pull --rebase origin main && git push origin HEAD:main && break
+              sleep 10
+            done
+          fi

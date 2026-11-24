@@ -2943,7 +2943,7 @@ impl DbPanel {
             });
         });
         if run && let Some((_, statements)) = self.import.take() {
-            self.status = tr!("Импорт…").into();
+            self.status = tr!("Идёт импорт…").into();
             self.error = false;
             self.send(Cmd::Import(statements));
         } else if cancel || modal.should_close() {

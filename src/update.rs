@@ -82,7 +82,22 @@ fn writable(dir: &Path) -> bool {
     ok
 }
 
+fn managed(exe: &Path) -> bool {
+    let path = exe.to_string_lossy().replace('\\', "/").to_lowercase();
+    path.contains("/scoop/apps/")
+        || path.contains("/cellar/")
+        || [
+            "/opt/homebrew/Caskroom/trorpad",
+            "/usr/local/Caskroom/trorpad",
+        ]
+        .iter()
+        .any(|dir| cfg!(target_os = "macos") && Path::new(dir).is_dir())
+}
+
 pub fn kind() -> Kind {
+    if std::env::current_exe().is_ok_and(|exe| managed(&exe)) {
+        return Kind::Page;
+    }
     if cfg!(target_os = "macos") {
         return match bundle() {
             Some(app) if app.parent().is_some_and(writable) => Kind::Bundle,
@@ -408,6 +423,18 @@ pub fn cleanup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_manager_installs_are_not_self_updated() {
+        assert!(managed(Path::new(
+            r"C:\Users\a\scoop\apps\trorpad\current\trorpad.exe"
+        )));
+        assert!(managed(Path::new(
+            "/home/linuxbrew/.linuxbrew/Cellar/trorpad/0.30.1/bin/trorpad"
+        )));
+        assert!(!managed(Path::new(r"C:\Program Files\TrorPad\trorpad.exe")));
+        assert!(!managed(Path::new("/home/a/bin/trorpad")));
+    }
 
     #[test]
     fn notes_join_wrapped_lines_and_drop_attribution() {

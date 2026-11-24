@@ -222,6 +222,7 @@ pub struct Highlighter {
     dirty: Option<(usize, usize)>,
     shown: Option<Window>,
     building: Option<Builder>,
+    fresh: Option<usize>,
     buf: Scratch,
     pub default_color: Color32,
 }
@@ -307,6 +308,13 @@ impl Highlighter {
             self.reset();
             return;
         }
+        if let Some(fresh) = &mut self.fresh
+            && start_line < *fresh
+        {
+            *fresh = (*fresh + new_lines)
+                .saturating_sub(old_lines)
+                .max(start_line);
+        }
         let state = self.entries[start_line].state.take();
         self.entries.splice(
             start_line..start_line + old_lines,
@@ -351,6 +359,13 @@ impl Highlighter {
 
     pub fn spans(&self, line: usize) -> &[Span] {
         if let Some(entry) = self.entries.get(line) {
+            if self.fresh.is_some_and(|f| line >= f)
+                && let Some(w) = &self.shown
+                && line >= w.start
+                && let Some(spans) = w.entries.get(line - w.start)
+            {
+                return spans;
+            }
             return &entry.spans;
         }
         match &self.shown {
@@ -391,9 +406,11 @@ impl Highlighter {
             self.dirty = None;
             self.shown = None;
             self.building = None;
+            self.fresh = None;
             if full && syntax != "Plain Text" {
                 self.entries.resize_with(lines, Entry::default);
                 self.dirty = Some((0, lines - 1));
+                self.fresh = Some(0);
             }
         }
         if syntax == "Plain Text" {
@@ -402,7 +419,16 @@ impl Highlighter {
         let styler = Styler::new(theme);
         let deadline = budget.map(|b| Instant::now() + b);
         if full {
-            self.process_full(syn, rope, syntax, &styler, deadline)
+            let mut busy = false;
+            if self.fresh.is_some_and(|f| visible.end > f + 1) {
+                busy = self.process_window(syn, rope, syntax, &styler, version, visible, deadline);
+            }
+            busy |= self.process_full(syn, rope, syntax, &styler, deadline);
+            if self.fresh.is_none() {
+                self.shown = None;
+                self.building = None;
+            }
+            busy
         } else {
             self.process_window(syn, rope, syntax, &styler, version, visible, deadline)
         }
@@ -430,13 +456,20 @@ impl Highlighter {
             None => fresh_state(syn.syntax(syntax)),
         };
         loop {
+            if self.fresh.is_some_and(|f| first <= f && i > f) {
+                self.fresh = Some(i);
+            }
             if i >= n {
                 self.dirty = None;
+                self.fresh = None;
                 return false;
             }
             let checkpoint = self.entries[i].state.is_some() || i % CHECKPOINT == 0;
             if checkpoint {
-                if i > to && self.entries[i].state.as_deref() == Some(&state) {
+                if i > to
+                    && self.fresh.is_none()
+                    && self.entries[i].state.as_deref() == Some(&state)
+                {
                     self.dirty = None;
                     return false;
                 }
@@ -623,6 +656,31 @@ mod tests {
     fn find(doc: &crate::document::Document, needle: &str) -> usize {
         let text = doc.rope.to_string();
         doc.rope.byte_to_char(text.find(needle).unwrap())
+    }
+
+    #[test]
+    fn far_visible_lines_are_colored_before_the_full_pass() {
+        let syn = Syntaxes::new();
+        let block = "<?php\n$a = ['x' => 1]; // c\nfunction f($b) { return \"s$b\"; }\n?>\n<div class=\"a\"><?= $a ?></div>\n";
+        let rope = Rope::from_str(&block.repeat(2000));
+        let lines = rope.len_lines();
+        let visible = lines - 40..lines - 1;
+        let mut h = Highlighter::default();
+        let mut frames = 0;
+        while h.process(&syn, &rope, "PHP", 0, visible.clone(), Some(FRAME_BUDGET)) {
+            frames += 1;
+            if visible
+                .clone()
+                .all(|l| rope.line(l).len_chars() <= 1 || !h.spans(l).is_empty())
+            {
+                break;
+            }
+        }
+        assert!(h.fresh.is_some(), "full pass finished first");
+        assert!(frames < 40, "{frames}");
+        while h.process(&syn, &rope, "PHP", 0, visible.clone(), Some(FRAME_BUDGET)) {}
+        assert!(h.fresh.is_none());
+        assert_eq!(all(&h, &rope), reference(&syn, &rope, "PHP"));
     }
 
     #[test]
