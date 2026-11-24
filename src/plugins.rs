@@ -19,21 +19,26 @@ https://github.com/Jozef2J/tror/blob/main/sdk/README.md
 Old-style plugins (*.json files that run an external program) still work; see sort-lines.json.
 ";
 
-const GUIDE: &str = r#"Плагины TrorPad
+const GUIDE: &str = r##"Плагины TrorPad
 
 Есть два вида плагинов.
 
 1. Плагины на Rust (WebAssembly) — основной вид.
 Плагин — это папка с файлами plugin.json и plugin.wasm. Код работает
-внутри TrorPad в песочнице: без доступа к сети, к паролям и к файлам вне
-открытой папки проекта (и то только с разрешением "fs").
+внутри TrorPad в песочнице и получает только те разрешения, которые
+указаны в plugin.json (их показывают перед установкой). Пароли плагины
+не получают никогда.
+
+Полное описание, библиотека и пример (на английском):
+https://github.com/Jozef2J/tror/blob/main/sdk/README.md
 
 {
   "id": "text-tools",
   "name": "Текстовые инструменты",
   "version": "1.0.0",
-  "permissions": [],
-  "events": ["saved", "opened"],
+  "wasm": "plugin.wasm",
+  "permissions": ["fs"],
+  "events": ["saved", "opened", "changed", "activeChanged"],
   "commands": [
     { "id": "sort", "title": "Сортировать строки", "key": "Ctrl+Alt+S" }
   ],
@@ -45,12 +50,28 @@ const GUIDE: &str = r#"Плагины TrorPad
   ]
 }
 
+id       — уникальное имя плагина; name и version видны в окне плагинов.
 commands — пункты меню «Плагины», key — необязательное сочетание клавиш.
-events   — события: "saved" (файл сохранён), "opened" (файл открыт).
-permissions — "fs": чтение и запись файлов внутри папки проекта.
+events   — события: "saved" (файл сохранён), "opened" (файл открыт),
+           "changed" (через 0,4 с после последней правки, один раз
+           на версию), "activeChanged" (сменилась активная вкладка).
 panels   — панели плагина; dock: "left", "bottom" или "center".
 settings — настройки (type: "text", "bool", "number", "choice"),
            окно «Настройки…» в меню плагина.
+
+permissions — разрешения:
+  без разрешений — текст и выделение активного документа, панели,
+           окна ввода, уведомления, собственное хранилище плагина;
+  "fs"      — read_file, write_file: файлы только внутри папки проекта,
+           выход за неё (в том числе по ссылкам) запрещён;
+  "network" — http, get: только http и https, ожидание до 20 с,
+           ответ до 10 МБ, коды 4xx/5xx возвращаются как обычный ответ;
+  "hosts"   — hosts, remote_list, remote_read, remote_write: профили
+           серверов (имя, протокол, адрес, папка); подключается сам
+           TrorPad с паролем из хранилища ОС, неизвестный ключ SFTP
+           отклоняется;
+  "db"      — databases, db_query: SQL к сохранённым профилям баз,
+           ответ {columns, rows, affected, truncated}.
 
 Плагин пишется на Rust с библиотекой trorpad-plugin:
 
@@ -77,23 +98,46 @@ settings — настройки (type: "text", "bool", "number", "choice"),
 Сборка: rustup target add wasm32-unknown-unknown
         cargo build --release --target wasm32-unknown-unknown
 Готовый .wasm из target/wasm32-unknown-unknown/release переименуйте
-в plugin.wasm и положите рядом с plugin.json в отдельную папку здесь.
+в plugin.wasm и положите рядом с plugin.json в отдельную папку здесь
+или упакуйте оба файла в zip и установите через
+«Плагины → Управление плагинами… → Установить из zip…».
 
-Что доступно в host: text, selection, selected_text, info, replace,
-replace_selection, select, notify, log, log_error, open_tab, read_file,
-write_file, storage_get, storage_set, prompt (ввод строки), pick (выбор
-из списка), panel и show_panel (содержимое панели), setting.
-Ответ на prompt и pick приходит в метод answer, нажатия в панели —
-в panel_event, открытие панели — в panel_open. Панель описывается
-функциями модуля ui: column, row, heading, text, small, code, button,
-primary, input, multiline, checkbox, select, list, progress, separator.
-Позиции в тексте считаются в символах.
+Методы плагина: command (обязателен), event, answer, panel_open,
+panel_event. Ответ на prompt и pick приходит в answer, нажатия
+в панели — в panel_event, открытие панели — в panel_open.
 
-Плагин работает в фоне, окно не замирает. Все правки одной команды
-отменяются одним Ctrl+Z; если файл успели изменить, правки не
-применяются. Если плагин зациклится или упадёт, TrorPad остановит его
-до «Перечитать». Пример — плагин «Текстовые инструменты» в выпусках
-на GitHub.
+Что доступно в host:
+  документ  — text, selection, selected_text, info, replace,
+              replace_selection, select;
+  сообщения — notify, log, log_error;
+  данные    — open_tab, read_file, write_file, storage_get,
+              storage_set, setting;
+  окна      — prompt (ввод строки), pick (выбор из списка);
+  панели    — panel (содержимое), show_panel;
+  пометки   — decorate(ключ, список), clear_decorations(ключ):
+              Decoration::highlight (подсветка), underline (волнистое
+              подчёркивание), gutter (метка на поле номеров), к каждой
+              .color("#rrggbb") и .message(...) — подсказка при наведении;
+              до 5000 пометок на ключ;
+  с разрешениями — http, get, hosts, remote_list, remote_read,
+              remote_write, databases, db_query.
+
+Панель описывается функциями модуля ui: column, row, heading, text,
+strong, small, code, button, primary, input, multiline, checkbox,
+select, list, progress, separator, space, table, tree, node.
+Поля ввода присылают событие по Enter или при уходе фокуса с новым
+значением; флажки, списки, таблицы и деревья — сразу.
+Позиции в тексте считаются в символах, а не в байтах (помогают
+функции модуля text: byte_of, slice, lines_span, chars).
+
+Ограничения: на один вызов — до 4·10⁹ единиц работы (около 8 с),
+память — до 512 МБ. Каждый плагин работает в своём потоке, окно
+не замирает. Все правки одной команды отменяются одним Ctrl+Z; если
+файл успели изменить, правки не применяются. Если плагин зациклится
+или упадёт, TrorPad остановит его до «Перечитать» и запишет причину
+в журнал. Версия интерфейса — API 2: в её пределах ничего не удаляется
+и не меняется несовместимо. Пример — плагин «Текстовые инструменты»
+в выпусках на GitHub (trorpad-plugin-text-tools.zip).
 
 2. Внешние программы.
 Плагин — это файл .json в этой папке. Он описывает внешнюю программу:
@@ -130,7 +174,7 @@ TROR_FILE, TROR_LINE, TROR_COLUMN, TROR_SYNTAX.
 попадает в журнал. На выполнение даётся 30 секунд.
 
 После изменения файлов выберите «Плагины → Перечитать».
-"#;
+"##;
 
 const EXAMPLE: &str = r#"{
   "name": "Сортировать строки (пример)",

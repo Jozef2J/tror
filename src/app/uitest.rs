@@ -365,3 +365,78 @@ fn ui_tab_indents_selected_lines() {
     harness.run_steps(2);
     assert_eq!(text(&harness), "<?php\n\tone();\n\ttwo();\n\tthree();\n");
 }
+
+#[test]
+#[ignore]
+fn ui_database_structure_renames_column() {
+    let home = sandbox("structure");
+    let path = home.join("shop.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE goods (id INTEGER PRIMARY KEY, title TEXT, price INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO goods (title) VALUES ('Чайник'), ('Кружка');",
+        )
+        .unwrap();
+    }
+    let mut harness = app();
+    {
+        let state = harness.state_mut();
+        state.remotes[0].store.databases = vec![crate::db::DbProfile {
+            name: "shop".into(),
+            kind: crate::db::DbKind::Sqlite,
+            file: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        }];
+        let floats = state.settings.floats.clone();
+        dock::show(&mut state.dock, Pane::Db, &floats);
+    }
+    harness.run_steps(3);
+    harness
+        .get_all_by_label("Подключить")
+        .max_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
+        .unwrap()
+        .click();
+    wait(&mut harness, "подключение к базе", |h| {
+        h.query_by_label("Отключить").is_some()
+    });
+    wait(&mut harness, "список таблиц", |h| {
+        h.query_by_label_contains("goods").is_some()
+    });
+    harness.get_by_label("Структура").click();
+    harness.run_steps(2);
+    harness.get_by_label_contains("goods").click();
+    wait(&mut harness, "структура таблицы", |h| {
+        h.query_by_label("title").is_some()
+    });
+    harness.get_by_label_contains("2 строки");
+    harness.get_by_label("title").click();
+    harness.run_steps(2);
+    harness.get_by_label("Изменить…").click();
+    harness.run_steps(2);
+    let field = harness
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .unwrap();
+    field.click();
+    harness.run_steps(1);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    harness.event(egui::Event::Text("name".into()));
+    harness.run_steps(2);
+    harness.get_by_label_contains("RENAME COLUMN \"title\" TO \"name\"");
+    harness.get_by_label("Выполнить").hover();
+    harness.run_steps(1);
+    harness.get_by_label("Выполнить").click();
+    wait(&mut harness, "изменение структуры", |h| {
+        h.query_by_label("name").is_some() && h.query_by_label("Выполнить").is_none()
+    });
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let names: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('goods')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(names, ["id", "name", "price"]);
+}

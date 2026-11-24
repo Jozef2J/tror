@@ -15,6 +15,8 @@ use crate::remote::{self, Profile, Store};
 use crate::theme::Palette;
 use crate::trace;
 
+mod structure;
+
 pub static MAX_ROWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(5000);
 
 fn max_rows() -> usize {
@@ -124,7 +126,7 @@ impl Table {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Source {
     pub schema: String,
     pub table: String,
@@ -137,6 +139,8 @@ enum Cmd {
     Batch(Vec<String>, String, Option<Source>),
     Import(Vec<String>),
     Search(Find),
+    Structure(Source),
+    Alter(Vec<String>, Source),
 }
 
 #[derive(Clone, Default)]
@@ -204,6 +208,7 @@ enum Event {
     Result(Table, Option<Source>, Vec<String>),
     Imported(usize, u64),
     Found(Hits, usize),
+    Structure(Box<structure::Structure>),
     Error(String),
     Closed(String),
 }
@@ -825,6 +830,14 @@ fn serve(profile: DbProfile, ssh: Ssh, cmds: Receiver<Cmd>, events: Sender<Event
                     Event::Found(found, tables.len())
                 })
             }
+            Cmd::Structure(source) => {
+                trace::client(format!("[DB] structure of {}.{}", source.schema, source.table));
+                engine.structure(&source).map(|s| Event::Structure(Box::new(s)))
+            }
+            Cmd::Alter(statements, source) => engine.batch(&statements).and_then(|_| {
+                trace::server("[DB] structure changed");
+                engine.structure(&source).map(|s| Event::Structure(Box::new(s)))
+            }),
             Cmd::Batch(statements, refresh, source) => engine.batch(&statements).and_then(|affected| {
                 trace::server(format!("[DB] committed, {affected} rows affected"));
                 let table = engine.query(&refresh)?;
@@ -876,6 +889,14 @@ impl Edits {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Default)]
+enum Mode {
+    #[default]
+    Query,
+    Search,
+    Structure,
+}
+
 #[derive(Default)]
 pub struct DbPanel {
     selected: usize,
@@ -901,7 +922,8 @@ pub struct DbPanel {
     history: Option<History>,
     import: Option<(String, Vec<String>)>,
     searching: bool,
-    mode_search: bool,
+    mode: Mode,
+    structure: structure::State,
     find: Find,
     found: Option<(Hits, usize)>,
 }
@@ -1235,7 +1257,7 @@ fn split_name(name: &str) -> Vec<String> {
 
 impl DbPanel {
     pub fn modal_open(&self) -> bool {
-        self.editor.is_some() || self.edits.confirm.is_some()
+        self.editor.is_some() || self.edits.confirm.is_some() || self.structure_modal()
     }
 
     fn send(&mut self, cmd: Cmd) {
@@ -1300,6 +1322,7 @@ impl DbPanel {
         self.version = None;
         self.schemas.clear();
         self.result = None;
+        self.structure = structure::State::default();
         self.edits = Edits::default();
         self.status = tr!("Подключение…").into();
         self.error = false;
@@ -1307,6 +1330,7 @@ impl DbPanel {
     }
 
     fn disconnect(&mut self) {
+        self.structure = structure::State::default();
         self.conn = None;
         self.version = None;
         self.schemas.clear();
@@ -1422,9 +1446,23 @@ impl DbPanel {
                     self.error = false;
                     self.send(Cmd::Databases);
                 }
+                Event::Structure(data) => {
+                    if self.structure.loading.as_ref() == Some(&data.source) {
+                        self.structure.loading = None;
+                    }
+                    if self.status == tr!("Изменение структуры…") {
+                        self.status = tr!("Структура изменена").into();
+                        self.error = false;
+                    }
+                    if self.structure.data.as_ref().map(|d| &d.source) != Some(&data.source) {
+                        self.structure.picked = None;
+                    }
+                    self.structure.data = Some(*data);
+                }
                 Event::Error(e) => {
                     self.status = e;
                     self.error = true;
+                    self.structure.loading = None;
                 }
                 Event::Closed(e) => {
                     self.status = tf!("Нет подключения: {e}", "Not connected: {e}");
@@ -1554,7 +1592,7 @@ impl DbPanel {
                 ui.add_space(4.0);
                 crate::widgets::wrapped_row(ui, 8.0, |ui| {
                     ui.label(
-                        RichText::new(tr!("Выберите подключение и нажмите «Подключить». Здесь появятся таблицы, редактор запросов и поиск по базе."))
+                        RichText::new(tr!("Выберите подключение и нажмите «Подключить». Здесь появятся таблицы, редактор запросов, поиск по базе и структура таблиц."))
                             .small()
                             .color(pal.subtext),
                     );
@@ -1664,6 +1702,7 @@ impl DbPanel {
         });
         let mut toggle = None;
         let mut run: Option<(String, String, bool)> = None;
+        let mut show: Option<(String, String)> = None;
         ScrollArea::vertical()
             .id_salt("tror_db_tree")
             .auto_shrink(false)
@@ -1695,9 +1734,17 @@ impl DbPanel {
                                 );
                                 let queries = self.table_queries(&schema.name, table);
                                 if response.clicked() {
-                                    run = Some((schema.name.clone(), queries[0].1.clone(), true));
+                                    if self.mode == Mode::Structure {
+                                        show = Some((schema.name.clone(), table.clone()));
+                                    } else {
+                                        run = Some((schema.name.clone(), queries[0].1.clone(), true));
+                                    }
                                 }
                                 response.context_menu(|ui| {
+                                    if ui.button(tr!("Структура")).clicked() {
+                                        show = Some((schema.name.clone(), table.clone()));
+                                        ui.close();
+                                    }
                                     for (label, sql) in &queries {
                                         if ui.button(*label).clicked() {
                                             run = Some((schema.name.clone(), sql.clone(), true));
@@ -1752,6 +1799,11 @@ impl DbPanel {
                     self.error = true;
                 }
             }
+        }
+        if let Some((schema, table)) = show {
+            self.current = schema.clone();
+            self.mode = Mode::Structure;
+            self.open_structure(Source { schema, table });
         }
         if let Some((schema, sql, show)) = run {
             self.current = schema;
@@ -1923,7 +1975,7 @@ impl DbPanel {
         if let Some((table, sql)) = open {
             let schema = self.find.schema.clone();
             self.searching = false;
-            self.mode_search = false;
+            self.mode = Mode::Query;
             self.sql = sql.clone();
             self.current = schema.clone();
             self.run_on(sql, Some(Source { schema, table }));
@@ -1936,14 +1988,22 @@ impl DbPanel {
             crate::widgets::segmented(
                 ui,
                 pal,
-                &mut self.mode_search,
-                &[(false, tr!("Запрос")), (true, tr!("Поиск"))],
+                &mut self.mode,
+                &[
+                    (Mode::Query, tr!("Запрос")),
+                    (Mode::Search, tr!("Поиск")),
+                    (Mode::Structure, tr!("Структура")),
+                ],
                 96.0,
             );
         });
         ui.add_space(6.0);
-        if self.mode_search {
+        if self.mode == Mode::Search {
             self.search_view(ui, pal);
+            return;
+        }
+        if self.mode == Mode::Structure {
+            self.structure_view(ui, pal, font_size);
             return;
         }
         let font = FontId::monospace(font_size - 1.0);
@@ -2562,6 +2622,7 @@ impl DbPanel {
     pub fn dialogs(&mut self, ctx: &egui::Context, pal: &Palette, store: &mut Store) {
         self.confirm_dialog(ctx, pal);
         self.import_dialog(ctx, pal);
+        self.structure_dialogs(ctx, pal);
         let Some(editor) = &mut self.editor else {
             return;
         };
