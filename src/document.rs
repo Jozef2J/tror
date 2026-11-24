@@ -496,7 +496,7 @@ impl Document {
 
     pub fn save(&mut self) -> Result<(), String> {
         let path = self.path.clone().ok_or(tr!("не задан путь"))?;
-        std::fs::write(&path, self.encoded()).map_err(|e| e.to_string())?;
+        write_safely(&path, &self.encoded()).map_err(|e| e.to_string())?;
         self.remote = None;
         self.mark_saved(self.version);
         Ok(())
@@ -1393,9 +1393,89 @@ impl Document {
     }
 }
 
+pub fn write_safely(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let meta = std::fs::metadata(&target).ok();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.as_ref().is_some_and(|m| m.nlink() > 1) {
+            return std::fs::write(&target, data);
+        }
+    }
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else {
+        return std::fs::write(&target, data);
+    };
+    let temp = dir.join(format!(
+        ".{}.trorpad-save-{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let staged = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .and_then(|mut file| {
+            file.write_all(data)?;
+            if let Some(meta) = &meta {
+                file.set_permissions(meta.permissions())?;
+            }
+            file.sync_all()
+        });
+    if staged.is_ok() && std::fs::rename(&temp, &target).is_ok() {
+        #[cfg(unix)]
+        if let Ok(dir) = std::fs::File::open(dir) {
+            let _ = dir.sync_all();
+        }
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(&temp);
+    std::fs::write(&target, data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_write_keeps_permissions_links_and_falls_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("tror-safe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.php");
+        std::fs::write(&file, "old").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_safely(&file, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let link = dir.join("link.php");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        write_safely(&link, b"via link").unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "via link");
+        let hard = dir.join("hard.php");
+        std::fs::hard_link(&file, &hard).unwrap();
+        write_safely(&hard, b"both").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "both");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn column_paste_pads_short_lines_and_adds_new_ones() {

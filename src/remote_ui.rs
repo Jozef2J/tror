@@ -1057,7 +1057,7 @@ impl RemotePanel {
                     let in_batch = self.batch.as_ref().is_some_and(|b| b.sizes.contains_key(&path));
                     match self.save_to.remove(&path) {
                         Some(local) if in_batch => {
-                            let result = std::fs::write(&local, data);
+                            let result = crate::document::write_safely(&local, &data);
                             if result.is_ok()
                                 && let Some(mtime) = self.sync_times.remove(&local)
                             {

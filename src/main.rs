@@ -7,6 +7,7 @@ mod bench;
 mod archive;
 mod complete;
 mod console;
+mod crash;
 mod db;
 mod diff;
 mod dock;
@@ -56,6 +57,11 @@ fn main() -> eframe::Result {
     if std::env::args().nth(1).as_deref() == Some("--forget-passwords") {
         vault::clear();
         return Ok(());
+    }
+    crash::install();
+    #[cfg(debug_assertions)]
+    if std::env::var_os("TROR_TEST_PANIC").is_some() {
+        std::thread::spawn(|| panic!("test panic")).join().ok();
     }
     if !instance::restarted() && instance::forward(&instance::args()) {
         return Ok(());

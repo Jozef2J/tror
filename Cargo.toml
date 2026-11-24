@@ -1,6 +1,6 @@
 [package]
 name = "trorpad"
-version = "0.27.4"
+version = "0.28.0"
 description = "TrorPad — a fast, compact code editor with SFTP/FTP, SSH console and database tools"
 edition = "2024"
 license = "MIT OR Apache-2.0"
@@ -32,16 +32,16 @@ ropey = { version = "1", default-features = false, features = ["simd"] }
 rusqlite = { version = "0.42.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-sha2 = "0.10"
+sha2 = "0.11"
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
 similar = "3.2.1"
 ssh2 = { version = "0.9.7", features = ["vendored-openssl"] }
-suppaftp = { version = "12.2.1", features = ["deprecated", "native-tls"] }
+suppaftp = { version = "13.0.0", features = ["deprecated", "native-tls"] }
 syntect = { version = "5.3.0", default-features = false, features = ["default-onig"] }
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-onig"] }
 vt100 = "0.18.1"
-sha1 = "0.10"
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+sha1 = "0.11"
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 portable-pty = "0.9"
 
 [profile.release]

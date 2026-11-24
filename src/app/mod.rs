@@ -553,6 +553,13 @@ impl TrorApp {
         }
         app.instance = crate::instance::listen(cc.egui_ctx.clone());
         app.sync_plugin_panels();
+        if let Some(report) = crate::crash::pending() {
+            app.open_path(&report, 0.0);
+            app.toast = Some((
+                tr!("В прошлый раз TrorPad завершился с ошибкой. Отчёт открыт во вкладке — приложите его к сообщению на GitHub.").to_owned(),
+                0.0,
+            ));
+        }
         app
     }
 }

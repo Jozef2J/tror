@@ -10,6 +10,8 @@ pub enum Kind {
 }
 
 static LINES: Mutex<Vec<(String, Kind)>> = Mutex::new(Vec::new());
+static RECENT: Mutex<std::collections::VecDeque<String>> =
+    Mutex::new(std::collections::VecDeque::new());
 static POPUPS: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
 static REPEAT: AtomicBool = AtomicBool::new(false);
 
@@ -76,9 +78,23 @@ pub fn push(text: impl Into<String>, kind: Kind) {
         return;
     }
     let stamp = chrono::Local::now().format("%H:%M:%S");
-    if let Ok(mut lines) = LINES.lock() {
-        lines.push((format!("{stamp}  {text}"), kind));
+    let line = format!("{stamp}  {text}");
+    if let Ok(mut recent) = RECENT.try_lock() {
+        if recent.len() >= 60 {
+            recent.pop_front();
+        }
+        recent.push_back(line.clone());
     }
+    if let Ok(mut lines) = LINES.lock() {
+        lines.push((line, kind));
+    }
+}
+
+pub fn recent() -> Vec<String> {
+    RECENT
+        .try_lock()
+        .map(|r| r.iter().cloned().collect())
+        .unwrap_or_default()
 }
 
 pub fn line(text: impl Into<String>, error: bool) {
