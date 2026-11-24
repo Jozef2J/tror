@@ -217,6 +217,7 @@ pub fn port_field(ui: &mut Ui, port: &mut u16, width: f32) -> egui::Response {
 pub fn dots_button(ui: &mut Ui, pal: &Palette) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tr!("Ещё")));
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
     if response.hovered() || open {
         ui.painter().rect_filled(
@@ -244,6 +245,7 @@ pub fn dots_button(ui: &mut Ui, pal: &Palette) -> egui::Response {
 pub fn plus_button(ui: &mut Ui, pal: &Palette, size: egui::Vec2) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tr!("Добавить")));
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
     if response.hovered() || open {
         ui.painter().rect_filled(
@@ -284,6 +286,17 @@ pub fn plus_button(ui: &mut Ui, pal: &Palette, size: egui::Vec2) -> egui::Respon
 pub fn scroll_arrow(ui: &mut Ui, pal: &Palette, forward: bool, enabled: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 22.0), Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::Role::Button,
+            true,
+            if forward {
+                tr!("Вперёд")
+            } else {
+                tr!("Назад")
+            },
+        )
+    });
     let color = if !enabled {
         pal.faint.gamma_multiply(0.5)
     } else if response.hovered() {
@@ -392,6 +405,7 @@ pub fn paint_icon(painter: &egui::Painter, center: Pos2, is_dir: bool, name: &st
 pub fn refresh_button(ui: &mut Ui, pal: &Palette) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tr!("Обновить")));
     if response.hovered() {
         ui.painter().rect_filled(
             rect,

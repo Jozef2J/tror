@@ -40,6 +40,7 @@ pub enum Kind {
     Installer,
     Installed,
     Portable,
+    Bundle,
     Page,
 }
 
@@ -66,9 +67,27 @@ pub fn newer(found: &str, current: &str) -> bool {
     }
 }
 
+fn bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let app = exe.parent()?.parent()?.parent()?;
+    app.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+        .then(|| app.to_path_buf())
+}
+
+fn writable(dir: &Path) -> bool {
+    let probe = dir.join(".tror-write-test");
+    let ok = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
 pub fn kind() -> Kind {
     if cfg!(target_os = "macos") {
-        return Kind::Page;
+        return match bundle() {
+            Some(app) if app.parent().is_some_and(writable) => Kind::Bundle,
+            _ => Kind::Page,
+        };
     }
     let Ok(exe) = std::env::current_exe() else {
         return Kind::Page;
@@ -76,9 +95,7 @@ pub fn kind() -> Kind {
     let Some(dir) = exe.parent() else {
         return Kind::Page;
     };
-    let probe = dir.join(".tror-write-test");
-    let writable = std::fs::write(&probe, b"").is_ok();
-    let _ = std::fs::remove_file(&probe);
+    let writable = writable(dir);
     let installed = cfg!(windows) && dir.join("unins000.exe").is_file();
     let renamed = exe
         .file_name()
@@ -96,6 +113,7 @@ fn asset_name(kind: Kind) -> Option<&'static str> {
         Kind::Page => None,
         Kind::Installer => Some("trorpad-setup.exe"),
         Kind::Installed => Some("trorpad.exe"),
+        Kind::Bundle => Some("TrorPad-macos.zip"),
         Kind::Portable if cfg!(windows) => Some("trorpad.exe"),
         Kind::Portable => Some("trorpad-linux-x86_64"),
     }
@@ -168,6 +186,7 @@ fn fetch(release: &Release, kind: Kind) -> Result<PathBuf, String> {
         Kind::Installer => {
             std::env::temp_dir().join(format!("trorpad-setup-{}.exe", release.version))
         }
+        Kind::Bundle => std::env::temp_dir().join(format!("trorpad-{}.zip", release.version)),
         _ => {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             exe.with_extension("new")
@@ -243,7 +262,44 @@ pub fn swap(exe: &Path, fresh: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub fn swap_bundle(app: &Path, fresh: &Path) -> Result<(), String> {
+    let old = app.with_extension("app-old");
+    let _ = std::fs::remove_dir_all(&old);
+    std::fs::rename(app, &old).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::rename(fresh, app) {
+        let _ = std::fs::rename(&old, app);
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
+fn apply_bundle(zip: &Path) -> Result<(), String> {
+    let app = bundle().ok_or(tr!("программа запущена не из TrorPad.app"))?;
+    let parent = app.parent().ok_or(tr!("неверный путь"))?;
+    let unpacked = parent.join(".trorpad-update");
+    let _ = std::fs::remove_dir_all(&unpacked);
+    let status = std::process::Command::new("ditto")
+        .arg("-x")
+        .arg("-k")
+        .arg(zip)
+        .arg(&unpacked)
+        .status()
+        .map_err(|e| e.to_string())?;
+    let fresh = unpacked.join("TrorPad.app");
+    if !status.success() || !fresh.join("Contents/MacOS/trorpad").is_file() {
+        let _ = std::fs::remove_dir_all(&unpacked);
+        return Err(tr!("архив обновления повреждён").into());
+    }
+    let result = swap_bundle(&app, &fresh);
+    let _ = std::fs::remove_dir_all(&unpacked);
+    let _ = std::fs::remove_file(zip);
+    result
+}
+
 pub fn apply(path: &Path, version: &str) -> Result<(), String> {
+    if kind() == Kind::Bundle {
+        return apply_bundle(path);
+    }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     swap(&exe, path)?;
     if in_setup_dir(&exe) {
@@ -320,6 +376,18 @@ pub fn run_setup(path: &Path) -> Result<(), String> {
 }
 
 pub fn restart() -> Result<(), String> {
+    if cfg!(target_os = "macos")
+        && let Some(app) = bundle()
+    {
+        return std::process::Command::new("open")
+            .arg("-n")
+            .arg(app)
+            .arg("--args")
+            .arg(crate::instance::RESTART)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     std::process::Command::new(exe)
         .arg(crate::instance::RESTART)
@@ -331,6 +399,9 @@ pub fn restart() -> Result<(), String> {
 pub fn cleanup() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::fs::remove_file(exe.with_extension("old"));
+    }
+    if let Some(app) = bundle() {
+        let _ = std::fs::remove_dir_all(app.with_extension("app-old"));
     }
 }
 
@@ -408,6 +479,25 @@ mod tests {
         assert_eq!(expected_sum(&sums, "tror.exe"), Some(sum));
         assert_eq!(expected_sum(&sums, "tror-setup.exe"), None);
         assert_eq!(expected_sum(&sums, "other"), None);
+    }
+
+    #[test]
+    fn swap_bundle_replaces_the_app_folder() {
+        let dir = std::env::temp_dir().join(format!("tror-bundle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("TrorPad.app");
+        let fresh = dir.join("new/TrorPad.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::create_dir_all(fresh.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/MacOS/trorpad"), "old").unwrap();
+        std::fs::write(fresh.join("Contents/MacOS/trorpad"), "new").unwrap();
+        swap_bundle(&app, &fresh).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(app.join("Contents/MacOS/trorpad")).unwrap(),
+            "new"
+        );
+        assert!(dir.join("TrorPad.app-old/Contents/MacOS/trorpad").is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

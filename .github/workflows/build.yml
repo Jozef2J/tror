@@ -33,6 +33,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --locked
+      - if: runner.os == 'Linux'
+        name: Interface tests
+        run: cargo test --locked ui_ -- --ignored --test-threads=1
+      - if: runner.os == 'Linux'
+        name: Live server tests
+        run: |
+          sudo apt-get install -y -qq openssh-server python3-pyftpdlib > /dev/null
+          sudo useradd -m -s /bin/bash jozef
+          echo 'jozef:secret' | sudo chpasswd
+          sudo mkdir -p /home/jozef/www/css /run/sshd
+          echo '<?php echo 1;' | sudo tee /home/jozef/www/index.php > /dev/null
+          sudo chown -R jozef:jozef /home/jozef/www
+          sudo /usr/sbin/sshd -p 2222 -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=yes
+          mkdir -p /tmp/ftproot/www/css && echo '<?php echo 1;' > /tmp/ftproot/www/index.php && chmod -R 777 /tmp/ftproot
+          python3 .github/ci/ftpd.py > /tmp/ftpd.log 2>&1 &
+          sleep 2
+          cargo test --locked live_sftp -- --ignored --test-threads=1
+          cargo test --locked live_ftp_server -- --ignored --test-threads=1
       - run: cargo build --release --locked
       - if: runner.os == 'Linux'
         name: Speed check

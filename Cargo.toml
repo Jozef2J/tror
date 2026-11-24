@@ -1,6 +1,6 @@
 [package]
 name = "trorpad"
-version = "0.28.0"
+version = "0.28.1"
 description = "TrorPad — a fast, compact code editor with SFTP/FTP, SSH console and database tools"
 edition = "2024"
 license = "MIT OR Apache-2.0"
@@ -72,6 +72,7 @@ dbus-secret-service-keyring-store = { version = "1", features = ["crypto-openssl
 
 [dev-dependencies]
 wat = "1"
+egui_kittest = { version = "0.37", features = ["eframe"] }
 ron = "0.12.3"
 
 [patch.crates-io]

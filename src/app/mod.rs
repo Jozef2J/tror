@@ -38,6 +38,8 @@ mod plugin_manager;
 mod plugin_run;
 mod plugin_ui;
 mod tabs;
+#[cfg(test)]
+mod uitest;
 
 static VIEW_REQUEST: std::sync::Mutex<(Option<bool>, Option<bool>)> =
     std::sync::Mutex::new((None, None));
@@ -244,6 +246,18 @@ pub(crate) enum Icon {
 pub(crate) fn icon_button(ui: &mut Ui, pal: &Palette, icon: Icon) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::Role::Button,
+            true,
+            match icon {
+                Icon::Up => tr!("Вверх"),
+                Icon::Down => tr!("Вниз"),
+                Icon::Close => tr!("Закрыть"),
+                Icon::Dock => tr!("Закрепить"),
+            },
+        )
+    });
     if response.hovered() {
         ui.painter().rect_filled(
             rect,

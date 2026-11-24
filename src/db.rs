@@ -1890,6 +1890,10 @@ impl DbPanel {
                         egui::vec2(ui.available_width(), row_h),
                         Sense::click(),
                     );
+                    let rows_label = tf!("строк: {count}", "rows: {count}");
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{table} · {rows_label}"))
+                    });
                     let painter = ui.painter_at(rect);
                     if response.hovered() {
                         painter.rect_filled(rect, 4.0, pal.crust);
@@ -1904,7 +1908,7 @@ impl DbPanel {
                     painter.text(
                         egui::pos2(placed.right() + 12.0, rect.center().y),
                         egui::Align2::LEFT_CENTER,
-                        tf!("строк: {count}", "rows: {count}"),
+                        rows_label,
                         egui::FontId::proportional(12.0),
                         pal.subtext,
                     );

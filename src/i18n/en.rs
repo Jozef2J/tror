@@ -915,4 +915,11 @@ pub const EN: &[(&str, &str)] = &[
     ("Выберите подключение и нажмите «Подключить». Здесь появятся таблицы, редактор запросов и поиск по базе.", "Choose a connection and press \"Connect\". Tables, the query editor and database search will appear here."),
     ("Отчёт о сбое TrorPad. Перед отправкой проверьте журнал внизу: в нём могут быть имена серверов и запросы к базам. Пароли в журнал не пишутся.", "TrorPad crash report. Check the log at the bottom before sending it: it may contain server names and database queries. Passwords are never written to the log."),
     ("В прошлый раз TrorPad завершился с ошибкой. Отчёт открыт во вкладке — приложите его к сообщению на GitHub.", "Last time TrorPad closed because of an error. The report is open in a tab — please attach it to a report on GitHub."),
+    ("Вперёд", "Forward"),
+    ("Назад", "Back"),
+    ("Вверх", "Up"),
+    ("Вниз", "Down"),
+    ("Закрепить", "Dock"),
+    ("программа запущена не из TrorPad.app", "the program was not started from TrorPad.app"),
+    ("архив обновления повреждён", "the update archive is damaged"),
 ];

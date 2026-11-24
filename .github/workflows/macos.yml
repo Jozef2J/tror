@@ -61,4 +61,9 @@ jobs:
           path: TrorPad-macos.zip
       - run: |
           VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          gh release upload "v$VERSION" TrorPad-macos.zip --clobber || echo "Выпуска v$VERSION ещё нет"
+          gh release upload "v$VERSION" TrorPad-macos.zip --clobber || { echo "Выпуска v$VERSION ещё нет"; exit 0; }
+          gh release download "v$VERSION" -p SHA256SUMS --clobber
+          grep -v ' TrorPad-macos.zip$' SHA256SUMS > SHA256SUMS.new || true
+          shasum -a 256 TrorPad-macos.zip >> SHA256SUMS.new
+          mv SHA256SUMS.new SHA256SUMS
+          gh release upload "v$VERSION" SHA256SUMS --clobber
