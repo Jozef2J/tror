@@ -211,9 +211,9 @@ fn memory_of(caller: &Caller<'_, Host>) -> Option<Memory> {
 
 fn read_bytes(caller: &Caller<'_, Host>, ptr: u32, len: u32) -> Option<Vec<u8>> {
     let memory = memory_of(caller)?;
-    let mut buf = vec![0u8; len as usize];
-    memory.read(caller, ptr as usize, &mut buf).ok()?;
-    Some(buf)
+    let start = ptr as usize;
+    let end = start.checked_add(len as usize)?;
+    memory.data(caller).get(start..end).map(<[u8]>::to_vec)
 }
 
 fn inside(root: &Path, path: &str) -> Result<PathBuf, String> {

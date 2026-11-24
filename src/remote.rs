@@ -521,6 +521,7 @@ pub fn key_kind(path: &str) -> Result<String, String> {
 pub struct Entry {
     pub name: String,
     pub is_dir: bool,
+    pub link: bool,
     pub size: u64,
     pub mtime: Option<u64>,
     pub perm: Option<u32>,
@@ -1091,6 +1092,7 @@ impl Backend {
                     Some(Entry {
                         name,
                         is_dir,
+                        link: stat.file_type().is_symlink(),
                         size: stat.size.unwrap_or(0),
                         mtime: stat.mtime,
                         perm: stat.perm.map(|p| p & 0o7777),
@@ -1109,6 +1111,7 @@ impl Backend {
                 .map(|f| Entry {
                     name: f.name().to_owned(),
                     is_dir: f.is_directory(),
+                    link: f.is_symlink(),
                     size: f.size() as u64,
                     mtime: f
                         .modified()
@@ -1227,6 +1230,9 @@ impl Backend {
     ) -> Result<(), String> {
         for entry in self.list(root)? {
             let path = join(root, &entry.name);
+            if entry.is_dir && entry.link {
+                continue;
+            }
             if entry.is_dir {
                 self.walk(&path, files, times)?;
             } else {
@@ -1268,10 +1274,20 @@ impl Backend {
         }
     }
 
+    fn is_link(&mut self, path: &str) -> bool {
+        match self {
+            Backend::Sftp { sftp, .. } => sftp
+                .lstat(Path::new(path))
+                .is_ok_and(|s| s.file_type().is_symlink()),
+            Backend::Ftp(_) => false,
+        }
+    }
+
     fn delete_tree(&mut self, path: &str, dir: bool, removed: &mut usize) -> Result<(), String> {
+        let dir = dir && !self.is_link(path);
         if dir {
             for entry in self.list(path)? {
-                self.delete_tree(&join(path, &entry.name), entry.is_dir, removed)?;
+                self.delete_tree(&join(path, &entry.name), entry.is_dir && !entry.link, removed)?;
             }
         }
         self.delete(path, dir)?;
@@ -1347,12 +1363,16 @@ impl Backend {
         changed: &mut usize,
     ) -> Result<(), String> {
         let is_dir = self.stat(path).map(|a| a.is_dir).unwrap_or(false);
+        let recursive = recursive && !self.is_link(path);
         if !recursive || (is_dir && dirs) || (!is_dir && files) {
             self.chmod_one(path, mode)?;
             *changed += 1;
         }
         if recursive && is_dir {
             for entry in self.list(path)? {
+                if entry.link {
+                    continue;
+                }
                 let child = join(path, &entry.name);
                 if entry.is_dir {
                     self.chmod(&child, mode, true, dirs, files, changed)?;
@@ -2072,7 +2092,7 @@ fn search_walk(
             if excluded(&path, &entry.name, &params.excludes) {
                 continue;
             }
-            if entry.is_dir {
+            if entry.is_dir && !entry.link {
                 stack.push(path.clone());
             }
             if !params.content {
@@ -2800,7 +2820,58 @@ mod tests {
         conn.tx
             .send(Cmd::Download(join(&www, "missing.txt")))
             .unwrap();
-        assert!(matches!(next(), Event::Error(_)));
+        assert!(matches!(next(), Event::Failed { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn live_sftp_delete_keeps_symlink_targets() {
+        let base = std::env::temp_dir().join("tror-link-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let doomed = base.join("doomed");
+        let keep = base.join("keep");
+        std::fs::create_dir_all(&doomed).unwrap();
+        std::fs::create_dir_all(&keep).unwrap();
+        std::fs::write(keep.join("data.txt"), "important").unwrap();
+        std::fs::write(doomed.join("a.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(&keep, doomed.join("link")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for dir in [&base, &doomed, &keep] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        }
+        let profile = Profile {
+            name: "test".into(),
+            host: "127.0.0.1".into(),
+            port: 2222,
+            user: "jozef".into(),
+            password: "secret".into(),
+            ..Default::default()
+        };
+        let conn = connect(&profile, None, || {});
+        let next = || loop {
+            match conn.rx.recv_timeout(Duration::from_secs(20)).expect("ответ сервера") {
+                Event::Log(..) | Event::Progress { .. } => {}
+                event => break event,
+            }
+        };
+        loop {
+            match next() {
+                Event::HostKey { .. } => conn.tx.send(Cmd::TrustHost(true)).unwrap(),
+                Event::Connected { .. } => break,
+                Event::Closed(e) | Event::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        conn.tx
+            .send(Cmd::Delete {
+                path: doomed.to_string_lossy().into_owned(),
+                dir: true,
+            })
+            .unwrap();
+        let _ = next();
+        assert!(!doomed.exists(), "папка не удалена");
+        assert!(keep.join("data.txt").exists(), "удалено содержимое по ссылке");
     }
 
     #[test]
