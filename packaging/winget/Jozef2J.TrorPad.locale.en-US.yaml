@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
 
 PackageIdentifier: Jozef2J.TrorPad
-PackageVersion: 0.30.0
+PackageVersion: 0.30.1
 PackageLocale: en-US
 Publisher: Jozef2J
 PublisherUrl: https://github.com/Jozef2J
@@ -20,6 +20,6 @@ Tags:
 - ftp
 - ssh
 - sql
-ReleaseNotesUrl: https://github.com/Jozef2J/tror/releases/tag/v0.30.0
+ReleaseNotesUrl: https://github.com/Jozef2J/tror/releases/tag/v0.30.1
 ManifestType: defaultLocale
 ManifestVersion: 1.9.0
