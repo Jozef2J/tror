@@ -910,4 +910,5 @@ pub const EN: &[(&str, &str)] = &[
     ("Файлы перенесены", "Files moved"),
     ("Перетаскивание отменено", "Dragging cancelled"),
     ("✓ Готово — отпустите файлы в нужном месте", "✓ Done — drop the files where you need them"),
+    ("Перетаскивание отменено: кнопку мыши отпустили раньше, чем файлы скачались. Держите её, пока окно передачи не покажет «Готово», или используйте «Скачать в папку…».", "Dragging cancelled: the mouse button was released before the files finished downloading. Hold it until the transfer window shows \"Done\", or use \"Download to folder…\"."),
 ];

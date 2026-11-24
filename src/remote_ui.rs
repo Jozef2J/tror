@@ -229,6 +229,7 @@ pub struct RemotePanel {
     batch: Option<Batch>,
     pub out_drag: Option<(PathBuf, Vec<PathBuf>)>,
     pub drag_done: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    notice: Option<String>,
     batch_height: f32,
     batch_placed: bool,
     batch_owned: bool,
@@ -316,6 +317,7 @@ impl RemotePanel {
             batch: None,
             out_drag: None,
             drag_done: Default::default(),
+            notice: None,
             batch_height: 0.0,
             batch_placed: false,
             batch_owned: false,
@@ -435,7 +437,21 @@ impl RemotePanel {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let temp = std::env::temp_dir().join("trorpad-drag").join(stamp.to_string());
+        let root = std::env::temp_dir().join("trorpad-drag");
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let old = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age.as_secs() > 3600);
+                if old {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+        let temp = root.join(stamp.to_string());
         if std::fs::create_dir_all(&temp).is_err() {
             return;
         }
@@ -451,6 +467,21 @@ impl RemotePanel {
         }
         *self.drag_done.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.out_drag = Some((temp, tops));
+    }
+
+    pub fn abandon_drag_out(&mut self) {
+        if self.out_drag.take().is_none() {
+            return;
+        }
+        if self.batch.as_ref().is_some_and(|b| b.drag) {
+            self.cancel_batch();
+            self.batch = None;
+        }
+        *self.drag_done.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.notice = Some(
+            tr!("Перетаскивание отменено: кнопку мыши отпустили раньше, чем файлы скачались. Держите её, пока окно передачи не покажет «Готово», или используйте «Скачать в папку…».")
+                .to_owned(),
+        );
     }
 
     pub fn drag_out_ready(&self) -> Option<Vec<PathBuf>> {
@@ -1988,6 +2019,8 @@ impl RemotePanel {
         let show_perm = self.store.show_perm;
         let mut go = None;
         let mut download: Vec<String> = Vec::new();
+        let mut fetch: Option<(Vec<(String, bool)>, PathBuf)> = None;
+        let mut fetch_as: Option<(String, PathBuf)> = None;
         let mut moves: Vec<(String, String)> = Vec::new();
         let mut walk: Vec<String> = Vec::new();
         let mut toggle: Option<String> = None;
@@ -2304,23 +2337,20 @@ impl RemotePanel {
                                     .set_file_name(remote::file_name(&files[0]))
                                     .save_file()
                             {
-                                self.save_to.insert(files[0].clone(), local);
-                                download.push(files[0].clone());
+                                fetch_as = Some((files[0].clone(), local));
                             }
                             if (files.len() > 1 || !dirs.is_empty())
                                 && ui.button(tr!("Скачать в папку…")).clicked()
-                                && let Some(folder) = rfd::FileDialog::new().pick_folder()
+                                && let Some(folder) = std::env::var_os("TROR_PICK_FOLDER")
+                                    .map(PathBuf::from)
+                                    .or_else(|| rfd::FileDialog::new().pick_folder())
                             {
-                                for file in &files {
-                                    self.save_to
-                                        .insert(file.clone(), folder.join(remote::file_name(file)));
-                                    download.push(file.clone());
-                                }
-                                for dir in &dirs {
-                                    self.walks
-                                        .insert(dir.clone(), Walk::Download(folder.clone()));
-                                    walk.push(dir.clone());
-                                }
+                                let items = files
+                                    .iter()
+                                    .map(|f| (f.clone(), false))
+                                    .chain(dirs.iter().map(|d| (d.clone(), true)))
+                                    .collect();
+                                fetch = Some((items, folder));
                             }
                             if dirs.len() == 1
                                 && files.is_empty()
@@ -2491,6 +2521,15 @@ impl RemotePanel {
         }
         if let Some(items) = attrs {
             self.open_attrs(items);
+        }
+        if let Some((items, folder)) = fetch {
+            self.download_into(items, &folder);
+        }
+        if let Some((path, local)) = fetch_as
+            && let Some(folder) = local.parent()
+        {
+            self.download_into(vec![(path.clone(), false)], folder);
+            self.save_to.insert(path, local);
         }
         for path in download {
             let name = remote::file_name(&path).to_owned();
@@ -3089,6 +3128,9 @@ impl RemotePanel {
     pub fn dialogs(&mut self, ctx: &egui::Context, pal: &Palette) -> Vec<PanelEvent> {
         let mut out = Vec::new();
         if let Some(text) = self.batch_tick() {
+            out.push(PanelEvent::Toast(text));
+        }
+        if let Some(text) = self.notice.take() {
             out.push(PanelEvent::Toast(text));
         }
         let dropped = self.drag_done.lock().unwrap_or_else(|e| e.into_inner()).take();

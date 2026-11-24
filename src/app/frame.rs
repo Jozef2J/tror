@@ -111,7 +111,7 @@ impl eframe::App for TrorApp {
         };
         let pointer = ctx.input(|i| i.pointer.latest_pos());
         let released = ctx.input(|i| i.pointer.any_released());
-        let held = ctx.input(|i| i.pointer.any_down());
+        let held = owner::button_down().unwrap_or_else(|| ctx.input(|i| i.pointer.any_down()));
         let local_drag = self.project.dragging().is_some() || self.project2.dragging().is_some();
         let inner = if local_drag {
             pointer.and_then(|pos| {
@@ -175,6 +175,10 @@ impl eframe::App for TrorApp {
             }
         }
         for panel in &mut self.remotes {
+            if panel.out_drag.is_some() && !held && panel.drag_out_ready().is_none() {
+                panel.abandon_drag_out();
+                continue;
+            }
             if panel.out_drag.is_some()
                 && let Some(paths) = panel.drag_out_ready()
             {
