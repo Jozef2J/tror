@@ -235,7 +235,10 @@ impl Store {
             }
             Err(e) => {
                 store.locked = true;
-                crate::trace::line(tf!("[Пароли] системное хранилище недоступно: {e}", "[Passwords] the system store is not available: {e}"), true);
+                static REPORTED: AtomicBool = AtomicBool::new(false);
+                if !REPORTED.swap(true, Ordering::Relaxed) {
+                    crate::trace::line(tf!("[Пароли] системное хранилище недоступно: {e}", "[Passwords] the system store is not available: {e}"), true);
+                }
             }
         }
         store
@@ -1200,13 +1203,43 @@ impl Backend {
         }
     }
 
+    fn replace(
+        &mut self,
+        path: &str,
+        data: &[u8],
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<(), String> {
+        let temp = join(&parent(path), &format!(".{}.trorpad-part", file_name(path)));
+        if self.write(&temp, data, progress).is_err() {
+            let _ = self.delete(&temp, false);
+            return self.write(path, data, progress);
+        }
+        let mode = match self {
+            Backend::Sftp { .. } => self.stat(path).ok().and_then(|a| a.perm),
+            Backend::Ftp(_) => None,
+        };
+        if let Some(mode) = mode {
+            let _ = self.chmod_one(&temp, mode);
+        }
+        if self.rename(&temp, path).is_ok()
+            || self
+                .exec(&format!("mv -f {} {}", quote(&temp), quote(path)), "mv")
+                .is_ok()
+            || (self.delete(path, false).is_ok() && self.rename(&temp, path).is_ok())
+        {
+            return Ok(());
+        }
+        let _ = self.delete(&temp, false);
+        self.write(path, data, progress)
+    }
+
     fn upload(
         &mut self,
         path: &str,
         data: &[u8],
         progress: &dyn Fn(u64, u64),
     ) -> Result<(), String> {
-        let first = match self.write(path, data, progress) {
+        let first = match self.replace(path, data, progress) {
             Ok(()) => return Ok(()),
             Err(e) => e,
         };
@@ -1219,7 +1252,7 @@ impl Backend {
             current = format!("{current}/{part}");
             let _ = self.mkdir(&current);
         }
-        self.write(path, data, progress)
+        self.replace(path, data, progress)
     }
 
     fn walk(
@@ -2821,6 +2854,56 @@ mod tests {
             .send(Cmd::Download(join(&www, "missing.txt")))
             .unwrap();
         assert!(matches!(next(), Event::Failed { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn live_sftp_upload_replaces_through_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join("tror-upload-test");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let target = base.join("index.php");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let profile = Profile {
+            name: "test".into(),
+            host: "127.0.0.1".into(),
+            port: 2222,
+            user: "jozef".into(),
+            password: "secret".into(),
+            ..Default::default()
+        };
+        let conn = connect(&profile, None, || {});
+        let next = || loop {
+            match conn.rx.recv_timeout(Duration::from_secs(20)).expect("ответ сервера") {
+                Event::Log(..) | Event::Progress { .. } => {}
+                event => break event,
+            }
+        };
+        loop {
+            match next() {
+                Event::HostKey { .. } => conn.tx.send(Cmd::TrustHost(true)).unwrap(),
+                Event::Connected { .. } => break,
+                Event::Closed(e) | Event::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        conn.tx
+            .send(Cmd::Upload {
+                path: target.to_string_lossy().into_owned(),
+                data: b"new content".to_vec(),
+                doc: None,
+                expect: None,
+            })
+            .unwrap();
+        let _ = next();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new content");
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o666);
+        let left: Vec<_> = std::fs::read_dir(&base).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 1, "{left:?}");
     }
 
     #[cfg(unix)]

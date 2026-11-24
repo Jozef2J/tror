@@ -911,4 +911,6 @@ pub const EN: &[(&str, &str)] = &[
     ("Перетаскивание отменено", "Dragging cancelled"),
     ("✓ Готово — отпустите файлы в нужном месте", "✓ Done — drop the files where you need them"),
     ("Перетаскивание отменено: кнопку мыши отпустили раньше, чем файлы скачались. Держите её, пока окно передачи не покажет «Готово», или используйте «Скачать в папку…».", "Dragging cancelled: the mouse button was released before the files finished downloading. Hold it until the transfer window shows \"Done\", or use \"Download to folder…\"."),
+    ("Выберите профиль и нажмите «Подключить». Здесь появятся файлы сервера — их можно открывать, перетаскивать в проект и обратно.", "Choose a profile and press \"Connect\". The server files will appear here — you can open them and drag them to the project and back."),
+    ("Выберите подключение и нажмите «Подключить». Здесь появятся таблицы, редактор запросов и поиск по базе.", "Choose a connection and press \"Connect\". Tables, the query editor and database search will appear here."),
 ];

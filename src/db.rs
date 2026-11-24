@@ -1550,6 +1550,16 @@ impl DbPanel {
         });
         ui.add_space(6.0);
         if self.version.is_none() {
+            if !self.busy {
+                ui.add_space(4.0);
+                crate::widgets::wrapped_row(ui, 8.0, |ui| {
+                    ui.label(
+                        RichText::new(tr!("Выберите подключение и нажмите «Подключить». Здесь появятся таблицы, редактор запросов и поиск по базе."))
+                            .small()
+                            .color(pal.subtext),
+                    );
+                });
+            }
             return;
         }
         let rect = ui.available_rect_before_wrap();
@@ -1645,8 +1655,7 @@ impl DbPanel {
                 DbKind::Sqlite => tr!("Таблицы"),
             };
             ui.label(RichText::new(title).small().color(pal.faint));
-            if ui
-                .small_button("↺")
+            if crate::widgets::refresh_button(ui, pal)
                 .on_hover_text(tr!("Обновить список"))
                 .clicked()
             {
@@ -2016,19 +2025,8 @@ impl DbPanel {
                     }
                 }
             }
-            if !self.current.is_empty() {
-                let what = match self.kind {
-                    DbKind::MySql => tr!("база"),
-                    DbKind::Postgres => tr!("схема"),
-                    DbKind::Sqlite => tr!("база"),
-                };
-                ui.label(
-                    RichText::new(format!("{what}: {}", self.current))
-                        .small()
-                        .color(pal.subtext),
-                );
-            }
             if self.result.as_ref().is_some_and(|t| !t.columns.is_empty()) {
+                ui.separator();
                 if ui.button(tr!("Экспорт…")).on_hover_text(tr!("В файл CSV, JSON или SQL — формат выбирается в окне сохранения")).clicked() {
                     export = Some(true);
                 }
@@ -2062,6 +2060,20 @@ impl DbPanel {
                         discard = true;
                     }
                 }
+            }
+            if !self.current.is_empty() {
+                let what = match self.kind {
+                    DbKind::MySql => tr!("база"),
+                    DbKind::Postgres => tr!("схема"),
+                    DbKind::Sqlite => tr!("база"),
+                };
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(format!("{what}: {}", self.current))
+                            .small()
+                            .color(pal.subtext),
+                    );
+                });
             }
         });
         if discard {
@@ -2234,10 +2246,19 @@ impl DbPanel {
         let mut x = header.left() + number_w - self.scroll_x;
         for (name, w) in table.columns.iter().zip(&widths) {
             let key = self.keys.contains(name);
+            let mut text_x = x + pad;
+            if key {
+                let cy = header.center().y;
+                let stroke = egui::Stroke::new(1.4, pal.accent);
+                clip.circle_stroke(egui::pos2(text_x + 3.5, cy), 3.0, stroke);
+                clip.line_segment([egui::pos2(text_x + 6.5, cy), egui::pos2(text_x + 12.0, cy)], stroke);
+                clip.line_segment([egui::pos2(text_x + 10.5, cy), egui::pos2(text_x + 10.5, cy + 3.0)], stroke);
+                text_x += 16.0;
+            }
             clip.text(
-                egui::pos2(x + pad, header.center().y),
+                egui::pos2(text_x, header.center().y),
                 Align2::LEFT_CENTER,
-                if key { format!("🔑{name}") } else { name.clone() },
+                name.clone(),
                 font.clone(),
                 if key { pal.accent } else { pal.text },
             );

@@ -1529,6 +1529,14 @@ impl RemotePanel {
             None => {}
         }
 
+        if !self.connected && self.busy.is_none() {
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(tr!("Выберите профиль и нажмите «Подключить». Здесь появятся файлы сервера — их можно открывать, перетаскивать в проект и обратно."))
+                    .small()
+                    .color(pal.subtext),
+            );
+        }
         if self.connected {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
