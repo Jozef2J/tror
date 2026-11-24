@@ -1,6 +1,6 @@
 cask "trorpad" do
-  version "0.30.0"
-  sha256 "4512f75799c3cd73e08a8227b47a84a6d69192a0a5693f813768ce0071dd6c35"
+  version "0.30.1"
+  sha256 "329829aa67d35ea5574a2db11f11e15f0bf52d25941fd9c3dccbbb8b348bbbf0"
 
   url "https://github.com/Jozef2J/tror/releases/download/v#{version}/TrorPad-macos.zip"
   name "TrorPad"
