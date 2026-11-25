@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Align2, Button, ComboBox, FontId, Rect, RichText, ScrollArea, Sense, Ui};
 use similar::{Algorithm, DiffOp};
 
-use crate::document::Document;
+use crate::text::document::Document;
 use crate::theme::Palette;
 
 const MAX_BYTES: usize = 32 * 1024 * 1024;

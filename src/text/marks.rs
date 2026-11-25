@@ -1,4 +1,4 @@
-use crate::document::{Document, EditKind};
+use crate::text::document::{Document, EditKind};
 
 impl Document {
     pub fn toggle_mark(&mut self) {
@@ -28,29 +28,6 @@ impl Document {
         self.move_to(at, false);
         self.reveal = true;
         true
-    }
-
-    pub(crate) fn shift_marks(&mut self, start: usize, old_end: usize, new_end: usize) {
-        if self.marks.is_empty() || old_end == new_end {
-            return;
-        }
-        let moved: Vec<usize> = self.marks.range(start + 1..).copied().collect();
-        for line in &moved {
-            self.marks.remove(line);
-        }
-        for line in moved {
-            let shifted = if line > old_end {
-                line + new_end - old_end
-            } else {
-                line.min(new_end)
-            };
-            self.marks.insert(shifted);
-        }
-    }
-
-    pub(crate) fn clamp_marks(&mut self) {
-        let count = self.line_count();
-        self.marks.retain(|line| *line < count);
     }
 
     fn line_bounds(&self) -> (usize, usize) {

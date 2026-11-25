@@ -5,7 +5,7 @@ use std::time::Instant;
 use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use ropey::Rope;
 
-use crate::highlight::Highlighter;
+use crate::text::highlight::Highlighter;
 
 const MAX_UNDO: usize = 2000;
 
@@ -1449,6 +1449,80 @@ impl Document {
         let line = line.clamp(1, self.line_count()) - 1;
         let pos = self.rope.line_to_char(line);
         self.move_to(pos, false);
+    }
+
+    pub(crate) fn refold(&mut self) {
+        self.folds.sort_unstable();
+        self.folds.dedup_by_key(|f| f.0);
+        self.hidden.clear();
+        for &(head, end) in &self.folds {
+            if let Some(last) = self.hidden.last_mut()
+                && head <= last.1
+            {
+                if head >= last.0 {
+                    last.1 = last.1.max(end);
+                }
+                continue;
+            }
+            self.hidden.push((head + 1, end));
+        }
+        self.skip.clear();
+        self.skip.push(0);
+        let mut total = 0;
+        for (a, b) in &self.hidden {
+            total += b - a + 1;
+            self.skip.push(total);
+        }
+    }
+
+    pub(crate) fn shift_folds(&mut self, start: usize, old_end: usize, new_end: usize) {
+        if self.folds.is_empty() {
+            return;
+        }
+        let same = old_end == new_end && start == old_end;
+        self.folds.retain_mut(|f| {
+            if f.1 < start {
+                true
+            } else if f.0 > old_end {
+                f.0 = f.0 + new_end - old_end;
+                f.1 = f.1 + new_end - old_end;
+                true
+            } else {
+                same && f.0 == start
+            }
+        });
+        self.refold();
+    }
+
+    pub(crate) fn drop_folds(&mut self) {
+        self.clamp_marks();
+        self.folds.clear();
+        self.hidden.clear();
+        self.skip.clear();
+        self.skip.push(0);
+    }
+
+    pub(crate) fn shift_marks(&mut self, start: usize, old_end: usize, new_end: usize) {
+        if self.marks.is_empty() || old_end == new_end {
+            return;
+        }
+        let moved: Vec<usize> = self.marks.range(start + 1..).copied().collect();
+        for line in &moved {
+            self.marks.remove(line);
+        }
+        for line in moved {
+            let shifted = if line > old_end {
+                line + new_end - old_end
+            } else {
+                line.min(new_end)
+            };
+            self.marks.insert(shifted);
+        }
+    }
+
+    pub(crate) fn clamp_marks(&mut self) {
+        let count = self.line_count();
+        self.marks.retain(|line| *line < count);
     }
 }
 

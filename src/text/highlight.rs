@@ -653,7 +653,7 @@ mod tests {
         assert!(lines[1].len() > 2);
     }
 
-    fn find(doc: &crate::document::Document, needle: &str) -> usize {
+    fn find(doc: &crate::text::document::Document, needle: &str) -> usize {
         let text = doc.rope.to_string();
         doc.rope.byte_to_char(text.find(needle).unwrap())
     }
@@ -690,43 +690,47 @@ mod tests {
         for i in 0..200 {
             base.push_str(&format!("fn f{i}() -> u32 {{ let s = \"v{i}\"; {i} }}\n"));
         }
-        let mut doc = crate::document::Document::from_text(&base);
+        let mut doc = crate::text::document::Document::from_text(&base);
         run(&mut doc.hl, &syn, &doc.rope, "Rust");
-        type Edit = Box<dyn Fn(&mut crate::document::Document)>;
+        type Edit = Box<dyn Fn(&mut crate::text::document::Document)>;
         let edits: Vec<Edit> = vec![
             Box::new(|d| {
                 let at = find(d, "fn f100()");
-                d.replace(at..at, "/* ", crate::document::EditKind::Other)
+                d.replace(at..at, "/* ", crate::text::document::EditKind::Other)
             }),
             Box::new(|d| {
                 let at = find(d, "fn f150()");
-                d.replace(at..at, "*/ ", crate::document::EditKind::Other)
+                d.replace(at..at, "*/ ", crate::text::document::EditKind::Other)
             }),
             Box::new(|d| {
                 let at = find(d, "fn f20()");
                 let end = find(d, "fn f23()");
-                d.replace(at..end, "", crate::document::EditKind::Other)
+                d.replace(at..end, "", crate::text::document::EditKind::Other)
             }),
             Box::new(|d| {
                 let at = find(d, "fn f60()");
-                d.replace(at..at, "\n\n// note\n", crate::document::EditKind::Other)
+                d.replace(
+                    at..at,
+                    "\n\n// note\n",
+                    crate::text::document::EditKind::Other,
+                )
             }),
             Box::new(|d| d.undo()),
             Box::new(|d| d.undo()),
             Box::new(|d| d.redo()),
             Box::new(|d| {
                 let end = d.len();
-                d.replace(end..end, "// tail", crate::document::EditKind::Other)
+                d.replace(end..end, "// tail", crate::text::document::EditKind::Other)
             }),
             Box::new(|d| {
                 let end = d.len();
-                d.replace(end / 2..end, "", crate::document::EditKind::Other)
+                d.replace(end / 2..end, "", crate::text::document::EditKind::Other)
             }),
             Box::new(|d| {
                 let end = d.len();
-                d.replace(0..end, "", crate::document::EditKind::Other)
+                d.replace(0..end, "", crate::text::document::EditKind::Other)
             }),
-            Box::new(|d| d.replace(0..0, "let x = 1;", crate::document::EditKind::Other)),
+            Box::new(|d| d.replace(0..0, "let x = 1;", crate::text::document::EditKind::Other)),
         ];
         for (step, edit) in edits.iter().enumerate() {
             edit(&mut doc);
@@ -746,7 +750,7 @@ mod tests {
         for i in 0..300 {
             text.push_str(&format!("/* c{i} */ $a{i} = ['k' => \"v{i}\"];\n"));
         }
-        let mut doc = crate::document::Document::from_text(&text);
+        let mut doc = crate::text::document::Document::from_text(&text);
         let mut passes = 0;
         while doc
             .hl
@@ -754,7 +758,7 @@ mod tests {
         {
             passes += 1;
             if passes == 3 {
-                doc.replace(8..8, "x\ny", crate::document::EditKind::Other);
+                doc.replace(8..8, "x\ny", crate::text::document::EditKind::Other);
             }
             assert!(passes < 1000);
         }
@@ -797,13 +801,17 @@ mod tests {
             ));
             i += 1;
         }
-        let mut doc = crate::document::Document::from_text(&text);
+        let mut doc = crate::text::document::Document::from_text(&text);
         let t = Instant::now();
         run(&mut doc.hl, &syn, &doc.rope, "PHP");
         let full = t.elapsed();
         let middle = doc.len() / 2;
         let t = Instant::now();
-        doc.replace(middle..middle, "$x = 1; ", crate::document::EditKind::Other);
+        doc.replace(
+            middle..middle,
+            "$x = 1; ",
+            crate::text::document::EditKind::Other,
+        );
         run(&mut doc.hl, &syn, &doc.rope, "PHP");
         let edit = t.elapsed();
         println!("lines={} full={full:?} edit={edit:?}", doc.line_count());
@@ -834,7 +842,7 @@ mod tests {
             "\t",
         ];
         for round in 0..40 {
-            let mut doc = crate::document::Document::from_text("<?php\necho 1;\n");
+            let mut doc = crate::text::document::Document::from_text("<?php\necho 1;\n");
             doc.syntax = "PHP".into();
             for step in 0..120 {
                 match next(10) {

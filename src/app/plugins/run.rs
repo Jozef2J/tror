@@ -1,9 +1,9 @@
 use serde_json::json;
 
-use super::*;
+use super::super::*;
 
 impl TrorApp {
-    pub(super) fn run_plugin(&mut self, index: usize, ctx: &egui::Context) {
+    pub(in crate::app) fn run_plugin(&mut self, index: usize, ctx: &egui::Context) {
         use crate::plugins::{Context, Input};
         let now = ctx.input(|i| i.time);
         let Some(plugin) = self.plugins.list.get(index).cloned() else {
@@ -62,7 +62,7 @@ impl TrorApp {
             });
     }
 
-    pub(super) fn plugin_results(&mut self, now: f64) {
+    pub(in crate::app) fn plugin_results(&mut self, now: f64) {
         use crate::plugins::Output;
         for done in self.plugins.poll() {
             let name = done.plugin.name.clone();
@@ -105,7 +105,7 @@ impl TrorApp {
                     if done.plugin.output == Output::Insert {
                         doc.insert_text(text);
                     } else if source != text {
-                        doc.replace(done.range, text, crate::document::EditKind::Other);
+                        doc.replace(done.range, text, crate::text::document::EditKind::Other);
                     }
                 }
                 _ => self.notify(
@@ -118,7 +118,7 @@ impl TrorApp {
 }
 
 impl TrorApp {
-    pub(super) fn plugin_command(&mut self, plugin: usize, command: usize) {
+    pub(in crate::app) fn plugin_command(&mut self, plugin: usize, command: usize) {
         let Some(id) = self
             .plugins
             .wasm
@@ -136,7 +136,7 @@ impl TrorApp {
         );
     }
 
-    pub(super) fn plugin_event(&mut self, event: &str, index: usize) {
+    pub(in crate::app) fn plugin_event(&mut self, event: &str, index: usize) {
         let Some(doc) = self.docs.get(index) else {
             return;
         };
@@ -149,7 +149,7 @@ impl TrorApp {
         }
     }
 
-    pub(super) fn plugin_watch(&mut self, now: f64) {
+    pub(in crate::app) fn plugin_watch(&mut self, now: f64) {
         if self.plugins.wasm.is_empty() {
             return;
         }
@@ -175,45 +175,8 @@ impl TrorApp {
         }
     }
 
-    pub(super) fn plugin_send(
-        &mut self,
-        plugin: usize,
-        message: serde_json::Value,
-        target: Option<usize>,
-    ) {
-        use crate::wasm::{Job, Snapshot};
-        let root = self.project.root.clone();
-        let doc = target.and_then(|i| self.docs.get(i));
-        let snap = match doc {
-            Some(doc) => Some(Snapshot {
-                rope: doc.rope.clone(),
-                sel: doc.sel,
-                path: doc.location(),
-                syntax: doc.syntax.clone(),
-                root,
-            }),
-            None => root.map(|root| Snapshot {
-                rope: Default::default(),
-                sel: (0, 0),
-                path: None,
-                syntax: String::new(),
-                root: Some(root),
-            }),
-        };
-        let doc = doc.map(|d| (d.id, d.version));
-        let ctx = self.ctx.clone();
-        if let Some(worker) = self.plugins.wasm.get_mut(plugin) {
-            worker.run(Job {
-                message,
-                snap,
-                doc,
-                wake: Box::new(move || ctx.request_repaint()),
-            });
-        }
-    }
-
-    pub(super) fn plugin_finished(&mut self, now: f64) {
-        use crate::wasm::Effect;
+    pub(in crate::app) fn plugin_finished(&mut self, now: f64) {
+        use crate::plugins::wasm::Effect;
         for done in self.plugins.finished() {
             let Some(name) = self
                 .plugins
@@ -244,7 +207,7 @@ impl TrorApp {
                     Effect::Decorate(key, items) => {
                         if let Some((id, _)) = done.doc {
                             self.plugin_decos.insert((id, done.plugin, key), items);
-                            let mut all: Vec<crate::wasm::Decoration> = self
+                            let mut all: Vec<crate::plugins::wasm::Decoration> = self
                                 .plugin_decos
                                 .iter()
                                 .filter(|((doc, _, _), _)| *doc == id)

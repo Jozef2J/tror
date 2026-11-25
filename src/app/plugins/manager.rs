@@ -1,9 +1,9 @@
-use super::*;
+use super::super::*;
 use crate::widgets::Lit;
 
 #[derive(Default)]
-pub(super) struct Manager {
-    install: Option<(PathBuf, crate::wasm::Manifest)>,
+pub(in crate::app) struct Manager {
+    install: Option<(PathBuf, crate::plugins::wasm::Manifest)>,
     remove: Option<(PathBuf, String)>,
     log: Option<String>,
     error: Option<String>,
@@ -22,14 +22,14 @@ fn permission(name: &str) -> &'static str {
 }
 
 impl TrorApp {
-    pub(super) fn plugin_manager(&mut self, ctx: &egui::Context, pal: &Palette) {
+    pub(in crate::app) fn plugin_manager(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(manager) = &mut self.manager else {
             return;
         };
         let dir = self.plugins.dir.clone();
         let installed = dir
             .as_deref()
-            .map(crate::wasm::manifests)
+            .map(crate::plugins::wasm::manifests)
             .unwrap_or_default();
         let mut close = false;
         let mut reload = false;

@@ -6,237 +6,21 @@ use eframe::egui::{
     text::{ByteIndex, CCursor, LayoutJob, LayoutSection, TextFormat},
 };
 
-use crate::complete::Completion;
-use crate::document::Document;
-use crate::highlight::{FRAME_BUDGET, Syntaxes};
-use crate::search::SearchState;
+use crate::text::complete::Completion;
+use crate::text::document::Document;
+use crate::text::highlight::{FRAME_BUDGET, Syntaxes};
+use crate::text::search::SearchState;
 use crate::theme::Palette;
 
-const LONG_LINE: usize = 5000;
-const LONG_PAD: usize = 80;
-const PAD_X: f32 = 8.0;
-const PAD_TOP: f32 = 4.0;
-const BAR: f32 = 12.0;
+mod block;
+mod input;
+mod layout;
 
-pub fn editor_id(doc_id: u64) -> Id {
-    Id::unique(("tror_editor", doc_id))
-}
-
-pub struct View<'a> {
-    pub syn: &'a Syntaxes,
-    pub pal: &'a Palette,
-    pub focus: bool,
-    pub wrap: bool,
-    pub font_size: f32,
-    pub line_spacing: f32,
-    pub edit: crate::prefs::Edit,
-    pub macros: &'a mut Macro,
-    pub complete: &'a mut Completion,
-    pub decos: &'a [crate::wasm::Decoration],
-}
-
-#[derive(Default)]
-pub struct Macro {
-    pub recording: bool,
-    pub events: Vec<Event>,
-    pub play: u32,
-    pub until_end: bool,
-}
-
-impl Macro {
-    fn feed(&mut self, events: &[Event]) {
-        if self.recording {
-            self.events.extend(
-                events
-                    .iter()
-                    .filter(|event| {
-                        matches!(
-                            event,
-                            Event::Text(_)
-                                | Event::Paste(_)
-                                | Event::Copy
-                                | Event::Cut
-                                | Event::Key { pressed: true, .. }
-                        )
-                    })
-                    .cloned(),
-            );
-        }
-    }
-
-    fn replay(&mut self, ui: &Ui, doc: &mut Document, m: &Metrics) {
-        if self.recording || self.play == 0 || self.events.is_empty() {
-            self.play = 0;
-            return;
-        }
-        let start = std::time::Instant::now();
-        while self.play > 0 && start.elapsed() < std::time::Duration::from_millis(40) {
-            let before = doc.rope.char_to_line(doc.sel.1);
-            process_events(ui, doc, m, self.events.clone());
-            self.play -= 1;
-            if self.until_end {
-                let line = doc.rope.char_to_line(doc.sel.1);
-                if line <= before || line + 1 >= doc.line_count() {
-                    self.play = 0;
-                }
-            }
-        }
-        if self.play == 0 {
-            self.until_end = false;
-        } else {
-            ui.ctx().request_repaint();
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct Pointer {
-    time: f64,
-    pos: usize,
-    clicks: u8,
-    origin: Option<(usize, usize)>,
-    block: Option<(usize, f64)>,
-    adding: Option<usize>,
-}
-
-fn url_re() -> &'static regex::Regex {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(r#"(?:https?|ftp)://[^\s"'<>()\[\]{}`]+|www\.[^\s"'<>()\[\]{}`]+"#)
-            .unwrap_or_else(|_| regex::Regex::new("$^").unwrap_or_else(|_| unreachable!()))
-    })
-}
-
-fn url_spans(text: &str) -> Vec<(usize, usize)> {
-    url_re()
-        .find_iter(text)
-        .map(|m| {
-            let url = m.as_str().trim_end_matches(['.', ',', ';', ':', '!', '?']);
-            let start = text[..m.start()].chars().count();
-            (start, start + url.chars().count())
-        })
-        .collect()
-}
-
-fn url_at(doc: &Document, pos: usize) -> Option<String> {
-    let re = url_re();
-    if pos > doc.len() {
-        return None;
-    }
-    let line = doc.rope.char_to_line(pos);
-    let start = doc.rope.line_to_char(line);
-    if doc.line_len(line) > 4000 {
-        return None;
-    }
-    let text: String = doc.rope.line(line).chars().collect();
-    let col = pos - start;
-    let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
-    let found = re.find_iter(&text).find(|m| m.start() <= byte && byte < m.end())?;
-    let url = found.as_str().trim_end_matches(['.', ',', ';', ':', '!', '?']);
-    Some(if url.starts_with("www.") {
-        format!("https://{url}")
-    } else {
-        url.to_owned()
-    })
-}
-
-fn line_span(doc: &Document, a: usize, b: usize) -> (usize, usize) {
-    let (lo, hi) = (a.min(b), a.max(b));
-    let start = doc.rope.line_to_char(lo);
-    let end = doc.rope.line_to_char(hi) + doc.line_len(hi);
-    if b < a { (end, start) } else { (start, end) }
-}
-
-static BLOCK_CLIP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-fn remember_block(text: Option<String>) {
-    if let Ok(mut clip) = BLOCK_CLIP.lock() {
-        *clip = text;
-    }
-}
-
-fn is_block_clip(text: &str) -> bool {
-    BLOCK_CLIP
-        .lock()
-        .ok()
-        .and_then(|c| c.clone())
-        .is_some_and(|c| c == text)
-}
-
-fn apply_block(ui: &Ui, doc: &mut Document, m: &Metrics) {
-    let Some(((l0, x0), (l1, x1))) = doc.block else {
-        return;
-    };
-    let last = doc.line_count().saturating_sub(1);
-    let (l0, l1) = (l0.min(last), l1.min(last));
-    let lines: Vec<usize> = if l0 <= l1 {
-        (l0..=l1).collect()
-    } else {
-        (l1..=l0).rev().collect()
-    };
-    let mut cursors = Vec::with_capacity(lines.len());
-    for line in &lines {
-        let layout = layout_line(ui, doc, *line, m);
-        let start = doc.rope.line_to_char(*line);
-        let a = start + layout.col_at(x0);
-        let h = start + layout.col_at(x1);
-        cursors.push((a, h));
-    }
-    let primary = cursors.len().saturating_sub(1);
-    let block = doc.block;
-    let sel = cursors[primary];
-    doc.set_cursors(cursors.clone(), primary);
-    if doc.cursors().len() != cursors.len() {
-        doc.sel = sel;
-        doc.extra = cursors[..primary].to_vec();
-    }
-    doc.block = block;
-    doc.reveal = true;
-}
-
-fn block_step(ui: &Ui, doc: &mut Document, m: &Metrics, key: Key) {
-    let head = doc.sel.1;
-    let (anchor, mut target) = match doc.block {
-        Some(block) => block,
-        None => {
-            let line = doc.rope.char_to_line(head);
-            let col = head - doc.rope.line_to_char(line);
-            let x = layout_line(ui, doc, line, m).x_of(col, m.char_w);
-            let anchor_line = doc.rope.char_to_line(doc.sel.0);
-            let anchor_col = doc.sel.0 - doc.rope.line_to_char(anchor_line);
-            let ax = layout_line(ui, doc, anchor_line, m).x_of(anchor_col, m.char_w);
-            ((anchor_line, ax), (line, x))
-        }
-    };
-    let cw = m.char_w as f64;
-    match key {
-        Key::ArrowUp => target.0 = target.0.saturating_sub(1),
-        Key::ArrowDown => target.0 = (target.0 + 1).min(doc.line_count().saturating_sub(1)),
-        Key::ArrowLeft => target.1 = (target.1 - cw).max(0.0),
-        Key::ArrowRight => target.1 += cw,
-        _ => {}
-    }
-    target.1 = (target.1 / cw).round() * cw;
-    doc.block = Some((anchor, target));
-    apply_block(ui, doc, m);
-}
-
-fn vertical_char(doc: &Document, pos: usize, down: bool) -> usize {
-    let line = doc.rope.char_to_line(pos);
-    let col = pos - doc.rope.line_to_char(line);
-    let target = if down {
-        if line + 1 >= doc.line_count() {
-            return doc.len();
-        }
-        line + 1
-    } else {
-        if line == 0 {
-            return 0;
-        }
-        line - 1
-    };
-    doc.rope.line_to_char(target) + col.min(doc.line_len(target))
-}
+pub use input::copy_selection;
+pub use layout::{TAB, code_family};
+use block::*;
+use input::*;
+use layout::*;
 
 struct Metrics {
     font: FontId,
@@ -347,640 +131,91 @@ impl LineLayout {
     }
 }
 
-pub static TAB: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(4);
+const LONG_LINE: usize = 5000;
+const LONG_PAD: usize = 80;
+const PAD_X: f32 = 8.0;
+const PAD_TOP: f32 = 4.0;
+const BAR: f32 = 12.0;
 
-pub fn code_family() -> egui::FontFamily {
-    egui::FontFamily::Name("code-tabs".into())
+pub fn editor_id(doc_id: u64) -> Id {
+    Id::unique(("tror_editor", doc_id))
 }
 
-fn tab_stops(job: &mut LayoutJob, char_w: f32) {
-    if !job.text.contains('\t') {
-        return;
+pub struct View<'a> {
+    pub syn: &'a Syntaxes,
+    pub pal: &'a Palette,
+    pub focus: bool,
+    pub wrap: bool,
+    pub font_size: f32,
+    pub line_spacing: f32,
+    pub edit: crate::prefs::Edit,
+    pub macros: &'a mut Macro,
+    pub complete: &'a mut Completion,
+    pub decos: &'a [crate::plugins::wasm::Decoration],
+}
+
+#[derive(Default)]
+pub struct Macro {
+    pub recording: bool,
+    pub events: Vec<Event>,
+    pub play: u32,
+    pub until_end: bool,
+}
+
+impl Macro {
+    fn feed(&mut self, events: &[Event]) {
+        if self.recording {
+            self.events.extend(
+                events
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            event,
+                            Event::Text(_)
+                                | Event::Paste(_)
+                                | Event::Copy
+                                | Event::Cut
+                                | Event::Key { pressed: true, .. }
+                        )
+                    })
+                    .cloned(),
+            );
+        }
     }
-    let width = TAB.load(std::sync::atomic::Ordering::Relaxed).max(1) as usize;
-    let mut gaps: Vec<(usize, f32)> = Vec::new();
-    let mut col = 0;
-    for (at, ch) in job.text.char_indices() {
-        if ch == '\t' {
-            let next = (col / width + 1) * width;
-            gaps.push((at + 1, (next - col - 1) as f32 * char_w));
-            col = next;
+
+    fn replay(&mut self, ui: &Ui, doc: &mut Document, m: &Metrics) {
+        if self.recording || self.play == 0 || self.events.is_empty() {
+            self.play = 0;
+            return;
+        }
+        let start = std::time::Instant::now();
+        while self.play > 0 && start.elapsed() < std::time::Duration::from_millis(40) {
+            let before = doc.rope.char_to_line(doc.sel.1);
+            process_events(ui, doc, m, self.events.clone());
+            self.play -= 1;
+            if self.until_end {
+                let line = doc.rope.char_to_line(doc.sel.1);
+                if line <= before || line + 1 >= doc.line_count() {
+                    self.play = 0;
+                }
+            }
+        }
+        if self.play == 0 {
+            self.until_end = false;
         } else {
-            col += 1;
+            ui.ctx().request_repaint();
         }
-    }
-    let mut out = Vec::with_capacity(job.sections.len() + gaps.len());
-    for section in std::mem::take(&mut job.sections) {
-        let (start, end) = (section.byte_range.start.0, section.byte_range.end.0);
-        let mut from = start;
-        let mut lead = section.leading_space
-            + gaps.iter().find(|(at, _)| *at == start).map_or(0.0, |g| g.1);
-        for &(at, gap) in gaps.iter().filter(|(at, _)| *at > start && *at < end) {
-            out.push(LayoutSection {
-                leading_space: lead,
-                byte_range: ByteIndex(from)..ByteIndex(at),
-                format: section.format.clone(),
-            });
-            from = at;
-            lead = gap;
-        }
-        out.push(LayoutSection {
-            leading_space: lead,
-            byte_range: ByteIndex(from)..ByteIndex(end),
-            format: section.format,
-        });
-    }
-    job.sections = out;
-}
-
-fn plain_job(text: String, m: &Metrics, color: egui::Color32, wrap_width: f32) -> LayoutJob {
-    let mut job = LayoutJob::single_section(
-        text,
-        TextFormat {
-            line_height: Some(m.row_h),
-            ..TextFormat::simple(m.font.clone(), color)
-        },
-    );
-    job.wrap.max_width = wrap_width;
-    job
-}
-
-fn layout_line(ui: &Ui, doc: &Document, line: usize, m: &Metrics) -> LineLayout {
-    let len = doc.line_len(line);
-    let start = doc.rope.line_to_char(line);
-    if m.wrap && len > LONG_LINE {
-        let empty = plain_job(String::new(), m, doc.hl.default_color, f32::INFINITY);
-        return LineLayout {
-            galley: ui.fonts_mut(|f| f.layout_job(empty)),
-            x0: 0.0,
-            c0: 0,
-            c1: 0,
-            len,
-            grid: ((m.view_w / m.char_w) as usize).max(8),
-            starts: Vec::new(),
-        };
-    }
-    let wrap_width = if m.wrap { m.view_w } else { f32::INFINITY };
-    let (c0, c1) = if len > LONG_LINE {
-        let first = (doc.scroll_x / m.char_w as f64) as usize;
-        let c0 = first.saturating_sub(LONG_PAD).min(len);
-        let c1 = (first + (m.view_w / m.char_w) as usize + LONG_PAD).min(len);
-        (c0, c1)
-    } else {
-        (0, len)
-    };
-    let text = String::from(doc.rope.slice(start + c0..start + c1));
-    let format = |color| TextFormat {
-        line_height: Some(m.row_h),
-        ..TextFormat::simple(m.font.clone(), color)
-    };
-    let default = doc.hl.default_color;
-    let mut sections = Vec::new();
-    if c0 == 0 && c1 == len {
-        let mut offset = 0;
-        for span in doc.hl.spans(line) {
-            let end = (offset + span.len as usize).min(text.len());
-            if !text.is_char_boundary(end) {
-                sections.clear();
-                offset = 0;
-                break;
-            }
-            if end > offset {
-                sections.push(LayoutSection {
-                    leading_space: 0.0,
-                    byte_range: ByteIndex(offset)..ByteIndex(end),
-                    format: format(span.color),
-                });
-            }
-            offset = end;
-        }
-        if offset < text.len() {
-            sections.push(LayoutSection {
-                leading_space: 0.0,
-                byte_range: ByteIndex(offset)..ByteIndex(text.len()),
-                format: format(default),
-            });
-        }
-    }
-    let mut job = if sections.is_empty() {
-        plain_job(text, m, default, wrap_width)
-    } else {
-        let mut job = LayoutJob {
-            text,
-            sections,
-            ..Default::default()
-        };
-        job.wrap.max_width = wrap_width;
-        job
-    };
-    if c0 == 0 {
-        tab_stops(&mut job, m.char_w);
-    }
-    let galley = ui.fonts_mut(|f| f.layout_job(job));
-    let mut starts = Vec::new();
-    if m.wrap {
-        let mut at = 0;
-        for row in &galley.rows {
-            starts.push(at);
-            at += row.char_count_including_newline().0;
-        }
-    }
-    LineLayout {
-        galley,
-        x0: c0 as f64 * m.char_w as f64,
-        c0,
-        c1,
-        len,
-        grid: 0,
-        starts,
     }
 }
 
-fn grid_row(
-    ui: &Ui,
-    doc: &Document,
-    line_start: usize,
-    layout: &LineLayout,
-    row: usize,
-    m: &Metrics,
-) -> Arc<Galley> {
-    let (start, end) = layout.row_range(row);
-    let text = String::from(doc.rope.slice(line_start + start..line_start + end));
-    let job = plain_job(text, m, doc.hl.default_color, f32::INFINITY);
-    ui.fonts_mut(|f| f.layout_job(job))
-}
-
-fn visible_lines(ui: &Ui, doc: &Document, m: &Metrics, view_h: f32) -> Vec<(usize, f64)> {
-    let row = m.row_h as f64;
-    let scroll = doc.scroll_y.max(0.0);
-    let first_row = ((scroll / row) as usize).min(doc.shown_count() - 1);
-    let first = doc.line_of_visual(first_row);
-    if !m.wrap {
-        let offset = -(scroll - first_row as f64 * row);
-        let mut out = Vec::new();
-        let mut next = Some(first);
-        while let Some(line) = next
-            && out.len() < m.rows + 2
-        {
-            out.push((line, offset + out.len() as f64 * row));
-            next = doc.next_shown(line);
-        }
-        return out;
-    }
-    let mut out = Vec::new();
-    let mut y = 0.0;
-    let mut next = Some(first);
-    while let Some(line) = next {
-        next = doc.next_shown(line);
-        let height = layout_line(ui, doc, line, m).rows() as f64 * row;
-        if line == first {
-            let frac = (scroll / row - first as f64).clamp(0.0, 1.0);
-            y = -(frac * height).min(height - 1.0).max(0.0);
-        }
-        out.push((line, y));
-        y += height;
-        if y > view_h as f64 {
-            break;
-        }
-    }
-    out
-}
-
-fn wrapped_step(ui: &Ui, doc: &Document, m: &Metrics, pos: usize, goal: f64, down: bool) -> usize {
-    let line = doc.rope.char_to_line(pos);
-    let start = doc.rope.line_to_char(line);
-    let layout = layout_line(ui, doc, line, m);
-    let (_, row) = layout.place(pos - start, m.char_w);
-    if down {
-        if row + 1 < layout.rows() {
-            start + layout.col_at_row(goal, row + 1, m.char_w)
-        } else if let Some(below) = doc.next_shown(line) {
-            let next = layout_line(ui, doc, below, m);
-            doc.rope.line_to_char(below) + next.col_at_row(goal, 0, m.char_w)
-        } else {
-            doc.len()
-        }
-    } else if row > 0 {
-        start + layout.col_at_row(goal, row - 1, m.char_w)
-    } else if let Some(above) = doc.prev_shown(line) {
-        let prev = layout_line(ui, doc, above, m);
-        doc.rope.line_to_char(above) + prev.col_at_row(goal, prev.rows() - 1, m.char_w)
-    } else {
-        0
-    }
-}
-
-fn move_vertical(ui: &Ui, doc: &mut Document, m: &Metrics, delta: isize, extend: bool) {
-    let head = doc.sel.1;
-    let line = doc.rope.char_to_line(head);
-    let col = head - doc.rope.line_to_char(line);
-    if m.wrap {
-        let goal = doc
-            .goal_x
-            .unwrap_or_else(|| layout_line(ui, doc, line, m).place(col, m.char_w).0);
-        let mut pos = head;
-        for _ in 0..delta.unsigned_abs() {
-            let next = wrapped_step(ui, doc, m, pos, goal, delta > 0);
-            if next == pos {
-                break;
-            }
-            pos = next;
-        }
-        doc.move_to(pos, extend);
-        doc.goal_x = Some(goal);
-        return;
-    }
-    let goal = doc
-        .goal_x
-        .unwrap_or_else(|| layout_line(ui, doc, line, m).x_of(col, m.char_w));
-    let visual = (doc.to_visual(line) as isize + delta).clamp(0, doc.shown_count() as isize - 1);
-    let target = doc.line_of_visual(visual as usize);
-    let pos = if target == line && delta < 0 {
-        0
-    } else if target == line {
-        doc.len()
-    } else {
-        doc.rope.line_to_char(target) + layout_line(ui, doc, target, m).col_at(goal)
-    };
-    doc.move_to(pos, extend);
-    doc.goal_x = Some(goal);
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Typed {
-    None,
-    Text,
-    Backspace,
-}
-
-fn handle_events(ui: &Ui, doc: &mut Document, m: &Metrics, macros: &mut Macro) -> Typed {
-    let events = ui.input(|i| i.events.clone());
-    macros.feed(&events);
-    let typed = process_events(ui, doc, m, events);
-    macros.replay(ui, doc, m);
-    typed
-}
-
-fn process_events(ui: &Ui, doc: &mut Document, m: &Metrics, events: Vec<Event>) -> Typed {
-    let mut typed = Typed::None;
-    for event in events {
-        if let Event::Key {
-            key,
-            pressed: true,
-            modifiers,
-            ..
-        } = &event
-        {
-            let key = *key;
-            let alt_shift = modifiers.alt && modifiers.shift && !modifiers.command;
-            if alt_shift
-                && matches!(
-                    key,
-                    Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight
-                )
-            {
-                block_step(ui, doc, m, key);
-                continue;
-            }
-            if modifiers.command && modifiers.alt && matches!(key, Key::ArrowUp | Key::ArrowDown) {
-                doc.add_cursor_vertical(key == Key::ArrowDown);
-                continue;
-            }
-            if modifiers.command && !modifiers.shift && !modifiers.alt && key == Key::D {
-                doc.select_next_match();
-                continue;
-            }
-            if key == Key::Escape && (doc.multi() || doc.block.is_some()) {
-                let sel = doc.sel;
-                doc.clear_extra();
-                doc.sel = sel;
-                continue;
-            }
-            if doc.multi() {
-                let shift = modifiers.shift;
-                let cmd = modifiers.command;
-                let handled = match key {
-                    Key::ArrowLeft => {
-                        doc.move_each(shift, |d, c| {
-                            if cmd {
-                                d.word_left(c.1)
-                            } else if !shift && c.0 != c.1 {
-                                c.0.min(c.1)
-                            } else {
-                                c.1.saturating_sub(1)
-                            }
-                        });
-                        true
-                    }
-                    Key::ArrowRight => {
-                        doc.move_each(shift, |d, c| {
-                            if cmd {
-                                d.word_right(c.1)
-                            } else if !shift && c.0 != c.1 {
-                                c.0.max(c.1)
-                            } else {
-                                c.1 + 1
-                            }
-                        });
-                        true
-                    }
-                    Key::ArrowUp | Key::ArrowDown if !cmd => {
-                        let down = key == Key::ArrowDown;
-                        doc.move_each(shift, |d, c| vertical_char(d, c.1, down));
-                        true
-                    }
-                    Key::Home => {
-                        doc.move_each(shift, |d, c| d.line_home(c.1));
-                        true
-                    }
-                    Key::End => {
-                        doc.move_each(shift, |d, c| d.line_end(c.1));
-                        true
-                    }
-                    _ => false,
-                };
-                if handled {
-                    continue;
-                }
-            }
-        }
-        match event {
-            Event::Text(text) => {
-                let clean: String = text.chars().filter(|c| !c.is_control()).collect();
-                if !clean.is_empty() {
-                    doc.insert_text(&clean);
-                    typed = Typed::Text;
-                }
-            }
-            Event::Ime(ImeEvent::Commit(text)) => {
-                let clean: String = text.chars().filter(|c| !c.is_control()).collect();
-                if !clean.is_empty() {
-                    doc.insert_text(&clean);
-                }
-            }
-            Event::Paste(text) => {
-                let text = text.replace("\r\n", "\n").replace('\r', "\n");
-                if !text.is_empty()
-                    && let Some(((l0, x0), (l1, x1))) = doc.block
-                {
-                    let col = (x0.min(x1) / m.char_w as f64).round().max(0.0) as usize;
-                    let top = l0.min(l1);
-                    let rows = l0.max(l1) - top + 1;
-                    let body = text.strip_suffix('\n').unwrap_or(&text);
-                    let mut lines: Vec<&str> = body.split('\n').collect();
-                    if lines.len() == 1 && rows > 1 {
-                        lines = vec![lines[0]; rows];
-                    }
-                    if doc.cursors().iter().any(|c| c.0 != c.1) {
-                        doc.insert_text("");
-                    }
-                    doc.block_paste_at(top, col, &lines);
-                    doc.block = None;
-                } else if !text.is_empty() {
-                    if !doc.multi() && is_block_clip(&text) {
-                        if doc.has_selection() {
-                            doc.insert_text("");
-                        }
-                        doc.block_paste(&text);
-                    } else {
-                        doc.insert_text(&text);
-                    }
-                }
-            }
-            Event::Copy | Event::Cut => {
-                let cut = matches!(event, Event::Cut);
-                if doc.multi() {
-                    let text = doc.texts().join("\n");
-                    remember_block((doc.block.is_some() || doc.multi()).then(|| text.clone()));
-                    ui.ctx().copy_text(text);
-                    if cut {
-                        doc.insert_text("");
-                    }
-                } else if doc.has_selection() {
-                    remember_block(None);
-                    ui.ctx().copy_text(doc.selected_text());
-                    if cut {
-                        doc.insert_text("");
-                    }
-                }
-            }
-            Event::Key {
-                key,
-                pressed: true,
-                modifiers,
-                ..
-            } => {
-                let cmd = modifiers.command;
-                let shift = modifiers.shift;
-                let head = doc.sel.1;
-                let range = doc.selection();
-                match key {
-                    Key::ArrowLeft => {
-                        let pos = if cmd {
-                            doc.word_left(head)
-                        } else if !shift && doc.has_selection() {
-                            range.start
-                        } else {
-                            head.saturating_sub(1)
-                        };
-                        doc.move_to(pos, shift);
-                    }
-                    Key::ArrowRight => {
-                        let pos = if cmd {
-                            doc.word_right(head)
-                        } else if !shift && doc.has_selection() {
-                            range.end
-                        } else {
-                            head + 1
-                        };
-                        doc.move_to(pos, shift);
-                    }
-                    Key::ArrowUp if cmd => doc.scroll_y -= m.row_h as f64,
-                    Key::ArrowDown if cmd => doc.scroll_y += m.row_h as f64,
-                    Key::ArrowUp => move_vertical(ui, doc, m, -1, shift),
-                    Key::ArrowDown => move_vertical(ui, doc, m, 1, shift),
-                    Key::PageUp => move_vertical(ui, doc, m, -(m.rows.max(2) as isize - 1), shift),
-                    Key::PageDown => move_vertical(ui, doc, m, m.rows.max(2) as isize - 1, shift),
-                    Key::Home => {
-                        let pos = if cmd { 0 } else { doc.line_home(head) };
-                        doc.move_to(pos, shift);
-                    }
-                    Key::End => {
-                        let pos = if cmd { doc.len() } else { doc.line_end(head) };
-                        doc.move_to(pos, shift);
-                    }
-                    Key::Enter => doc.newline(),
-                    Key::Tab if shift => doc.outdent(),
-                    Key::Tab => doc.indent(),
-                    Key::Backspace => {
-                        doc.backspace(cmd);
-                        typed = Typed::Backspace;
-                    }
-                    Key::Delete => doc.delete(cmd),
-                    Key::Slash if cmd => doc.toggle_comment(),
-                    Key::A if cmd => doc.select_all(),
-                    Key::Z if cmd && shift => doc.redo(),
-                    Key::Z if cmd => doc.undo(),
-                    Key::Y if cmd => doc.redo(),
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-    typed
-}
-
-pub(crate) fn copy_selection(ctx: &egui::Context, doc: &mut Document, cut: bool) {
-    let text = if doc.multi() {
-        let text = doc.texts().join("\n");
-        remember_block(Some(text.clone()));
-        text
-    } else {
-        remember_block(None);
-        doc.selected_text()
-    };
-    ctx.copy_text(text);
-    if cut {
-        doc.insert_text("");
-    }
-}
-
-fn sentence_case(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut start = true;
-    for c in text.chars() {
-        if start && c.is_alphabetic() {
-            out.extend(c.to_uppercase());
-            start = false;
-        } else {
-            out.extend(c.to_lowercase());
-        }
-        if matches!(c, '.' | '!' | '?' | '\n') {
-            start = true;
-        }
-    }
-    out
-}
-
-fn title_case(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut start = true;
-    for c in text.chars() {
-        if c.is_alphanumeric() {
-            if start {
-                out.extend(c.to_uppercase());
-            } else {
-                out.extend(c.to_lowercase());
-            }
-            start = false;
-        } else {
-            out.push(c);
-            start = true;
-        }
-    }
-    out
-}
-
-fn invert_case(text: &str) -> String {
-    text.chars()
-        .flat_map(|c| {
-            if c.is_uppercase() {
-                c.to_lowercase().collect::<Vec<_>>()
-            } else {
-                c.to_uppercase().collect::<Vec<_>>()
-            }
-        })
-        .collect()
-}
-
-fn context_items(ui: &mut Ui, doc: &mut Document, id: Id) {
-    ui.set_min_width(250.0);
-    let cmd = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
-    let keys = |k: &str| format!("{cmd}{k}");
-    let selected = doc.cursors().iter().any(|(a, h)| a != h);
-    let item = |ui: &mut Ui, text: &str, shortcut: String, enabled: bool| {
-        let clicked = ui
-            .add_enabled(enabled, egui::Button::new(text).shortcut_text(shortcut))
-            .clicked();
-        if clicked {
-            ui.close();
-        }
-        clicked
-    };
-    if item(ui, tr!("Вырезать"), keys("X"), selected) {
-        copy_selection(ui.ctx(), doc, true);
-    }
-    if item(ui, tr!("Копировать"), keys("C"), selected) {
-        copy_selection(ui.ctx(), doc, false);
-    }
-    if item(ui, tr!("Вставить"), keys("V"), true) {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
-        ui.memory_mut(|mem| mem.request_focus(id));
-    }
-    if item(ui, tr!("Удалить"), "Delete".into(), true) {
-        if selected {
-            doc.insert_text("");
-        } else {
-            doc.delete(false);
-        }
-    }
-    ui.separator();
-    if item(ui, tr!("Выделить всё"), keys("A"), true) {
-        doc.select_all();
-    }
-    ui.separator();
-    if item(ui, tr!("Закомментировать / раскомментировать"), keys("/"), true) {
-        doc.toggle_comment();
-    }
-    if item(ui, tr!("Дублировать строку"), String::new(), true) {
-        doc.duplicate_lines();
-    }
-    if item(ui, tr!("Удалить строку"), String::new(), true) {
-        doc.delete_lines();
-    }
-    if item(ui, tr!("Увеличить отступ"), "Tab".into(), true) {
-        doc.indent();
-    }
-    if item(ui, tr!("Уменьшить отступ"), "Shift+Tab".into(), true) {
-        doc.outdent();
-    }
-    ui.menu_button(tr!("Сворачивание"), |ui| {
-        ui.set_min_width(200.0);
-        if ui.button(tr!("Свернуть блок")).clicked() {
-            doc.fold_here();
-            ui.close();
-        }
-        if ui.button(tr!("Развернуть блок")).clicked() {
-            doc.unfold_here();
-            ui.close();
-        }
-        if ui.button(tr!("Свернуть всё")).clicked() {
-            doc.fold_all();
-            ui.close();
-        }
-        if ui.button(tr!("Развернуть всё")).clicked() {
-            doc.unfold_all();
-            ui.close();
-        }
-    });
-    ui.separator();
-    ui.menu_button(tr!("Регистр"), |ui| {
-        ui.set_min_width(220.0);
-        let cases: [(&str, fn(&str) -> String); 5] = [
-            (tr!("ПРОПИСНЫЕ"), |t| t.to_uppercase()),
-            (tr!("строчные"), |t| t.to_lowercase()),
-            (tr!("Как в предложении"), sentence_case),
-            (tr!("Каждое Слово С Заглавной"), title_case),
-            (tr!("иНВЕРСИЯ рЕГИСТРА"), invert_case),
-        ];
-        for (label, f) in cases {
-            if ui.button(label).clicked() {
-                doc.transform(f);
-                ui.close();
-            }
-        }
-    });
+#[derive(Clone, Copy, Default)]
+pub struct Pointer {
+    time: f64,
+    pos: usize,
+    clicks: u8,
+    origin: Option<(usize, usize)>,
+    block: Option<(usize, f64)>,
+    adding: Option<usize>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1635,7 +870,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             }
         }
         for deco in decos {
-            use crate::wasm::DecoKind;
+            use crate::plugins::wasm::DecoKind;
             let color = deco
                 .color
                 .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b))

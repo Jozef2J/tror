@@ -272,8 +272,8 @@ pub fn install_fonts(
             }
         })
         .collect();
-    fonts.families.insert(crate::editor::code_family(), code);
-    crate::editor::TAB.store(tab_width.max(1), std::sync::atomic::Ordering::Relaxed);
+    fonts.families.insert(crate::text::editor::code_family(), code);
+    crate::text::editor::TAB.store(tab_width.max(1), std::sync::atomic::Ordering::Relaxed);
     ctx.set_fonts(fonts);
     if let Ok(mut list) = TERM_FONTS.lock() {
         list.clear();

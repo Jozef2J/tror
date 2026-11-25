@@ -11,8 +11,8 @@ use eframe::egui::{
     text::{CCursor, LayoutJob, TextFormat},
 };
 
-use crate::document::{Document, EditKind};
-use crate::search::{Pending, SearchState};
+use crate::text::document::{Document, EditKind};
+use crate::text::search::{Pending, SearchState};
 use crate::theme::Palette;
 use model::*;
 use ops::{TableOp, table_html};

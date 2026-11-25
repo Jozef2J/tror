@@ -11,7 +11,7 @@ use crate::widgets::Lit;
 use eframe::egui::{self, Button, RichText, ScrollArea, Sense, Ui};
 use regex::{Regex, RegexBuilder};
 
-use crate::{document::Document, theme::Palette};
+use crate::{text::document::Document, theme::Palette};
 
 const MAX_FILE: u64 = 8 * 1024 * 1024;
 const MAX_HITS: usize = 5000;
@@ -78,10 +78,10 @@ impl Ignore {
                 continue;
             }
             let hit = if *anchored {
-                crate::sync::glob(pattern, local)
-                    || crate::sync::glob(&format!("{pattern}/**"), local)
+                crate::remote::sync::glob(pattern, local)
+                    || crate::remote::sync::glob(&format!("{pattern}/**"), local)
             } else {
-                crate::sync::glob(pattern, name)
+                crate::remote::sync::glob(pattern, name)
             };
             if hit {
                 out = Some(!negate);

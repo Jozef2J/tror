@@ -3,44 +3,26 @@
 #[macro_use]
 mod i18n;
 mod app;
+mod text;
 mod bench;
-mod archive;
-mod complete;
 mod console;
 mod crash;
 mod db;
-mod diff;
-mod dock;
-mod document;
-mod editor;
-mod files;
-mod findfiles;
-mod fold;
-mod highlight;
-mod import;
-mod keys;
-mod marks;
-mod local;
-mod mosh;
 mod plugins;
-mod prefs;
-mod ppk;
-mod preview;
 mod instance;
-mod recover;
 mod remote;
-mod remote_ui;
-mod search;
-mod sync;
-mod telnet;
-mod terminal;
-mod theme;
 mod trace;
 mod update;
-mod vault;
 mod visual;
-mod wasm;
 mod widgets;
+mod theme;
+mod dock;
+mod prefs;
+mod keys;
+mod preview;
+mod diff;
+mod files;
+mod findfiles;
 
 use eframe::egui;
 
@@ -56,7 +38,7 @@ fn main() -> eframe::Result {
         std::process::exit(bench::run());
     }
     if std::env::args().nth(1).as_deref() == Some("--forget-passwords") {
-        vault::clear();
+        remote::vault::clear();
         return Ok(());
     }
     crash::install();

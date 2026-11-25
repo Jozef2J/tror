@@ -6,7 +6,7 @@ use eframe::egui;
 use regex::{Captures, Regex, RegexBuilder};
 use ropey::Rope;
 
-use crate::document::{Document, EditKind};
+use crate::text::document::{Document, EditKind};
 
 pub const MAX_MATCHES: usize = 100_000;
 const SYNC_LIMIT: usize = 256 * 1024;

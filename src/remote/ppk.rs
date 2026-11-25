@@ -2,6 +2,8 @@ use base64::Engine;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
+pub(crate) const DSA_NOTE: &str = "ключ DSA: этот тип устарел, в OpenSSH 10 удалён, и библиотека SSH программы входить по нему не умеет — создайте ключ Ed25519 (ssh-keygen -t ed25519)";
+
 pub fn is_ppk(text: &str) -> bool {
     text.starts_with("PuTTY-User-Key-File-")
 }
@@ -268,7 +270,7 @@ pub fn to_openssh(text: &str, passphrase: &str) -> Result<String, String> {
                 put(&mut section, part);
             }
         }
-        b"ssh-dss" => return Err(tr!(super::remote::DSA_NOTE).into()),
+        b"ssh-dss" => return Err(tr!(DSA_NOTE).into()),
         other => {
             return Err(tf!(
                 "ключ PuTTY: тип {} не поддерживается",

@@ -1,4 +1,4 @@
-use crate::document::Document;
+use crate::text::document::Document;
 
 const OPEN: [char; 3] = ['{', '[', '('];
 const CLOSE: [char; 3] = ['}', ']', ')'];
@@ -145,30 +145,6 @@ impl Document {
 
     pub fn is_folded(&self, line: usize) -> bool {
         self.folds.binary_search_by_key(&line, |f| f.0).is_ok()
-    }
-
-    fn refold(&mut self) {
-        self.folds.sort_unstable();
-        self.folds.dedup_by_key(|f| f.0);
-        self.hidden.clear();
-        for &(head, end) in &self.folds {
-            if let Some(last) = self.hidden.last_mut()
-                && head <= last.1
-            {
-                if head >= last.0 {
-                    last.1 = last.1.max(end);
-                }
-                continue;
-            }
-            self.hidden.push((head + 1, end));
-        }
-        self.skip.clear();
-        self.skip.push(0);
-        let mut total = 0;
-        for (a, b) in &self.hidden {
-            total += b - a + 1;
-            self.skip.push(total);
-        }
     }
 
     pub fn toggle_fold(&mut self, line: usize) -> bool {
@@ -383,25 +359,6 @@ impl Document {
         Some(self.hidden_range(prev).map_or(prev, |(a, _)| a - 1))
     }
 
-    pub(crate) fn shift_folds(&mut self, start: usize, old_end: usize, new_end: usize) {
-        if self.folds.is_empty() {
-            return;
-        }
-        let same = old_end == new_end && start == old_end;
-        self.folds.retain_mut(|f| {
-            if f.1 < start {
-                true
-            } else if f.0 > old_end {
-                f.0 = f.0 + new_end - old_end;
-                f.1 = f.1 + new_end - old_end;
-                true
-            } else {
-                same && f.0 == start
-            }
-        });
-        self.refold();
-    }
-
     pub fn restore_view(&mut self, marks: &[usize], folds: &[(usize, usize)]) {
         let count = self.line_count();
         self.marks = marks.iter().copied().filter(|l| *l < count).collect();
@@ -411,14 +368,6 @@ impl Document {
             .filter(|(head, end)| *end < count && self.fold_end(*head) == Some(*end))
             .collect();
         self.refold();
-    }
-
-    pub(crate) fn drop_folds(&mut self) {
-        self.clamp_marks();
-        self.folds.clear();
-        self.hidden.clear();
-        self.skip.clear();
-        self.skip.push(0);
     }
 }
 

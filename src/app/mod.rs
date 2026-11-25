@@ -9,19 +9,19 @@ use eframe::egui::{
 use egui_stack::{DockArea, DockState, TabViewer};
 use encoding_rs::Encoding;
 
-use crate::complete::Completion;
 use crate::console::ConsolePanel;
 use crate::db::DbPanel;
 use crate::diff::DiffPanel;
 use crate::dock::{self, Pane};
-use crate::document::{Document, Eol};
-use crate::editor;
 use crate::files::ProjectPanel;
-use crate::highlight::Syntaxes;
 use crate::prefs::{self, Look, Settings};
 use crate::preview::{self, Preview};
-use crate::remote_ui::{PanelEvent, RemotePanel};
-use crate::search::{Pending, SearchState};
+use crate::remote::panel::{PanelEvent, RemotePanel};
+use crate::text::complete::Completion;
+use crate::text::document::{Document, Eol};
+use crate::text::editor;
+use crate::text::highlight::Syntaxes;
+use crate::text::search::{Pending, SearchState};
 use crate::theme::{self, Palette};
 
 mod actions;
@@ -30,14 +30,12 @@ mod files;
 mod find;
 mod frame;
 mod hosts;
+mod input;
 mod jump;
-mod look;
 mod menu;
 mod modals;
 pub(crate) mod owner;
-mod plugin_manager;
-mod plugin_run;
-mod plugin_ui;
+mod plugins;
 mod tabs;
 #[cfg(test)]
 mod uitest;
@@ -396,8 +394,8 @@ pub struct TrorApp {
     checked: (u64, bool),
     goto: Option<String>,
     jump: jump::Jump,
-    plugin_dialog: Option<plugin_ui::PluginDialog>,
-    plugin_panels: std::collections::HashMap<u64, plugin_ui::PluginPanel>,
+    plugin_dialog: Option<plugins::PluginDialog>,
+    plugin_panels: std::collections::HashMap<u64, plugins::PluginPanel>,
     find_files: crate::findfiles::FindFiles,
     find_out: Option<crate::findfiles::Out>,
     update: Updater,
@@ -405,16 +403,17 @@ pub struct TrorApp {
     macro_dialog: Option<MacroDialog>,
     find: find::FindWindow,
     floats: owner::Floats,
-    manager: Option<plugin_manager::Manager>,
+    manager: Option<plugins::Manager>,
     plugin_active: Option<u64>,
     plugin_seen: std::collections::HashMap<u64, u64>,
-    decorations: std::collections::HashMap<u64, Vec<crate::wasm::Decoration>>,
-    plugin_decos: std::collections::HashMap<(u64, usize, String), Vec<crate::wasm::Decoration>>,
+    decorations: std::collections::HashMap<u64, Vec<crate::plugins::wasm::Decoration>>,
+    plugin_decos:
+        std::collections::HashMap<(u64, usize, String), Vec<crate::plugins::wasm::Decoration>>,
     visual: std::collections::HashMap<u64, crate::visual::Visual>,
     drop_hint: Option<Option<(usize, String)>>,
     scale: f32,
     instance: Option<std::sync::mpsc::Receiver<PathBuf>>,
-    recovery: crate::recover::Recovery,
+    recovery: crate::text::recover::Recovery,
     confirm: Option<Confirm>,
     conflict: Option<Conflict>,
     allow_close: bool,
@@ -439,7 +438,7 @@ impl TrorApp {
             "en" => true,
             _ => crate::i18n::system_english(),
         });
-        crate::vault::set_in_file(settings.passwords_in_file);
+        crate::remote::vault::set_in_file(settings.passwords_in_file);
         let mut dock = cc
             .storage
             .and_then(|s| eframe::get_value::<DockState<Pane>>(s, DOCK_KEY))
@@ -581,5 +580,81 @@ impl TrorApp {
             ));
         }
         app
+    }
+
+    pub(super) fn notify(&mut self, text: impl Into<String>, now: f64) {
+        self.toast = Some((text.into(), now));
+    }
+
+    pub(super) fn new_doc(&mut self) {
+        let taken: Vec<u32> = self
+            .docs
+            .iter()
+            .filter(|d| d.path.is_none() && d.remote.is_none())
+            .map(|d| d.untitled)
+            .collect();
+        let number = (1..).find(|n| !taken.contains(n)).unwrap_or(1);
+        let doc = Document::empty(self.next_id, number);
+        self.next_id += 1;
+        self.docs.push(doc);
+        self.active = self.docs.len() - 1;
+        self.focus_editor = true;
+    }
+
+    fn command(&self, id: &str) -> Action {
+        match id {
+            "new" => Action::New,
+            "open" => Action::Open,
+            "open_folder" => Action::OpenFolder,
+            "project" => Action::Toggle(Pane::Project),
+            "save" => Action::Save,
+            "save_as" => Action::SaveAs,
+            "save_all" => Action::SaveAll,
+            "print" => Action::Print,
+            "quick_open" => Action::Jump(""),
+            "palette" => Action::Jump(">"),
+            "close_tab" => Action::CloseTab(self.active),
+            "reopen" => Action::Reopen,
+            "next_tab" => Action::NextTab,
+            "prev_tab" => Action::PrevTab,
+            "find" => Action::Find,
+            "replace" => Action::Replace,
+            "find_next" => Action::FindNext,
+            "find_prev" => Action::FindPrev,
+            "goto" => Action::GotoLine,
+            "duplicate_line" => Action::Edit("duplicate_line"),
+            "delete_line" => Action::Edit("delete_line"),
+            "line_up" => Action::Edit("line_up"),
+            "line_down" => Action::Edit("line_down"),
+            "upper" => Action::Edit("upper"),
+            "lower" => Action::Edit("lower"),
+            "trim" => Action::Edit("trim"),
+            "bookmark" => Action::Edit("bookmark"),
+            "bookmark_next" => Action::Edit("bookmark_next"),
+            "bookmark_prev" => Action::Edit("bookmark_prev"),
+            "fold" => Action::Fold(0),
+            "unfold" => Action::Fold(1),
+            "fold_all" => Action::Fold(2),
+            "unfold_all" => Action::Fold(3),
+            "wrap" => Action::ToggleWrap,
+            "visual" => Action::ToggleVisual,
+            "theme" => Action::ToggleTheme,
+            "settings" => Action::Show(Pane::Settings),
+            "hosts" => Action::Toggle(Pane::Hosts),
+            "console" => Action::Toggle(Pane::Console),
+            "log" => Action::Toggle(Pane::Log),
+            "server_search" => Action::FindFiles,
+            "db" => Action::Toggle(Pane::Db),
+            "compare" => Action::Compare,
+            "compare_server" => Action::CompareServer,
+            "find_files" => Action::FindFiles,
+            "macro_record" => Action::MacroRecord,
+            "macro_play" => Action::MacroPlay,
+            _ => Action::Preview,
+        }
+    }
+
+    fn palette(&self) -> Palette {
+        self.settings.look.palette()
     }
 }

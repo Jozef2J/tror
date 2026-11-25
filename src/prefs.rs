@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use eframe::egui::{self, Button, Color32, ComboBox, RichText, ScrollArea, Sense, Stroke, Ui};
 use serde::{Deserialize, Serialize};
 
-use crate::highlight::{self, SYNTAX_PARTS};
+use crate::text::highlight::{self, SYNTAX_PARTS};
 use crate::theme::{self, PARTS, Palette};
 
 type Colors = BTreeMap<String, [u8; 3]>;
@@ -827,7 +827,7 @@ fn files_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
     let problem = ui
         .ctx()
         .data(|d| d.get_temp::<String>(egui::Id::unique("tror_vault_note")))
-        .or_else(|| (!settings.passwords_in_file).then(crate::vault::last_error).flatten());
+        .or_else(|| (!settings.passwords_in_file).then(crate::remote::vault::last_error).flatten());
     if let Some(problem) = problem {
         ui.label(
             RichText::new(tf!("Системное хранилище недоступно, пароли остаются в файле: {problem}", "The system store is not available, passwords stay in the file: {problem}"

@@ -2,10 +2,10 @@ use super::*;
 
 impl TrorApp {
     pub(super) fn recover(&mut self) {
-        let Some(dir) = crate::recover::dir() else {
+        let Some(dir) = crate::text::recover::dir() else {
             return;
         };
-        let found = crate::recover::pending(&dir);
+        let found = crate::text::recover::pending(&dir);
         if found.is_empty() {
             return;
         }
@@ -53,7 +53,7 @@ impl TrorApp {
             }
             self.active = index;
         }
-        crate::recover::clear(&dir);
+        crate::text::recover::clear(&dir);
         let _ = self.recovery.snapshot(&dir, &self.docs);
         self.toast = Some((
             tf!(
@@ -94,25 +94,6 @@ impl TrorApp {
         ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
     }
 
-    pub(super) fn notify(&mut self, text: impl Into<String>, now: f64) {
-        self.toast = Some((text.into(), now));
-    }
-
-    pub(super) fn new_doc(&mut self) {
-        let taken: Vec<u32> = self
-            .docs
-            .iter()
-            .filter(|d| d.path.is_none() && d.remote.is_none())
-            .map(|d| d.untitled)
-            .collect();
-        let number = (1..).find(|n| !taken.contains(n)).unwrap_or(1);
-        let doc = Document::empty(self.next_id, number);
-        self.next_id += 1;
-        self.docs.push(doc);
-        self.active = self.docs.len() - 1;
-        self.focus_editor = true;
-    }
-
     pub(super) fn open_path(&mut self, path: &Path, now: f64) {
         if let Some(i) = self
             .docs
@@ -132,7 +113,7 @@ impl TrorApp {
                     self.new_doc();
                     let index = self.active;
                     let doc = &mut self.docs[index];
-                    doc.replace(0..0, &html, crate::document::EditKind::Other);
+                    doc.replace(0..0, &html, crate::text::document::EditKind::Other);
                     let stem = path
                         .file_stem()
                         .map(|s| s.to_string_lossy().into_owned())

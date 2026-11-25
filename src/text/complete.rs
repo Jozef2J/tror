@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::RwLock;
 
-use crate::document::Document;
+use crate::text::document::Document;
 
-const PHP_SIGS: &str = include_str!("../assets/signatures/php.txt");
-const BITRIX_SIGS: &str = include_str!("../assets/signatures/bitrix.txt");
-const JS_SIGS: &str = include_str!("../assets/signatures/js.txt");
-const PY_SIGS: &str = include_str!("../assets/signatures/python.txt");
+const PHP_SIGS: &str = include_str!("../../assets/signatures/php.txt");
+const BITRIX_SIGS: &str = include_str!("../../assets/signatures/bitrix.txt");
+const JS_SIGS: &str = include_str!("../../assets/signatures/js.txt");
+const PY_SIGS: &str = include_str!("../../assets/signatures/python.txt");
 
 static CUSTOM: RwLock<BTreeMap<String, String>> = RwLock::new(BTreeMap::new());
 
@@ -570,7 +570,7 @@ impl Completion {
                 doc.replace(
                     self.start..head,
                     &item.text,
-                    crate::document::EditKind::Other,
+                    crate::text::document::EditKind::Other,
                 );
             }
         }

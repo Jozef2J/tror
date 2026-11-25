@@ -1513,7 +1513,7 @@ mod tests {
             s.indexes
         );
         assert_eq!(s.relations.len(), 1, "{:?}", s.relations);
-        assert_eq!(s.relations[0].target, "users");
+        assert_eq!(s.relations[0].target, "st_users");
         assert_eq!(s.relations[0].on_delete, "CASCADE");
         assert!(s.create.contains("CREATE TABLE"), "{}", s.create);
         assert!(s.create.contains("goods_title"), "{}", s.create);
@@ -1572,7 +1572,7 @@ mod tests {
     fn live_mysql_structure() {
         let src = Source {
             schema: "shop".into(),
-            table: "goods".into(),
+            table: "st_goods".into(),
         };
         let mut engine = live(
             super::super::DbProfile {
@@ -1582,10 +1582,10 @@ mod tests {
             },
             3307,
             &[
-                "DROP TABLE IF EXISTS shop.goods",
-                "DROP TABLE IF EXISTS shop.users",
-                "CREATE TABLE shop.users (id INT PRIMARY KEY AUTO_INCREMENT)",
-                "CREATE TABLE shop.goods (id INT PRIMARY KEY AUTO_INCREMENT, title VARCHAR(100) NULL COMMENT 'Название', price INT NOT NULL DEFAULT 0, owner INT, KEY goods_title (title), CONSTRAINT goods_owner FOREIGN KEY (owner) REFERENCES users(id) ON DELETE CASCADE)",
+                "DROP TABLE IF EXISTS shop.st_goods",
+                "DROP TABLE IF EXISTS shop.st_users",
+                "CREATE TABLE shop.st_users (id INT PRIMARY KEY AUTO_INCREMENT)",
+                "CREATE TABLE shop.st_goods (id INT PRIMARY KEY AUTO_INCREMENT, title VARCHAR(100) NULL COMMENT 'Название', price INT NOT NULL DEFAULT 0, owner INT, KEY st_goods_title (title), CONSTRAINT st_goods_owner FOREIGN KEY (owner) REFERENCES st_users(id) ON DELETE CASCADE)",
             ],
             &src,
         );
@@ -1597,7 +1597,7 @@ mod tests {
     fn live_postgres_structure() {
         let src = Source {
             schema: "public".into(),
-            table: "goods".into(),
+            table: "st_goods".into(),
         };
         let mut engine = live(
             super::super::DbProfile {
@@ -1609,10 +1609,10 @@ mod tests {
             },
             5432,
             &[
-                "DROP TABLE IF EXISTS goods; DROP TABLE IF EXISTS users",
-                "CREATE TABLE users (id serial PRIMARY KEY)",
-                "CREATE TABLE goods (id serial PRIMARY KEY, title varchar(100), price integer NOT NULL DEFAULT 0, owner integer REFERENCES users(id) ON DELETE CASCADE)",
-                "CREATE INDEX goods_title ON goods(title); COMMENT ON COLUMN goods.title IS 'Название'",
+                "DROP TABLE IF EXISTS st_goods; DROP TABLE IF EXISTS st_users",
+                "CREATE TABLE st_users (id serial PRIMARY KEY)",
+                "CREATE TABLE st_goods (id serial PRIMARY KEY, title varchar(100), price integer NOT NULL DEFAULT 0, owner integer REFERENCES st_users(id) ON DELETE CASCADE)",
+                "CREATE INDEX st_goods_title ON st_goods(title); COMMENT ON COLUMN st_goods.title IS 'Название'",
             ],
             &src,
         );

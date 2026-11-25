@@ -1,3 +1,8 @@
+pub mod terminal;
+pub mod telnet;
+pub mod mosh;
+pub mod local;
+
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
@@ -8,7 +13,7 @@ use eframe::egui::{
 
 use crate::app::{dialog, dialog_button, port_field};
 use crate::remote::{self, Shell, ShellCmd, ShellEvent, Store, TermProfile, TermProtocol};
-use crate::terminal::{self, Screen};
+use terminal::Screen;
 use crate::theme::Palette;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -241,7 +246,7 @@ impl ConsolePanel {
         let size = session.screen.size();
         session.screen.reset();
         let place = if session.profile.protocol == TermProtocol::Local {
-            format!("{} · {}", crate::local::program(), session.profile.host)
+            format!("{} · {}", crate::console::local::program(), session.profile.host)
         } else {
             session.profile.address()
         };
@@ -260,9 +265,9 @@ impl ConsolePanel {
                 session.profile.startup.clone(),
                 wake,
             ),
-            TermProtocol::Telnet => crate::telnet::open(&session.profile, size, wake),
-            TermProtocol::Mosh => crate::mosh::open(&session.profile, known, size, wake),
-            TermProtocol::Local => crate::local::open(
+            TermProtocol::Telnet => crate::console::telnet::open(&session.profile, size, wake),
+            TermProtocol::Mosh => crate::console::mosh::open(&session.profile, known, size, wake),
+            TermProtocol::Local => crate::console::local::open(
                 (!session.profile.host.is_empty()).then(|| std::path::PathBuf::from(&session.profile.host)),
                 size,
                 wake,
@@ -370,7 +375,7 @@ impl ConsolePanel {
             .on_hover_text(tf!(
                 "{} на этом компьютере, в папке проекта",
                 "{} on this computer, in the project folder",
-                crate::local::program()
+                crate::console::local::program()
             ))
             .clicked()
         {

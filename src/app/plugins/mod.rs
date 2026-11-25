@@ -1,0 +1,51 @@
+use super::TrorApp;
+
+mod manager;
+mod run;
+mod ui;
+
+pub(in crate::app) use manager::Manager;
+pub(in crate::app) use ui::{PluginDialog, PluginPanel};
+
+impl TrorApp {
+    pub(in crate::app) fn active_target(&self) -> Option<usize> {
+        (!self.docs.is_empty()).then_some(self.active)
+    }
+
+    pub(in crate::app) fn plugin_send(
+        &mut self,
+        plugin: usize,
+        message: serde_json::Value,
+        target: Option<usize>,
+    ) {
+        use crate::plugins::wasm::{Job, Snapshot};
+        let root = self.project.root.clone();
+        let doc = target.and_then(|i| self.docs.get(i));
+        let snap = match doc {
+            Some(doc) => Some(Snapshot {
+                rope: doc.rope.clone(),
+                sel: doc.sel,
+                path: doc.location(),
+                syntax: doc.syntax.clone(),
+                root,
+            }),
+            None => root.map(|root| Snapshot {
+                rope: Default::default(),
+                sel: (0, 0),
+                path: None,
+                syntax: String::new(),
+                root: Some(root),
+            }),
+        };
+        let doc = doc.map(|d| (d.id, d.version));
+        let ctx = self.ctx.clone();
+        if let Some(worker) = self.plugins.wasm.get_mut(plugin) {
+            worker.run(Job {
+                message,
+                snap,
+                doc,
+                wake: Box::new(move || ctx.request_repaint()),
+            });
+        }
+    }
+}

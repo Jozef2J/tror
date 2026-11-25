@@ -827,14 +827,14 @@ impl ProjectPanel {
                                 && chosen.iter().all(|(p, _)| p.parent().map(Path::to_path_buf) == parent)
                             {
                                 ui.menu_button(tr!("Архивировать"), |ui| {
-                                    for format in crate::archive::formats() {
+                                    for format in crate::remote::archive::formats() {
                                         if ui.button(format.label()).clicked() {
                                             let paths: Vec<PathBuf> =
                                                 chosen.iter().map(|(p, _)| p.clone()).collect();
                                             let (tx, rx) = std::sync::mpsc::channel();
                                             let ctx = ui.ctx().clone();
                                             std::thread::spawn(move || {
-                                                let _ = tx.send(crate::archive::create(&paths, format));
+                                                let _ = tx.send(crate::remote::archive::create(&paths, format));
                                                 ctx.request_repaint();
                                             });
                                             self.archiving = Some(rx);

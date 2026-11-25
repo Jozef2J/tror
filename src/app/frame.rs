@@ -39,8 +39,8 @@ impl eframe::App for TrorApp {
             && self
                 .docs
                 .iter()
-                .all(|d| !d.dirty() || crate::recover::fits(d))
-            && let Some(dir) = crate::recover::dir()
+                .all(|d| !d.dirty() || crate::text::recover::fits(d))
+            && let Some(dir) = crate::text::recover::dir()
         {
             let kept = self.recovery.snapshot(&dir, &self.docs);
             if let Err(e) = kept {
@@ -63,9 +63,9 @@ impl eframe::App for TrorApp {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.confirm = Some(Confirm::Quit);
         } else if ctx.input(|i| i.viewport().close_requested())
-            && let Some(dir) = crate::recover::dir()
+            && let Some(dir) = crate::text::recover::dir()
         {
-            crate::recover::clear(&dir);
+            crate::text::recover::clear(&dir);
             self.recovery = Default::default();
             self.recovery.last = f64::INFINITY;
         }
@@ -85,7 +85,7 @@ impl eframe::App for TrorApp {
         }
         self.project.tree = self.settings.project_tree;
         self.project.upload_target = self.remotes.iter().find_map(|r| r.peer_label());
-        crate::complete::set_custom(&self.settings.dictionaries);
+        crate::text::complete::set_custom(&self.settings.dictionaries);
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -326,8 +326,8 @@ impl eframe::App for TrorApp {
         self.project.show_size = self.settings.project_size;
         self.project.show_date = self.settings.project_date;
         self.settings.columns = crate::widgets::columns();
-        crate::document::set_indent(self.settings.edit.unit());
-        crate::terminal::SCROLLBACK.store(
+        crate::text::document::set_indent(self.settings.edit.unit());
+        crate::console::terminal::SCROLLBACK.store(
             self.settings.scrollback as usize,
             std::sync::atomic::Ordering::Relaxed,
         );
@@ -377,7 +377,7 @@ impl eframe::App for TrorApp {
                         re.replace_all(&text, with.as_str())
                     };
                     let end = doc.len();
-                    doc.replace(0..end, &changed, crate::document::EditKind::Other);
+                    doc.replace(0..end, &changed, crate::text::document::EditKind::Other);
                     total += count;
                 }
                 self.notify(
@@ -407,7 +407,7 @@ impl eframe::App for TrorApp {
         }
         if self.settings.autosave && now - self.recovery.last > 10.0 {
             self.recovery.last = now;
-            if let Some(dir) = crate::recover::dir() {
+            if let Some(dir) = crate::text::recover::dir() {
                 let _ = self.recovery.snapshot(&dir, &self.docs);
             }
             if !unsaved.is_empty() || self.docs.iter().any(|d| d.dirty()) {
@@ -769,7 +769,7 @@ impl eframe::App for TrorApp {
         }
 
         self.goto_modal(&ctx, &pal);
-        self.jump_modal(&ctx, &pal);
+        self.jump_modal(&ctx, &pal, &mut actions);
         self.plugin_modal(&ctx, &pal);
         self.plugin_manager(&ctx, &pal);
         self.macro_modal(&ctx, &pal);
@@ -978,6 +978,43 @@ impl TrorApp {
                 }
             }
         }
+    }
+
+    fn apply_look(&mut self, ctx: &egui::Context) {
+        theme::commit_term_fonts();
+        let wanted_fonts = self.console.fonts();
+        let fonts_changed = self.term_fonts.as_ref() != Some(&wanted_fonts);
+        if self.applied.as_ref() == Some(&self.settings.look) && !fonts_changed {
+            return;
+        }
+        let look = self.settings.look.clone();
+        let old = self.applied.take();
+        let fonts = |l: &Look| (l.ui_font.clone(), l.code_font.clone(), l.tab_width);
+        if (old.as_ref().map(fonts) != Some(fonts(&look)) || fonts_changed)
+            && let Err(e) = theme::install_fonts(
+                ctx,
+                look.ui_font.as_deref(),
+                look.code_font.as_deref(),
+                &wanted_fonts,
+                look.tab_width,
+            )
+        {
+            self.notify(
+                tf!("Шрифт не загружен: {e}", "Font not loaded: {e}"),
+                ctx.input(|i| i.time),
+            );
+        }
+        self.term_fonts = Some(wanted_fonts);
+        theme::apply(ctx, &look.palette(), look.dark, look.radius, look.ui_size);
+        let code = |l: &Look| {
+            let (scheme, colors) = l.syntax();
+            (scheme.to_owned(), colors.clone())
+        };
+        if old.as_ref().map(code) != Some(code(&look)) {
+            let (scheme, colors) = look.syntax();
+            self.syntaxes.set_theme(scheme, colors);
+        }
+        self.applied = Some(look);
     }
 }
 

@@ -199,7 +199,12 @@ impl TrorApp {
         rows
     }
 
-    pub(super) fn jump_modal(&mut self, ctx: &egui::Context, pal: &Palette) {
+    pub(super) fn jump_modal(
+        &mut self,
+        ctx: &egui::Context,
+        pal: &Palette,
+        actions: &mut Vec<Action>,
+    ) {
         if !self.jump.open {
             return;
         }
@@ -377,10 +382,9 @@ impl TrorApp {
                 }
                 Item::Command(index) => {
                     let id = crate::keys::COMMANDS[index].0;
-                    let action = self.command(id);
+                    actions.push(self.command(id));
                     self.jump.open = false;
                     self.focus_editor = true;
-                    self.run(action, ctx);
                     return;
                 }
             }

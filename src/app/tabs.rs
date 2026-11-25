@@ -294,6 +294,28 @@ impl TrorApp {
                 }
             });
     }
+
+    pub(super) fn compare_server(&mut self, now: f64) {
+        let Some((profile, path)) = self.docs.get(self.active).and_then(|d| d.remote.clone())
+        else {
+            self.notify(tr!("Этот файл открыт не с сервера"), now);
+            return;
+        };
+        match self
+            .remotes
+            .iter_mut()
+            .find(|r| r.connected_profile() == Some(profile.as_str()))
+        {
+            Some(panel) => panel.compare_remote(path),
+            None => self.notify(
+                tf!(
+                    "Подключитесь к серверу «{profile}», чтобы сравнить",
+                    "Connect to \"{profile}\" to compare"
+                ),
+                now,
+            ),
+        }
+    }
 }
 
 pub(super) struct Viewer<'a> {

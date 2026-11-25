@@ -5,7 +5,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::document::Document;
+use crate::text::document::Document;
 
 const LIMIT: usize = 16 * 1024 * 1024;
 const INDEX: &str = "index.json";

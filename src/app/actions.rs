@@ -1,81 +1,6 @@
 use super::*;
 
 impl TrorApp {
-    pub(super) fn compare_server(&mut self, now: f64) {
-        let Some((profile, path)) = self.docs.get(self.active).and_then(|d| d.remote.clone())
-        else {
-            self.notify(tr!("Этот файл открыт не с сервера"), now);
-            return;
-        };
-        match self
-            .remotes
-            .iter_mut()
-            .find(|r| r.connected_profile() == Some(profile.as_str()))
-        {
-            Some(panel) => panel.compare_remote(path),
-            None => self.notify(
-                tf!(
-                    "Подключитесь к серверу «{profile}», чтобы сравнить",
-                    "Connect to \"{profile}\" to compare"
-                ),
-                now,
-            ),
-        }
-    }
-
-    pub(super) fn command(&self, id: &str) -> Action {
-        match id {
-            "new" => Action::New,
-            "open" => Action::Open,
-            "open_folder" => Action::OpenFolder,
-            "project" => Action::Toggle(Pane::Project),
-            "save" => Action::Save,
-            "save_as" => Action::SaveAs,
-            "save_all" => Action::SaveAll,
-            "print" => Action::Print,
-            "quick_open" => Action::Jump(""),
-            "palette" => Action::Jump(">"),
-            "close_tab" => Action::CloseTab(self.active),
-            "reopen" => Action::Reopen,
-            "next_tab" => Action::NextTab,
-            "prev_tab" => Action::PrevTab,
-            "find" => Action::Find,
-            "replace" => Action::Replace,
-            "find_next" => Action::FindNext,
-            "find_prev" => Action::FindPrev,
-            "goto" => Action::GotoLine,
-            "duplicate_line" => Action::Edit("duplicate_line"),
-            "delete_line" => Action::Edit("delete_line"),
-            "line_up" => Action::Edit("line_up"),
-            "line_down" => Action::Edit("line_down"),
-            "upper" => Action::Edit("upper"),
-            "lower" => Action::Edit("lower"),
-            "trim" => Action::Edit("trim"),
-            "bookmark" => Action::Edit("bookmark"),
-            "bookmark_next" => Action::Edit("bookmark_next"),
-            "bookmark_prev" => Action::Edit("bookmark_prev"),
-            "fold" => Action::Fold(0),
-            "unfold" => Action::Fold(1),
-            "fold_all" => Action::Fold(2),
-            "unfold_all" => Action::Fold(3),
-            "wrap" => Action::ToggleWrap,
-            "visual" => Action::ToggleVisual,
-            "theme" => Action::ToggleTheme,
-            "settings" => Action::Show(Pane::Settings),
-            "hosts" => Action::Toggle(Pane::Hosts),
-            "console" => Action::Toggle(Pane::Console),
-            "log" => Action::Toggle(Pane::Log),
-            "server_search" => Action::FindFiles,
-            "db" => Action::Toggle(Pane::Db),
-            "compare" => Action::Compare,
-            "compare_server" => Action::CompareServer,
-            "find_files" => Action::FindFiles,
-            "macro_record" => Action::MacroRecord,
-            "macro_play" => Action::MacroPlay,
-            _ => Action::Preview,
-        }
-    }
-
     pub(super) fn open_search(&mut self, replace: bool) {
         self.search.open = true;
         self.search.files = false;
@@ -94,7 +19,7 @@ impl TrorApp {
                 if !selected.contains(['\n', '\r', '\t']) {
                     self.search.query = selected;
                 } else if !self.search.regex {
-                    self.search.query = crate::search::escape(&selected);
+                    self.search.query = crate::text::search::escape(&selected);
                     self.search.extended = true;
                 }
             }
@@ -302,10 +227,12 @@ impl TrorApp {
             Action::Edit(command) => {
                 if let Some(doc) = self.docs.get_mut(self.active) {
                     match command {
-                        "cut" => crate::editor::copy_selection(ctx, doc, true),
-                        "copy" => crate::editor::copy_selection(ctx, doc, false),
+                        "cut" => crate::text::editor::copy_selection(ctx, doc, true),
+                        "copy" => crate::text::editor::copy_selection(ctx, doc, false),
                         "paste" => {
-                            ctx.memory_mut(|m| m.request_focus(crate::editor::editor_id(doc.id)));
+                            ctx.memory_mut(|m| {
+                                m.request_focus(crate::text::editor::editor_id(doc.id))
+                            });
                             ctx.send_viewport_cmd(ViewportCommand::RequestPaste);
                         }
                         "delete" => {
@@ -575,65 +502,6 @@ impl TrorApp {
                     self.focus_editor = true;
                 }
             }
-        }
-    }
-
-    pub(super) fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        if self.capturing.is_some() {
-            return;
-        }
-        let keys = crate::keys::Keys::new(&self.settings.keys);
-        let weight = crate::keys::weight;
-        let mut extra: Vec<(egui::KeyboardShortcut, Action)> = Vec::new();
-        for (index, plugin) in self.plugins.list.iter().enumerate() {
-            if let Some(shortcut) = crate::keys::parse(&plugin.shortcut) {
-                extra.push((shortcut, Action::Plugin(index)));
-            }
-        }
-        for (index, plugin) in self.plugins.wasm.iter().enumerate() {
-            for (command, def) in plugin.manifest.commands.iter().enumerate() {
-                if let Some(shortcut) = crate::keys::parse(&def.key) {
-                    extra.push((shortcut, Action::PluginCommand(index, command)));
-                }
-            }
-        }
-        extra.retain(|(shortcut, _)| crate::keys::usable(shortcut));
-        extra.sort_by_key(|(shortcut, _)| std::cmp::Reverse(weight(shortcut)));
-        let mut extra = extra.into_iter().peekable();
-        for (index, shortcut) in keys.bound() {
-            while let Some((next, _)) = extra.peek()
-                && weight(next) > weight(shortcut)
-            {
-                if let Some((next, action)) = extra.next()
-                    && ctx.input_mut(|i| crate::keys::consume(i, &next))
-                {
-                    actions.push(action);
-                }
-            }
-            let (id, _, _, editing) = crate::keys::COMMANDS[*index];
-            if self.console.focused() && editing {
-                continue;
-            }
-            if !ctx.input_mut(|i| crate::keys::consume(i, shortcut)) {
-                continue;
-            }
-            if shortcut.modifiers.alt {
-                ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
-            }
-            actions.push(self.command(id));
-        }
-        for (shortcut, action) in extra {
-            if ctx.input_mut(|i| crate::keys::consume(i, &shortcut)) {
-                actions.push(action);
-            }
-        }
-        if self.search.open
-            && self.goto.is_none()
-            && self.confirm.is_none()
-            && !self.complete.open
-            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
-        {
-            actions.push(Action::CloseSearch);
         }
     }
 }

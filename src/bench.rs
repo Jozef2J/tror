@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
-use crate::document::Document;
-use crate::highlight::{Highlighter, Syntaxes};
-use crate::search::SearchState;
+use crate::text::document::Document;
+use crate::text::highlight::{Highlighter, Syntaxes};
+use crate::text::search::SearchState;
 
 struct Case {
     name: &'static str,

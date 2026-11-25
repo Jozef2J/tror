@@ -1,3 +1,5 @@
+pub mod wasm;
+
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -239,8 +241,8 @@ pub struct Finished {
 pub struct Plugins {
     pub dir: Option<PathBuf>,
     pub list: Vec<Plugin>,
-    pub wasm: Vec<crate::wasm::Worker>,
-    done: Receiver<crate::wasm::Done>,
+    pub wasm: Vec<crate::plugins::wasm::Worker>,
+    done: Receiver<crate::plugins::wasm::Done>,
     pub errors: Vec<String>,
     pub off: Vec<String>,
     pub running: usize,
@@ -285,7 +287,7 @@ pub fn load(dir: &Path) -> (Vec<Plugin>, Vec<String>) {
     (list, errors)
 }
 
-pub fn peek_manifest(archive: &Path) -> Result<crate::wasm::Manifest, String> {
+pub fn peek_manifest(archive: &Path) -> Result<crate::plugins::wasm::Manifest, String> {
     let files = unzip(archive)?;
     let json = files
         .iter()
@@ -496,7 +498,7 @@ impl Plugins {
         let (wasm, wasm_errors) = self
             .dir
             .as_deref()
-            .map(|d| crate::wasm::load_enabled(d, &self.off))
+            .map(|d| crate::plugins::wasm::load_enabled(d, &self.off))
             .unwrap_or_default();
         errors.extend(wasm_errors);
         let (done_tx, done_rx) = channel();
@@ -504,14 +506,14 @@ impl Plugins {
         self.wasm = wasm
             .into_iter()
             .enumerate()
-            .map(|(i, loaded)| crate::wasm::Worker::spawn(i, loaded, done_tx.clone()))
+            .map(|(i, loaded)| crate::plugins::wasm::Worker::spawn(i, loaded, done_tx.clone()))
             .collect();
         self.done = done_rx;
         self.errors = errors;
     }
 
-    pub fn finished(&mut self) -> Vec<crate::wasm::Done> {
-        let done: Vec<crate::wasm::Done> = self.done.try_iter().collect();
+    pub fn finished(&mut self) -> Vec<crate::plugins::wasm::Done> {
+        let done: Vec<crate::plugins::wasm::Done> = self.done.try_iter().collect();
         for item in &done {
             if let Some(worker) = self.wasm.get_mut(item.plugin) {
                 worker.busy = worker.busy.saturating_sub(1);
@@ -523,7 +525,7 @@ impl Plugins {
         done
     }
 
-    pub fn install(&mut self, archive: &Path) -> Result<crate::wasm::Manifest, String> {
+    pub fn install(&mut self, archive: &Path) -> Result<crate::plugins::wasm::Manifest, String> {
         let dir = self.dir.clone().ok_or(tr!("нет папки данных программы"))?;
         let files = unzip(archive)?;
         let (prefix, json) = files
@@ -537,7 +539,7 @@ impl Plugins {
                 )
             })
             .ok_or(tr!("в архиве нет plugin.json"))?;
-        let manifest: crate::wasm::Manifest =
+        let manifest: crate::plugins::wasm::Manifest =
             serde_json::from_slice(&json).map_err(|e| format!("plugin.json: {e}"))?;
         let safe = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.';
         if manifest.id.is_empty() || !manifest.id.chars().all(safe) || manifest.id.starts_with('.')
@@ -623,7 +625,7 @@ impl Plugins {
         if std::fs::read_to_string(&guide).ok().as_deref() != Some(text) {
             std::fs::write(&guide, text).map_err(|e| e.to_string())?;
         }
-        let empty = load(&dir).0.is_empty() && crate::wasm::load_all(&dir).0.is_empty();
+        let empty = load(&dir).0.is_empty() && crate::plugins::wasm::load_all(&dir).0.is_empty();
         let example = dir.join("sort-lines.json");
         if empty && !example.exists() {
             std::fs::write(&example, EXAMPLE).map_err(|e| e.to_string())?;

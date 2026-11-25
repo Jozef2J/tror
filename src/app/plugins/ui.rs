@@ -1,21 +1,21 @@
 use serde_json::{Map, Value, json};
 
-use super::*;
+use super::super::*;
 
-pub(super) enum Ask {
+pub(in crate::app) enum Ask {
     Text(String),
     Pick(Vec<String>, String, usize),
     Settings(Map<String, Value>),
 }
 
-pub(super) struct PluginDialog {
+pub(in crate::app) struct PluginDialog {
     pub plugin: usize,
     pub id: String,
     pub title: String,
     pub ask: Ask,
 }
 
-pub(super) struct PluginPanel {
+pub(in crate::app) struct PluginPanel {
     pub plugin: usize,
     pub panel: String,
     pub tree: Value,
@@ -362,7 +362,7 @@ fn render(ui: &mut Ui, pal: &Palette, salt: u64, node: &mut Value, out: &mut Vec
 }
 
 impl TrorApp {
-    pub(super) fn sync_plugin_panels(&mut self) {
+    pub(in crate::app) fn sync_plugin_panels(&mut self) {
         let mut panels = std::collections::HashMap::new();
         let mut titles = Vec::new();
         for (plugin, worker) in self.plugins.wasm.iter().enumerate() {
@@ -396,7 +396,7 @@ impl TrorApp {
         }
     }
 
-    pub(super) fn plugin_panel_opened(&mut self, key: u64) {
+    pub(in crate::app) fn plugin_panel_opened(&mut self, key: u64) {
         if let Some(panel) = self.plugin_panels.get(&key) {
             let message =
                 json!({"method": "event", "params": {"name": "panel_open", "panel": panel.panel}});
@@ -405,7 +405,7 @@ impl TrorApp {
         }
     }
 
-    pub(super) fn open_plugin_panel(&mut self, plugin: usize, panel: usize) {
+    pub(in crate::app) fn open_plugin_panel(&mut self, plugin: usize, panel: usize) {
         let Some(worker) = self.plugins.wasm.get(plugin) else {
             return;
         };
@@ -421,22 +421,21 @@ impl TrorApp {
         }
     }
 
-    pub(super) fn open_plugin_settings(&mut self, plugin: usize) {
+    pub(in crate::app) fn open_plugin_settings(&mut self, plugin: usize) {
         if let Some(worker) = self.plugins.wasm.get(plugin) {
             self.plugin_dialog = Some(PluginDialog {
                 plugin,
                 id: String::new(),
                 title: tf!("Настройки: {}", "Settings: {}", worker.manifest.name),
-                ask: Ask::Settings(crate::wasm::settings_of(&worker.dir, &worker.manifest)),
+                ask: Ask::Settings(crate::plugins::wasm::settings_of(
+                    &worker.dir,
+                    &worker.manifest,
+                )),
             });
         }
     }
 
-    pub(super) fn active_target(&self) -> Option<usize> {
-        (!self.docs.is_empty()).then_some(self.active)
-    }
-
-    pub(super) fn plugin_pane(&mut self, ui: &mut Ui, key: u64, pal: &Palette) {
+    pub(in crate::app) fn plugin_pane(&mut self, ui: &mut Ui, key: u64, pal: &Palette) {
         let Some(panel) = self.plugin_panels.get_mut(&key) else {
             ui.add_space(12.0);
             ui.label(RichText::new(tr!("Плагин этой панели не загружен")).color(pal.subtext));
@@ -465,8 +464,12 @@ impl TrorApp {
         }
     }
 
-    pub(super) fn plugin_effect_ui(&mut self, plugin: usize, effect: crate::wasm::Effect) {
-        use crate::wasm::Effect;
+    pub(in crate::app) fn plugin_effect_ui(
+        &mut self,
+        plugin: usize,
+        effect: crate::plugins::wasm::Effect,
+    ) {
+        use crate::plugins::wasm::Effect;
         let Some(worker) = self.plugins.wasm.get(plugin) else {
             return;
         };
@@ -507,7 +510,7 @@ impl TrorApp {
         }
     }
 
-    pub(super) fn plugin_modal(&mut self, ctx: &egui::Context, pal: &Palette) {
+    pub(in crate::app) fn plugin_modal(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(dialog) = &mut self.plugin_dialog else {
             return;
         };
@@ -519,147 +522,151 @@ impl TrorApp {
             .get(dialog.plugin)
             .map(|w| w.manifest.settings.clone())
             .unwrap_or_default();
-        let modal = super::dialog(("tror_plugin_dialog", dialog.plugin), pal).show(ctx, |ui| {
-            ui.set_width(380.0);
-            if window_header(ui, pal, &dialog.title, true) {
-                done = true;
-            }
-            let mut confirm = false;
-            match &mut dialog.ask {
-                Ask::Text(value) => {
-                    let field = ui.add(TextEdit::singleline(value).desired_width(f32::INFINITY));
-                    field.request_focus();
-                    confirm = ui.input(|i| i.key_pressed(Key::Enter));
-                }
-                Ask::Pick(items, filter, selected) => {
-                    let field = ui.add(
-                        TextEdit::singleline(filter)
-                            .hint_text(tr!("фильтр"))
-                            .desired_width(f32::INFINITY),
-                    );
-                    field.request_focus();
-                    let needle = filter.to_lowercase();
-                    let shown: Vec<usize> = (0..items.len())
-                        .filter(|i| items[*i].to_lowercase().contains(&needle))
-                        .collect();
-                    if field.changed() {
-                        *selected = 0;
-                    }
-                    if ui.input(|i| i.key_pressed(Key::ArrowDown)) {
-                        *selected = (*selected + 1).min(shown.len().saturating_sub(1));
-                    }
-                    if ui.input(|i| i.key_pressed(Key::ArrowUp)) {
-                        *selected = selected.saturating_sub(1);
-                    }
-                    ui.add_space(4.0);
-                    ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                        for (row, index) in shown.iter().enumerate() {
-                            let response = ui.add(
-                                egui::Button::selectable(row == *selected, &items[*index])
-                                    .min_size(egui::vec2(ui.available_width(), 0.0)),
-                            );
-                            if row == *selected {
-                                response.scroll_to_me(None);
-                            }
-                            if response.clicked() {
-                                *selected = row;
-                                confirm = true;
-                            }
-                        }
-                    });
-                    if ui.input(|i| i.key_pressed(Key::Enter)) {
-                        confirm = true;
-                    }
-                    if confirm {
-                        match shown.get(*selected) {
-                            Some(index) => {
-                                answer = Some(json!({"index": index, "value": items[*index]}))
-                            }
-                            None => confirm = false,
-                        }
-                    }
-                }
-                Ask::Settings(values) => {
-                    egui::Grid::new("tror_plugin_settings")
-                        .num_columns(2)
-                        .spacing([12.0, 8.0])
-                        .show(ui, |ui| {
-                            for def in &settings {
-                                ui.label(&def.title);
-                                let value = values.entry(def.key.clone()).or_insert(Value::Null);
-                                match def.kind.as_str() {
-                                    "bool" => {
-                                        let mut on = value.as_bool().unwrap_or(false);
-                                        if ui.checkbox(&mut on, "").changed() {
-                                            *value = json!(on);
-                                        }
-                                    }
-                                    "number" => {
-                                        let mut n = value.as_f64().unwrap_or(0.0);
-                                        if ui.add(egui::DragValue::new(&mut n)).changed() {
-                                            *value = json!(n);
-                                        }
-                                    }
-                                    "choice" => {
-                                        let current = value.as_str().unwrap_or_default().to_owned();
-                                        egui::ComboBox::from_id_salt((
-                                            "tror_plugin_choice",
-                                            &def.key,
-                                        ))
-                                        .selected_text(current.clone())
-                                        .show_ui(
-                                            ui,
-                                            |ui| {
-                                                for option in &def.options {
-                                                    if ui
-                                                        .selectable_label(
-                                                            *option == current,
-                                                            option,
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        *value = json!(option);
-                                                    }
-                                                }
-                                            },
-                                        );
-                                    }
-                                    _ => {
-                                        let mut text =
-                                            value.as_str().unwrap_or_default().to_owned();
-                                        if ui
-                                            .add(
-                                                TextEdit::singleline(&mut text)
-                                                    .desired_width(200.0),
-                                            )
-                                            .changed()
-                                        {
-                                            *value = json!(text);
-                                        }
-                                    }
-                                }
-                                ui.end_row();
-                            }
-                        });
-                }
-            }
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if dialog_button(ui, pal, "OK", true) {
-                    confirm = true;
-                }
-                if dialog_button(ui, pal, tr!("Отмена"), false) {
+        let modal =
+            super::super::dialog(("tror_plugin_dialog", dialog.plugin), pal).show(ctx, |ui| {
+                ui.set_width(380.0);
+                if window_header(ui, pal, &dialog.title, true) {
                     done = true;
                 }
+                let mut confirm = false;
+                match &mut dialog.ask {
+                    Ask::Text(value) => {
+                        let field =
+                            ui.add(TextEdit::singleline(value).desired_width(f32::INFINITY));
+                        field.request_focus();
+                        confirm = ui.input(|i| i.key_pressed(Key::Enter));
+                    }
+                    Ask::Pick(items, filter, selected) => {
+                        let field = ui.add(
+                            TextEdit::singleline(filter)
+                                .hint_text(tr!("фильтр"))
+                                .desired_width(f32::INFINITY),
+                        );
+                        field.request_focus();
+                        let needle = filter.to_lowercase();
+                        let shown: Vec<usize> = (0..items.len())
+                            .filter(|i| items[*i].to_lowercase().contains(&needle))
+                            .collect();
+                        if field.changed() {
+                            *selected = 0;
+                        }
+                        if ui.input(|i| i.key_pressed(Key::ArrowDown)) {
+                            *selected = (*selected + 1).min(shown.len().saturating_sub(1));
+                        }
+                        if ui.input(|i| i.key_pressed(Key::ArrowUp)) {
+                            *selected = selected.saturating_sub(1);
+                        }
+                        ui.add_space(4.0);
+                        ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                            for (row, index) in shown.iter().enumerate() {
+                                let response = ui.add(
+                                    egui::Button::selectable(row == *selected, &items[*index])
+                                        .min_size(egui::vec2(ui.available_width(), 0.0)),
+                                );
+                                if row == *selected {
+                                    response.scroll_to_me(None);
+                                }
+                                if response.clicked() {
+                                    *selected = row;
+                                    confirm = true;
+                                }
+                            }
+                        });
+                        if ui.input(|i| i.key_pressed(Key::Enter)) {
+                            confirm = true;
+                        }
+                        if confirm {
+                            match shown.get(*selected) {
+                                Some(index) => {
+                                    answer = Some(json!({"index": index, "value": items[*index]}))
+                                }
+                                None => confirm = false,
+                            }
+                        }
+                    }
+                    Ask::Settings(values) => {
+                        egui::Grid::new("tror_plugin_settings")
+                            .num_columns(2)
+                            .spacing([12.0, 8.0])
+                            .show(ui, |ui| {
+                                for def in &settings {
+                                    ui.label(&def.title);
+                                    let value =
+                                        values.entry(def.key.clone()).or_insert(Value::Null);
+                                    match def.kind.as_str() {
+                                        "bool" => {
+                                            let mut on = value.as_bool().unwrap_or(false);
+                                            if ui.checkbox(&mut on, "").changed() {
+                                                *value = json!(on);
+                                            }
+                                        }
+                                        "number" => {
+                                            let mut n = value.as_f64().unwrap_or(0.0);
+                                            if ui.add(egui::DragValue::new(&mut n)).changed() {
+                                                *value = json!(n);
+                                            }
+                                        }
+                                        "choice" => {
+                                            let current =
+                                                value.as_str().unwrap_or_default().to_owned();
+                                            egui::ComboBox::from_id_salt((
+                                                "tror_plugin_choice",
+                                                &def.key,
+                                            ))
+                                            .selected_text(current.clone())
+                                            .show_ui(
+                                                ui,
+                                                |ui| {
+                                                    for option in &def.options {
+                                                        if ui
+                                                            .selectable_label(
+                                                                *option == current,
+                                                                option,
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            *value = json!(option);
+                                                        }
+                                                    }
+                                                },
+                                            );
+                                        }
+                                        _ => {
+                                            let mut text =
+                                                value.as_str().unwrap_or_default().to_owned();
+                                            if ui
+                                                .add(
+                                                    TextEdit::singleline(&mut text)
+                                                        .desired_width(200.0),
+                                                )
+                                                .changed()
+                                            {
+                                                *value = json!(text);
+                                            }
+                                        }
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if dialog_button(ui, pal, "OK", true) {
+                        confirm = true;
+                    }
+                    if dialog_button(ui, pal, tr!("Отмена"), false) {
+                        done = true;
+                    }
+                });
+                if confirm && answer.is_none() {
+                    answer = match &dialog.ask {
+                        Ask::Text(value) => Some(json!({"value": value})),
+                        Ask::Settings(values) => Some(Value::Object(values.clone())),
+                        Ask::Pick(..) => None,
+                    };
+                }
             });
-            if confirm && answer.is_none() {
-                answer = match &dialog.ask {
-                    Ask::Text(value) => Some(json!({"value": value})),
-                    Ask::Settings(values) => Some(Value::Object(values.clone())),
-                    Ask::Pick(..) => None,
-                };
-            }
-        });
         let Some(dialog) = self.plugin_dialog.take() else {
             return;
         };
@@ -669,7 +676,7 @@ impl TrorApp {
                 let now = ctx.input(|i| i.time);
                 let saved = match (&values, self.plugins.wasm.get(dialog.plugin)) {
                     (Value::Object(map), Some(worker)) => {
-                        crate::wasm::save_settings(&worker.dir, map)
+                        crate::plugins::wasm::save_settings(&worker.dir, map)
                     }
                     _ => Err(tr!("плагин не загружен").into()),
                 };
