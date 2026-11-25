@@ -21,7 +21,15 @@ pub(crate) fn open_session(
     known: Option<&str>,
     confirm: &dyn Fn(&str, bool) -> bool,
 ) -> Result<(ssh2::Session, Option<String>), String> {
-    let stream = tcp(profile)?;
+    handshake(tcp(profile)?, profile, known, confirm)
+}
+
+pub(super) fn handshake(
+    stream: TcpStream,
+    profile: &Profile,
+    known: Option<&str>,
+    confirm: &dyn Fn(&str, bool) -> bool,
+) -> Result<(ssh2::Session, Option<String>), String> {
     let mut session = ssh2::Session::new().map_err(|e| e.to_string())?;
     session.set_tcp_stream(stream);
     session.set_timeout(IO_TIMEOUT_MS);

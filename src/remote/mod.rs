@@ -318,6 +318,7 @@ fn execute(
                 && !attrs.is_dir
                 && attrs.size.is_none_or(|size| size <= CHECK_LIMIT)
             {
+                trace::client(format!("[SFTP] read {path} (server copy before saving)"));
                 let server = backend.download(path, &|_, _| {})?;
                 if let (Some(expect), Some(doc)) = (expect, doc)
                     && content_hash(&server) != *expect
@@ -334,6 +335,9 @@ fn execute(
                 if server != *data {
                     keep(path, &server);
                 }
+            }
+            if doc.is_some() {
+                trace::client(format!("[SFTP] write {path}"));
             }
             backend.upload(path, data, progress)?;
             (
@@ -460,6 +464,112 @@ pub fn extract_command(path: &str, dest: Option<&str>) -> Option<String> {
     Some(format!("mkdir -p {dest} && cd {dest} && {run}"))
 }
 
+const STALL: Duration = Duration::from_secs(40);
+const GRACE: Duration = Duration::from_secs(10);
+
+type Escape = Box<dyn Fn() + Send>;
+
+struct Watchdog {
+    limit: Duration,
+    grace: Duration,
+    socket: Arc<std::sync::Mutex<Option<TcpStream>>>,
+    since: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    fired: Arc<AtomicBool>,
+    gone: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Watchdog {
+    fn new(limit: Duration, grace: Duration) -> Self {
+        Watchdog {
+            limit,
+            grace,
+            socket: Default::default(),
+            since: Default::default(),
+            fired: Default::default(),
+            gone: Default::default(),
+            stop: Default::default(),
+        }
+    }
+
+    fn start(&self, socket: Option<TcpStream>, tag: &'static str, escape: Escape) {
+        self.replace(socket);
+        let (limit, grace) = (self.limit, self.grace);
+        let (socket, since, fired, gone, stop) = (
+            self.socket.clone(),
+            self.since.clone(),
+            self.fired.clone(),
+            self.gone.clone(),
+            self.stop.clone(),
+        );
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) && !gone.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(250));
+                let Some(waited) = since.lock().ok().and_then(|busy| busy.map(|t| t.elapsed())) else {
+                    continue;
+                };
+                if waited > limit && !fired.swap(true, Ordering::Relaxed) {
+                    if let Some(socket) = socket.lock().ok().as_deref().and_then(Option::as_ref) {
+                        let _ = socket.shutdown(std::net::Shutdown::Both);
+                    }
+                    trace::line(
+                        tf!(
+                            "{tag} сервер не отвечает {} с — соединение закрыто",
+                            "{tag} the server has not answered for {} s, connection closed",
+                            limit.as_secs()
+                        ),
+                        true,
+                    );
+                } else if waited > limit + grace {
+                    gone.store(true, Ordering::Relaxed);
+                    escape();
+                }
+            }
+        });
+    }
+
+    fn replace(&self, socket: Option<TcpStream>) {
+        if let Ok(mut slot) = self.socket.lock() {
+            *slot = socket;
+        }
+    }
+
+    fn alive(&self) {
+        if let Ok(mut busy) = self.since.lock()
+            && busy.is_some()
+            && !self.fired.load(Ordering::Relaxed)
+        {
+            *busy = Some(std::time::Instant::now());
+        }
+    }
+
+    fn guard<T>(&self, work: impl FnOnce() -> T) -> T {
+        self.fired.store(false, Ordering::Relaxed);
+        if let Ok(mut busy) = self.since.lock() {
+            *busy = Some(std::time::Instant::now());
+        }
+        let out = work();
+        if let Ok(mut busy) = self.since.lock() {
+            *busy = None;
+        }
+        out
+    }
+
+    fn fired(&self) -> bool {
+        self.fired.load(Ordering::Relaxed)
+    }
+
+    fn gone(&self) -> bool {
+        self.gone.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
 fn timed_out(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     ["timed out", "session(-9)", "timeout", "os error 11)", "os error 35)", "os error 10060)"]
@@ -472,7 +582,7 @@ fn serve(
     known: Option<String>,
     cmds: Receiver<Cmd>,
     events: Sender<Event>,
-    wake: &dyn Fn(),
+    wake: Arc<dyn Fn() + Send + Sync>,
 ) {
     let send = |event: Event| {
         let _ = events.send(event);
@@ -482,8 +592,10 @@ fn serve(
         trace::line(text, error);
         wake();
     };
+    let watch = Watchdog::new(STALL, GRACE);
     let last = std::cell::Cell::new(std::time::Instant::now());
     let progress = |done: u64, total: u64| {
+        watch.alive();
         if done >= total || last.get().elapsed() > Duration::from_millis(60) {
             last.set(std::time::Instant::now());
             send(Event::Progress { done, total });
@@ -502,7 +614,7 @@ fn serve(
     };
     let mut known = known;
     let open = |known: Option<&str>| match profile.protocol {
-        Protocol::Sftp => connect_sftp(&profile, known, &events, &cmds, wake),
+        Protocol::Sftp => connect_sftp(&profile, known, &events, &cmds, &*wake),
         _ => connect_ftp(&profile).map(|(b, home)| (b, home, None)),
     };
     log(
@@ -524,6 +636,14 @@ fn serve(
     if fingerprint.is_some() {
         known = fingerprint.clone();
     }
+    let escape = {
+        let (events, wake) = (events.clone(), wake.clone());
+        Box::new(move || {
+            let _ = events.send(Event::Closed(tr!("сервер не отвечает").into()));
+            wake();
+        })
+    };
+    watch.start(backend.socket(), tag, escape);
     log(format!("{tag} connected, home directory {home}"), false);
     let start = profile.directory.trim();
     send(Event::Connected {
@@ -536,10 +656,13 @@ fn serve(
     });
     let mut alive = true;
     loop {
+        if watch.gone() {
+            return;
+        }
         let cmd = match cmds.recv_timeout(KEEPALIVE) {
             Ok(cmd) => cmd,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if alive && backend.ping().is_err() {
+                if alive && watch.guard(|| backend.ping()).is_err() {
                     alive = false;
                     backend.abandon();
                     log(format!("{tag} idle connection closed by server"), false);
@@ -556,12 +679,15 @@ fn serve(
             trace::client(describe(&cmd));
         }
         let mut result = if alive {
-            execute(&mut backend, &cmd, &progress, &keep)
+            watch.guard(|| execute(&mut backend, &cmd, &progress, &keep))
         } else {
             Err("connection closed".into())
         };
-        let stalled = result.as_ref().is_err_and(|e| timed_out(e));
-        if result.is_err() && (!alive || stalled || backend.ping().is_err()) {
+        if watch.gone() {
+            return;
+        }
+        let stalled = watch.fired() || result.as_ref().is_err_and(|e| timed_out(e));
+        if result.is_err() && (!alive || stalled || watch.guard(|| backend.ping()).is_err()) {
             if let Err(e) = &result {
                 log(format!("{tag} {e}"), true);
             }
@@ -570,6 +696,7 @@ fn serve(
             match open(known.as_deref()) {
                 Ok((fresh, _, fingerprint)) => {
                     backend = fresh;
+                    watch.replace(backend.socket());
                     alive = true;
                     if fingerprint.is_some() {
                         known = fingerprint;
@@ -578,7 +705,7 @@ fn serve(
                     if sftp && !quiet {
                         trace::client(describe(&cmd));
                     }
-                    result = execute(&mut backend, &cmd, &progress, &keep);
+                    result = watch.guard(|| execute(&mut backend, &cmd, &progress, &keep));
                 }
                 Err(e) => {
                     log(format!("{tag} reconnect failed: {e}"), true);
@@ -741,7 +868,11 @@ pub fn one_shot(profile: &Profile, known: Option<&str>, op: OneShot) -> Result<s
         Protocol::Sftp => {
             let (session, _) = open_session(profile, known, &|_, _| false)?;
             let sftp = session.sftp().map_err(|e| e.to_string())?;
-            Backend::Sftp { session, sftp }
+            Backend::Sftp {
+                session,
+                sftp,
+                socket: None,
+            }
         }
         _ => connect_ftp(profile)?.0,
     };
@@ -782,7 +913,13 @@ pub fn connect(
     let (events, rx) = channel();
     let name = profile.name.clone();
     let profile = profile.clone();
-    std::thread::spawn(move || serve(profile, known, cmds, events, &wake));
+    let wake = std::sync::Mutex::new(wake);
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        if let Ok(wake) = wake.lock() {
+            wake();
+        }
+    });
+    std::thread::spawn(move || serve(profile, known, cmds, events, wake));
     Connection {
         profile: name,
         tx,
@@ -1087,6 +1224,52 @@ mod tests {
             .send(Cmd::Download(join(&www, "missing.txt")))
             .unwrap();
         assert!(matches!(next(), Event::Failed { .. }));
+    }
+
+    #[test]
+    fn watchdog_closes_a_stuck_connection() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let peer = Arc::new(std::sync::Mutex::new(Some(listener.accept().unwrap().0)));
+        let escaped = Arc::new(AtomicBool::new(false));
+        let watch = Watchdog::new(Duration::from_millis(600), Duration::from_millis(600));
+        let escape = {
+            let (peer, escaped) = (peer.clone(), escaped.clone());
+            Box::new(move || {
+                escaped.store(true, Ordering::Relaxed);
+                peer.lock().unwrap().take();
+            })
+        };
+        watch.start(stream.try_clone().ok(), "[SFTP]", escape);
+        let started = std::time::Instant::now();
+        let read = watch.guard(|| stream.read(&mut [0u8; 8]));
+        assert!(matches!(read, Ok(0) | Err(_)));
+        assert!(watch.fired());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        if cfg!(unix) {
+            assert!(!escaped.load(Ordering::Relaxed));
+            let quick = watch.guard(|| 1);
+            assert_eq!(quick, 1);
+            assert!(!watch.fired());
+        }
+    }
+
+    #[test]
+    fn watchdog_releases_the_panel_when_the_call_never_returns() {
+        let escaped = Arc::new(AtomicBool::new(false));
+        let watch = Watchdog::new(Duration::from_millis(300), Duration::from_millis(300));
+        let flag = escaped.clone();
+        watch.start(None, "[SFTP]", Box::new(move || flag.store(true, Ordering::Relaxed)));
+        let started = std::time::Instant::now();
+        watch.guard(|| {
+            while !escaped.load(Ordering::Relaxed) && started.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        assert!(escaped.load(Ordering::Relaxed));
+        assert!(watch.gone());
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

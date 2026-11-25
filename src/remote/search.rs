@@ -329,6 +329,7 @@ pub fn search(
                     let mut backend = Backend::Sftp {
                         session,
                         sftp,
+                        socket: None,
                     };
                     Ok((
                         search_walk(&mut backend, &params, &flag, &emit),

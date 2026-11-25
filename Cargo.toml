@@ -1,6 +1,6 @@
 [package]
 name = "trorpad"
-version = "0.30.4"
+version = "0.30.5"
 description = "TrorPad — a fast, compact code editor with SFTP/FTP, SSH console and database tools"
 edition = "2024"
 license = "MIT OR Apache-2.0"

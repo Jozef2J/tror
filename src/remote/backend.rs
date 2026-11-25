@@ -4,6 +4,7 @@ pub(super) enum Backend {
     Sftp {
         session: ssh2::Session,
         sftp: ssh2::Sftp,
+        socket: Option<TcpStream>,
     },
     Ftp(Box<suppaftp::NativeTlsFtpStream>),
 }
@@ -23,7 +24,9 @@ pub(super) fn connect_sftp(
         wake();
         matches!(cmds.recv(), Ok(Cmd::TrustHost(true)))
     };
-    let (session, accepted) = open_session(profile, known, &confirm)?;
+    let stream = tcp(profile)?;
+    let socket = stream.try_clone().ok();
+    let (session, accepted) = handshake(stream, profile, known, &confirm)?;
     let sftp = session
         .sftp()
         .map_err(|e| tf!("SFTP недоступен: {e}", "SFTP is not available: {e}"))?;
@@ -35,6 +38,7 @@ pub(super) fn connect_sftp(
         Backend::Sftp {
             session,
             sftp,
+            socket,
         },
         home,
         accepted,
@@ -494,6 +498,13 @@ impl Backend {
                 .map(|_| ())
                 .map_err(|e| e.to_string())
             }
+        }
+    }
+
+    pub(super) fn socket(&self) -> Option<TcpStream> {
+        match self {
+            Backend::Sftp { socket, .. } => socket.as_ref().and_then(|s| s.try_clone().ok()),
+            Backend::Ftp(ftp) => ftp.get_ref().try_clone().ok(),
         }
     }
 
