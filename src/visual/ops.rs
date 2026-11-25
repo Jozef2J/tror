@@ -509,6 +509,15 @@ impl Visual {
             at = *path.last().unwrap_or(&0);
         }
         let up = parent(&path).to_vec();
+        if up.is_empty() {
+            for block in &mut blocks {
+                if let Kind::Para { tag, .. } = &mut block.kind
+                    && tag.is_empty()
+                {
+                    *tag = "p".into();
+                }
+            }
+        }
         fn count(blocks: &[Block]) -> usize {
             blocks
                 .iter()

@@ -130,6 +130,31 @@ fn clean_style(raw: Option<&str>) -> Vec<&'static str> {
     wrap
 }
 
+fn heading_level(attrs: &Attrs) -> Option<usize> {
+    if attrs
+        .get("role")
+        .is_some_and(|r| r.eq_ignore_ascii_case("heading"))
+    {
+        return Some(
+            attrs
+                .get("aria-level")
+                .and_then(|l| l.trim().parse().ok())
+                .unwrap_or(2)
+                .clamp(1, 6),
+        );
+    }
+    let class = attrs.get("class")?.to_ascii_lowercase();
+    class.split_whitespace().find_map(|c| {
+        if c == "msotitle" {
+            return Some(1);
+        }
+        let n = c
+            .strip_prefix("msoheading")
+            .or_else(|| c.strip_prefix("heading"))?;
+        n.parse::<usize>().ok().filter(|n| (1..=6).contains(n))
+    })
+}
+
 fn open_tag(tag: &str, attrs: &Attrs) -> String {
     let mut out = format!("<{tag}");
     for (name, value) in &attrs.0 {
@@ -190,9 +215,39 @@ struct Out {
     pending: Option<(String, usize)>,
     marker: Option<String>,
     skip: Option<String>,
+    loose: bool,
 }
 
 impl Out {
+    fn in_block(&self) -> bool {
+        self.pending.is_some()
+            || !self.lists.is_empty()
+            || self
+                .stack
+                .iter()
+                .any(|(n, c)| BLOCK.contains(&n.as_str()) && !c.is_empty())
+    }
+
+    fn in_heading(&self) -> bool {
+        self.stack
+            .iter()
+            .any(|(_, c)| c.len() == 5 && c.starts_with("</h") && c.as_bytes()[3].is_ascii_digit())
+    }
+
+    fn open_loose(&mut self) {
+        if !self.loose && !self.in_block() {
+            self.html.push_str("<p>");
+            self.loose = true;
+        }
+    }
+
+    fn close_loose(&mut self) {
+        if self.loose {
+            self.html.push_str("</p>");
+            self.loose = false;
+        }
+    }
+
     fn close_lists(&mut self) {
         while let Some(tag) = self.lists.pop() {
             self.html.push_str("</li></");
@@ -247,6 +302,7 @@ pub fn clean(source: &str) -> String {
         pending: None,
         marker: None,
         skip: None,
+        loose: false,
     };
     let mut i = 0;
     while i < src.len() {
@@ -305,6 +361,9 @@ pub fn clean(source: &str) -> String {
                 continue;
             }
             if closing {
+                if BLOCK.contains(&name.as_str()) {
+                    out.close_loose();
+                }
                 if let Some(pos) = out.stack.iter().rposition(|(n, _)| *n == name) {
                     if BLOCK.contains(&name.as_str()) {
                         out.before_content();
@@ -327,6 +386,9 @@ pub fn clean(source: &str) -> String {
             }
             let attrs = Attrs::parse(raw_attrs);
             let void = VOID.contains(&name.as_str()) || raw_attrs.trim_end().ends_with('/');
+            if BLOCK.contains(&name.as_str()) {
+                out.close_loose();
+            }
             if name == "p"
                 && let Some(list) = mso_list(&attrs)
             {
@@ -370,7 +432,16 @@ pub fn clean(source: &str) -> String {
             }
             let mut wrap = clean;
             let mut tag = name.clone();
+            let heading = out.in_heading();
+            if heading {
+                wrap.retain(|w| *w != "strong");
+            }
             match name.as_str() {
+                "p" if let Some(level) = heading_level(&attrs) => {
+                    tag = format!("h{level}");
+                    wrap.clear();
+                }
+                "b" | "strong" if heading => tag.clear(),
                 "span" => tag.clear(),
                 "b" | "strong"
                     if attrs
@@ -405,6 +476,9 @@ pub fn clean(source: &str) -> String {
             if !tag.is_empty() && !void {
                 close.push_str(&format!("</{tag}>"));
             }
+            if !open.is_empty() && name != "br" && !BLOCK.contains(&name.as_str()) {
+                out.open_loose();
+            }
             out.html.push_str(&open);
             if !void {
                 out.stack.push((name, close));
@@ -424,10 +498,14 @@ pub fn clean(source: &str) -> String {
         }
         if !text.trim().is_empty() {
             out.before_content();
+            out.open_loose();
+        } else if !out.loose && !out.in_block() {
+            continue;
         }
         out.html.push_str(text);
     }
     out.before_content();
+    out.close_loose();
     while let Some((_, close)) = out.stack.pop() {
         out.html.push_str(&close);
     }
@@ -466,6 +544,25 @@ mod tests {
         assert!(html.contains("<ol><li>Нумерованный</li></ol>"), "{html}");
         assert!(html.contains(r#"<table border="1" cellpadding="0" cellspacing="0"><tr><td><p>A</p></td></tr></table>"#), "{html}");
         assert!(html.contains("<b>Заголовок</b>"), "{html}");
+    }
+
+    #[test]
+    fn word_online_headings_and_loose_text() {
+        let w = r#"<div class="OutlineElement Ltr SCXW1"><p class="Paragraph SCXW1 BCX0" role="heading" aria-level="2" paraid="1"><span lang="RU-RU" class="TextRun" style="font-size:16pt;font-weight:bold"><span class="NormalTextRun">Заголовок</span></span><span class="EOP">&nbsp;</span></p></div><div class="OutlineElement Ltr"><p class="Paragraph" paraid="2"><span class="TextRun"><span>Обычный текст</span></span></p></div>"#;
+        assert_eq!(clean(w), "<h2>Заголовок&nbsp;</h2><p>Обычный текст</p>");
+        let desktop = r#"<p class=MsoTitle>Титул</p><h3><b><span lang=RU>Третий</span></b></h3><p class="Heading4">Четвёртый</p>"#;
+        assert_eq!(
+            clean(desktop),
+            "<h1>Титул</h1><h3>Третий</h3><h4>Четвёртый</h4>"
+        );
+        let loose =
+            "<div>Первая строка<br>вторая</div>\n<div>Ещё <b>текст</b></div><h2>Заг</h2>хвост";
+        assert_eq!(
+            clean(loose),
+            "<p>Первая строка<br>вторая</p><p>Ещё <b>текст</b></p><h2>Заг</h2><p>хвост</p>"
+        );
+        let cut = "<html><body><!--StartFragment-->конец абзаца</p><p>Целый</p><p>начало<!--EndFragment--></body></html>";
+        assert_eq!(clean(cut), "<p>конец абзаца</p><p>Целый</p><p>начало</p>");
     }
 
     #[test]

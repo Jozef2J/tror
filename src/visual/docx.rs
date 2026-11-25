@@ -124,6 +124,8 @@ impl Format {
 struct Ctx {
     rels: HashMap<String, String>,
     styles: HashMap<String, String>,
+    based: HashMap<String, String>,
+    outline: HashMap<String, usize>,
     style_lists: HashMap<String, (String, Option<usize>)>,
     ordered: HashMap<(String, usize), bool>,
     media: HashMap<String, Vec<u8>>,
@@ -188,8 +190,36 @@ fn image(ctx: &Ctx, id: &str) -> Option<String> {
     ))
 }
 
+fn heading_of(ctx: &Ctx, style: &str) -> Option<usize> {
+    let mut id = style.to_owned();
+    for _ in 0..8 {
+        let name = ctx
+            .styles
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| id.to_ascii_lowercase())
+            .replace(' ', "");
+        if name == "title" {
+            return Some(1);
+        }
+        if let Some(n) = name
+            .strip_prefix("heading")
+            .and_then(|n| n.parse::<usize>().ok())
+            .filter(|n| (1..=6).contains(n))
+        {
+            return Some(n);
+        }
+        if let Some(level) = ctx.outline.get(&id) {
+            return Some(*level);
+        }
+        id = ctx.based.get(&id)?.clone();
+    }
+    None
+}
+
 fn paragraph(t: &[Tok], i: &mut usize, ctx: &Ctx) -> Block {
     let mut style = String::new();
+    let mut outline: Option<usize> = None;
     let mut align = None;
     let mut num_id = None;
     let mut level: Option<usize> = None;
@@ -222,6 +252,12 @@ fn paragraph(t: &[Tok], i: &mut usize, ctx: &Ctx) -> Block {
             Tok::Close("w:pPr") => in_props -= 1,
             Tok::Open("w:pStyle", a, _) if in_props > 0 => {
                 style = attr(a, "w:val").unwrap_or_default()
+            }
+            Tok::Open("w:outlineLvl", a, _) if in_props > 0 && !in_run_props => {
+                outline = attr(a, "w:val")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .filter(|v| *v < 6)
+                    .map(|v| v + 1)
             }
             Tok::Open("w:jc", a, _) if in_props > 0 => {
                 align = match attr(a, "w:val").as_deref() {
@@ -320,26 +356,34 @@ fn paragraph(t: &[Tok], i: &mut usize, ctx: &Ctx) -> Block {
         }
         *i += 1;
     }
-    let html: String = pieces.iter().map(|(f, text)| f.wrap(text)).collect();
     let name = ctx
         .styles
         .get(&style)
         .cloned()
         .unwrap_or_else(|| style.to_ascii_lowercase());
     let compact = name.replace(' ', "");
-    let tag = if compact == "title" {
-        "h1".to_owned()
-    } else if let Some(n) = compact
-        .strip_prefix("heading")
-        .and_then(|n| n.parse::<usize>().ok())
-        .filter(|n| (1..=6).contains(n))
-    {
+    let tag = if let Some(n) = outline.or_else(|| heading_of(ctx, &style)) {
         format!("h{n}")
     } else if compact.contains("quote") {
         "blockquote".into()
     } else {
         "p".into()
     };
+    let heading = tag.starts_with('h');
+    let html: String = pieces
+        .iter()
+        .map(|(f, text)| {
+            if heading && f.bold {
+                Format {
+                    bold: false,
+                    ..f.clone()
+                }
+                .wrap(text)
+            } else {
+                f.wrap(text)
+            }
+        })
+        .collect();
     let from_style = ctx.style_lists.get(&style);
     let num_id = num_id.or_else(|| from_style.map(|(n, _)| n.clone()));
     let level = level
@@ -598,6 +642,8 @@ pub fn to_html(path: &Path) -> Result<String, String> {
         }
     }
     let mut styles = HashMap::new();
+    let mut based = HashMap::new();
+    let mut outline = HashMap::new();
     let mut style_lists: HashMap<String, (String, Option<usize>)> = HashMap::new();
     if let Some(xml) = text("word/styles.xml") {
         let mut current: Option<String> = None;
@@ -608,6 +654,20 @@ pub fn to_html(path: &Path) -> Result<String, String> {
                 Tok::Open("w:name", a, _) => {
                     if let (Some(id), Some(name)) = (current.clone(), attr(a, "w:val")) {
                         styles.insert(id, name.to_ascii_lowercase());
+                    }
+                }
+                Tok::Open("w:basedOn", a, _) => {
+                    if let (Some(id), Some(base)) = (current.clone(), attr(a, "w:val")) {
+                        based.insert(id, base);
+                    }
+                }
+                Tok::Open("w:outlineLvl", a, _) => {
+                    if let (Some(id), Some(level)) = (
+                        current.clone(),
+                        attr(a, "w:val").and_then(|v| v.parse::<usize>().ok()),
+                    ) && level < 6
+                    {
+                        outline.insert(id, level + 1);
                     }
                 }
                 Tok::Open("w:numId", a, _) => {
@@ -674,6 +734,8 @@ pub fn to_html(path: &Path) -> Result<String, String> {
     let ctx = Ctx {
         rels,
         styles,
+        based,
+        outline,
         style_lists,
         ordered,
         media,
@@ -751,7 +813,9 @@ mod tests {
         zip.extend_from_slice(&size.to_le_bytes());
         zip.extend_from_slice(&start.to_le_bytes());
         zip.extend_from_slice(&0u16.to_le_bytes());
-        let path = std::env::temp_dir().join(format!("tror-docx-{}.docx", std::process::id()));
+        static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("tror-docx-{}-{n}.docx", std::process::id()));
         std::fs::File::create(&path)
             .unwrap()
             .write_all(&zip)
@@ -772,6 +836,29 @@ mod tests {
             }
         }
         !crc
+    }
+
+    #[test]
+    fn custom_heading_styles_become_headings() {
+        let document = r#"<w:document xmlns:w="w"><w:body>
+<w:p><w:pPr><w:pStyle w:val="a5"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Свой стиль</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="a7"/></w:pPr><w:r><w:t>Уровень</w:t></w:r></w:p>
+<w:p><w:pPr><w:outlineLvl w:val="2"/></w:pPr><w:r><w:t>Прямо</w:t></w:r></w:p>
+<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Жирный абзац</w:t></w:r></w:p>
+</w:body></w:document>"#;
+        let styles = r#"<w:styles><w:style w:type="paragraph" w:styleId="2"><w:name w:val="heading 2"/></w:style><w:style w:type="paragraph" w:styleId="a5"><w:name w:val="Мой заголовок"/><w:basedOn w:val="2"/></w:style><w:style w:type="paragraph" w:styleId="a7"><w:name w:val="Раздел"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style></w:styles>"#;
+        let path = docx(&[("word/document.xml", document), ("word/styles.xml", styles)]);
+        let html = to_html(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let html = html.replace('\n', "");
+        assert!(html.contains("<h2>Свой стиль</h2>"), "{html}");
+        assert!(html.contains("<h1>Уровень</h1>"), "{html}");
+        assert!(html.contains("<h3>Прямо</h3>"), "{html}");
+        assert!(
+            html.contains("<p><b>Жирный абзац</b></p>")
+                || html.contains("<p><strong>Жирный абзац</strong></p>"),
+            "{html}"
+        );
     }
 
     #[test]
