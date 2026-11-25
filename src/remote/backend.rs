@@ -250,43 +250,13 @@ impl Backend {
         }
     }
 
-    pub(super) fn replace(
-        &mut self,
-        path: &str,
-        data: &[u8],
-        progress: &dyn Fn(u64, u64),
-    ) -> Result<(), String> {
-        let temp = join(&parent(path), &format!(".{}.trorpad-part", file_name(path)));
-        if self.write(&temp, data, progress).is_err() {
-            let _ = self.delete(&temp, false);
-            return self.write(path, data, progress);
-        }
-        let mode = match self {
-            Backend::Sftp { .. } => self.stat(path).ok().and_then(|a| a.perm),
-            Backend::Ftp(_) => None,
-        };
-        if let Some(mode) = mode {
-            let _ = self.chmod_one(&temp, mode);
-        }
-        if self.rename(&temp, path).is_ok()
-            || self
-                .exec(&format!("mv -f {} {}", quote(&temp), quote(path)), "mv")
-                .is_ok()
-            || (self.delete(path, false).is_ok() && self.rename(&temp, path).is_ok())
-        {
-            return Ok(());
-        }
-        let _ = self.delete(&temp, false);
-        self.write(path, data, progress)
-    }
-
     pub(super) fn upload(
         &mut self,
         path: &str,
         data: &[u8],
         progress: &dyn Fn(u64, u64),
     ) -> Result<(), String> {
-        let first = match self.replace(path, data, progress) {
+        let first = match self.write(path, data, progress) {
             Ok(()) => return Ok(()),
             Err(e) => e,
         };
@@ -299,7 +269,7 @@ impl Backend {
             current = format!("{current}/{part}");
             let _ = self.mkdir(&current);
         }
-        self.replace(path, data, progress)
+        self.write(path, data, progress)
     }
 
     pub(super) fn walk(
@@ -476,6 +446,7 @@ impl Backend {
         };
         let mut channel = session.channel_session().map_err(|e| e.to_string())?;
         channel.exec(command).map_err(|e| e.to_string())?;
+        let _ = channel.send_eof();
         let mut out = String::new();
         let _ = channel.read_to_string(&mut out);
         let mut err = String::new();

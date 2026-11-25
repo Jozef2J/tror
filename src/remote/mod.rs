@@ -1082,7 +1082,53 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[ignore]
-    fn live_sftp_upload_replaces_through_temp_file() {
+    fn live_forced_sftp_account_saves_without_hanging() {
+        let target = "/home/sftponly/www/a.txt";
+        std::fs::write(target, "old\n").unwrap();
+        let profile = Profile {
+            name: "only".into(),
+            host: "127.0.0.1".into(),
+            port: 2223,
+            user: "sftponly".into(),
+            password: "test123".into(),
+            ..Default::default()
+        };
+        let conn = connect(&profile, None, || {});
+        let next = || loop {
+            match conn.rx.recv_timeout(Duration::from_secs(20)).expect("ответ сервера") {
+                Event::Log(..) | Event::Progress { .. } => {}
+                event => break event,
+            }
+        };
+        loop {
+            match next() {
+                Event::HostKey { .. } => conn.tx.send(Cmd::TrustHost(true)).unwrap(),
+                Event::Connected { .. } => break,
+                Event::Closed(e) | Event::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        let started = std::time::Instant::now();
+        conn.tx
+            .send(Cmd::Upload {
+                path: target.into(),
+                data: b"new content".to_vec(),
+                doc: None,
+                expect: None,
+            })
+            .unwrap();
+        let event = next();
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(matches!(event, Event::Uploaded { .. }));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "new content");
+        let left: Vec<_> = std::fs::read_dir("/home/sftponly/www").unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 1, "{left:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn live_sftp_upload_overwrites_in_place() {
         use std::os::unix::fs::PermissionsExt;
         let base = std::env::temp_dir().join("tror-upload-test");
         let _ = std::fs::remove_dir_all(&base);
