@@ -39,7 +39,13 @@ jobs:
         run: |
           set -o pipefail
           if [ -f .deslop-please.allow ]; then
-            deslop-please --allow .deslop-please.allow 2>&1 | tee deslop.txt
+            if ! deslop-please --allow .deslop-please.allow 2>&1 | tee deslop.txt; then
+              deslop-please --update-allow deslop-allow.txt > /dev/null 2>&1 || true
+              echo "----- allow list -----"
+              cat deslop-allow.txt || true
+              echo "----- end -----"
+              exit 1
+            fi
           else
             deslop-please 2>&1 | tee deslop.txt || true
             deslop-please --update-allow deslop-allow.txt > /dev/null 2>&1 || true
