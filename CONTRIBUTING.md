@@ -27,6 +27,8 @@ Open an issue and choose "Feature request". Describe the task you are trying to 
    cargo clippy
    ```
    Rust 1.95+ and a C compiler are required; on Linux and macOS also `perl` and `make`.
+
+   Code structure is checked by [deslop-please](https://github.com/deterministic-machines/deslop-please): `cargo install deslop-please`, then `deslop-please --allow .deslop-please.allow`. New module cycles, field leaks and shallow modules fail CI. Fix the cause instead of hiding it; `.deslop-please.allow` lists existing debt and may only shrink.
 3. Keep the change focused on one thing. Follow the style of the surrounding code: small direct functions, no comments in the code, the shared widgets from `src/widgets.rs` for any interface.
 4. Every interface string is written in Russian inside `tr!("…")` and gets its English translation in `src/i18n/en.rs`.
 5. Describe what changed and how you checked it in the pull request.
@@ -60,7 +62,7 @@ Plugins are WebAssembly modules built with the Rust SDK in [`sdk/`](sdk/). You d
 ### Pull request
 
 1. Сделайте форк и ветку от `main`.
-2. Соберите и проверьте: `cargo test`, `cargo clippy`.
+2. Соберите и проверьте: `cargo test`, `cargo clippy`. Структуру кода проверяет [deslop-please](https://github.com/deterministic-machines/deslop-please) (`cargo install deslop-please`, затем `deslop-please --allow .deslop-please.allow`): новые циклы между модулями, утечки полей и «мелкие» модули не проходят CI. Исправляйте причину, а не прячьте её; список `.deslop-please.allow` — старый долг, его можно только сокращать.
 3. Одно изменение — одна тема. Пишите в стиле окружающего кода: короткие прямые функции, без комментариев в коде, общие элементы интерфейса из `src/widgets.rs`.
 4. Строки интерфейса пишутся по-русски в `tr!("…")`, английский перевод добавляется в `src/i18n/en.rs`.
 5. В описании pull request'а напишите, что изменилось и как вы это проверили.
