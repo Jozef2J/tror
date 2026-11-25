@@ -477,13 +477,15 @@ struct Watchdog {
     fired: Arc<AtomicBool>,
     gone: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    escape: std::sync::Mutex<Option<Escape>>,
 }
 
 impl Watchdog {
-    fn new(limit: Duration, grace: Duration) -> Self {
+    fn new(limit: Duration, grace: Duration, escape: Escape) -> Self {
         Watchdog {
             limit,
             grace,
+            escape: std::sync::Mutex::new(Some(escape)),
             socket: Default::default(),
             since: Default::default(),
             fired: Default::default(),
@@ -492,8 +494,13 @@ impl Watchdog {
         }
     }
 
-    fn start(&self, socket: Option<TcpStream>, tag: &'static str, escape: Escape) {
-        self.replace(socket);
+    fn watch(&self, socket: Option<TcpStream>, tag: &'static str) {
+        if let Ok(mut slot) = self.socket.lock() {
+            *slot = socket;
+        }
+        let Some(escape) = self.escape.lock().ok().and_then(|mut escape| escape.take()) else {
+            return;
+        };
         let (limit, grace) = (self.limit, self.grace);
         let (socket, since, fired, gone, stop) = (
             self.socket.clone(),
@@ -526,12 +533,6 @@ impl Watchdog {
                 }
             }
         });
-    }
-
-    fn replace(&self, socket: Option<TcpStream>) {
-        if let Ok(mut slot) = self.socket.lock() {
-            *slot = socket;
-        }
     }
 
     fn alive(&self) {
@@ -592,7 +593,13 @@ fn serve(
         trace::line(text, error);
         wake();
     };
-    let watch = Watchdog::new(STALL, GRACE);
+    let watch = Watchdog::new(STALL, GRACE, {
+        let (events, wake) = (events.clone(), wake.clone());
+        Box::new(move || {
+            let _ = events.send(Event::Closed(tr!("сервер не отвечает").into()));
+            wake();
+        })
+    });
     let last = std::cell::Cell::new(std::time::Instant::now());
     let progress = |done: u64, total: u64| {
         watch.alive();
@@ -636,14 +643,7 @@ fn serve(
     if fingerprint.is_some() {
         known = fingerprint.clone();
     }
-    let escape = {
-        let (events, wake) = (events.clone(), wake.clone());
-        Box::new(move || {
-            let _ = events.send(Event::Closed(tr!("сервер не отвечает").into()));
-            wake();
-        })
-    };
-    watch.start(backend.socket(), tag, escape);
+    watch.watch(backend.socket(), tag);
     log(format!("{tag} connected, home directory {home}"), false);
     let start = profile.directory.trim();
     send(Event::Connected {
@@ -696,7 +696,7 @@ fn serve(
             match open(known.as_deref()) {
                 Ok((fresh, _, fingerprint)) => {
                     backend = fresh;
-                    watch.replace(backend.socket());
+                    watch.watch(backend.socket(), tag);
                     alive = true;
                     if fingerprint.is_some() {
                         known = fingerprint;
@@ -734,6 +734,9 @@ fn serve(
                 }
             }
         }
+    }
+    if alive {
+        watch.guard(|| backend.close());
     }
     log(format!("{tag} disconnected"), false);
 }
@@ -867,12 +870,7 @@ pub fn one_shot(profile: &Profile, known: Option<&str>, op: OneShot) -> Result<s
     let mut backend = match profile.protocol {
         Protocol::Sftp => {
             let (session, _) = open_session(profile, known, &|_, _| false)?;
-            let sftp = session.sftp().map_err(|e| e.to_string())?;
-            Backend::Sftp {
-                session,
-                sftp,
-                socket: None,
-            }
+            Backend::sftp(session, None)?
         }
         _ => connect_ftp(profile)?.0,
     };
@@ -1233,7 +1231,6 @@ mod tests {
         let mut stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let peer = Arc::new(std::sync::Mutex::new(Some(listener.accept().unwrap().0)));
         let escaped = Arc::new(AtomicBool::new(false));
-        let watch = Watchdog::new(Duration::from_millis(600), Duration::from_millis(600));
         let escape = {
             let (peer, escaped) = (peer.clone(), escaped.clone());
             Box::new(move || {
@@ -1241,7 +1238,8 @@ mod tests {
                 peer.lock().unwrap().take();
             })
         };
-        watch.start(stream.try_clone().ok(), "[SFTP]", escape);
+        let watch = Watchdog::new(Duration::from_millis(600), Duration::from_millis(600), escape);
+        watch.watch(stream.try_clone().ok(), "[SFTP]");
         let started = std::time::Instant::now();
         let read = watch.guard(|| stream.read(&mut [0u8; 8]));
         assert!(matches!(read, Ok(0) | Err(_)));
@@ -1258,9 +1256,10 @@ mod tests {
     #[test]
     fn watchdog_releases_the_panel_when_the_call_never_returns() {
         let escaped = Arc::new(AtomicBool::new(false));
-        let watch = Watchdog::new(Duration::from_millis(300), Duration::from_millis(300));
         let flag = escaped.clone();
-        watch.start(None, "[SFTP]", Box::new(move || flag.store(true, Ordering::Relaxed)));
+        let escape = Box::new(move || flag.store(true, Ordering::Relaxed));
+        let watch = Watchdog::new(Duration::from_millis(300), Duration::from_millis(300), escape);
+        watch.watch(None, "[SFTP]");
         let started = std::time::Instant::now();
         watch.guard(|| {
             while !escaped.load(Ordering::Relaxed) && started.elapsed() < Duration::from_secs(5) {
@@ -1318,6 +1317,54 @@ mod tests {
         signal("-CONT");
         assert!(matches!(event, Event::Listing { .. }));
         assert!(started.elapsed() < Duration::from_secs(30), "{:?}", started.elapsed());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn live_dropbear_saves_a_large_file() {
+        let target = "/home/sftponly/rw/big.php";
+        std::fs::write(target, "old\n").unwrap();
+        let profile = Profile {
+            name: "dropbear".into(),
+            host: "127.0.0.1".into(),
+            port: 2224,
+            user: "sftponly".into(),
+            password: "test123".into(),
+            ..Default::default()
+        };
+        let conn = connect(&profile, None, || {});
+        let next = || loop {
+            match conn.rx.recv_timeout(Duration::from_secs(60)).expect("ответ сервера") {
+                Event::Log(..) | Event::Progress { .. } => {}
+                event => break event,
+            }
+        };
+        loop {
+            match next() {
+                Event::HostKey { .. } => conn.tx.send(Cmd::TrustHost(true)).unwrap(),
+                Event::Connected { .. } => break,
+                Event::Closed(e) | Event::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        let data: Vec<u8> = (0..120_000u32).map(|i| b"abcdefghij\n"[(i % 11) as usize]).collect();
+        let started = std::time::Instant::now();
+        conn.tx
+            .send(Cmd::Upload {
+                path: target.into(),
+                data: data.clone(),
+                doc: None,
+                expect: None,
+            })
+            .unwrap();
+        let event = next();
+        if let Event::Failed { error, .. } | Event::Error(error) | Event::Closed(error) = &event {
+            panic!("{error}");
+        }
+        assert!(matches!(event, Event::Uploaded { .. }));
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert_eq!(std::fs::read(target).unwrap(), data);
     }
 
     #[cfg(unix)]

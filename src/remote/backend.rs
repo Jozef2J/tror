@@ -5,6 +5,7 @@ pub(super) enum Backend {
         session: ssh2::Session,
         sftp: ssh2::Sftp,
         socket: Option<TcpStream>,
+        chunk: usize,
     },
     Ftp(Box<suppaftp::NativeTlsFtpStream>),
 }
@@ -27,22 +28,15 @@ pub(super) fn connect_sftp(
     let stream = tcp(profile)?;
     let socket = stream.try_clone().ok();
     let (session, accepted) = handshake(stream, profile, known, &confirm)?;
-    let sftp = session
-        .sftp()
-        .map_err(|e| tf!("SFTP недоступен: {e}", "SFTP is not available: {e}"))?;
-    let home = sftp
-        .realpath(Path::new("."))
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| "/".into());
-    Ok((
-        Backend::Sftp {
-            session,
-            sftp,
-            socket,
-        },
-        home,
-        accepted,
-    ))
+    let backend = Backend::sftp(session, socket)?;
+    let home = match &backend {
+        Backend::Sftp { sftp, .. } => sftp
+            .realpath(Path::new("."))
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| "/".into()),
+        Backend::Ftp(_) => "/".into(),
+    };
+    Ok((backend, home, accepted))
 }
 
 pub(super) fn tls_connector(profile: &Profile) -> Result<suppaftp::NativeTlsConnector, String> {
@@ -132,6 +126,32 @@ impl Read for Counting<'_> {
 }
 
 impl Backend {
+    pub(super) fn sftp(session: ssh2::Session, socket: Option<TcpStream>) -> Result<Backend, String> {
+        let window = session
+            .channel_session()
+            .ok()
+            .map(|mut channel| {
+                let window = channel.write_window().remaining as usize;
+                let _ = channel.close();
+                window
+            });
+        let chunk = match window {
+            Some(window) if window > CHUNK + 1024 => CHUNK,
+            Some(window) => window.saturating_sub(1024).max(1024),
+            None => 16 * 1024,
+        };
+        trace::client(format!("[SFTP] write window {}, chunk {chunk} bytes", window.map_or("?".into(), |w| w.to_string())));
+        let sftp = session
+            .sftp()
+            .map_err(|e| tf!("SFTP недоступен: {e}", "SFTP is not available: {e}"))?;
+        Ok(Backend::Sftp {
+            session,
+            sftp,
+            socket,
+            chunk,
+        })
+    }
+
     pub(super) fn list(&mut self, path: &str) -> Result<Vec<Entry>, String> {
         let mut entries = match self {
             Backend::Sftp { sftp, .. } => sftp
@@ -231,10 +251,10 @@ impl Backend {
     ) -> Result<(), String> {
         let total = data.len() as u64;
         match self {
-            Backend::Sftp { sftp, .. } => {
+            Backend::Sftp { sftp, chunk, .. } => {
                 let mut file = sftp.create(Path::new(path)).map_err(|e| e.to_string())?;
                 let mut done = 0;
-                for chunk in data.chunks(CHUNK) {
+                for chunk in data.chunks(*chunk) {
                     file.write_all(chunk).map_err(|e| e.to_string())?;
                     done += chunk.len() as u64;
                     progress(done, total);
@@ -511,6 +531,18 @@ impl Backend {
     pub(super) fn abandon(&self) {
         if let Backend::Sftp { session, .. } = self {
             session.set_timeout(1);
+        }
+    }
+
+    pub(super) fn close(&mut self) {
+        match self {
+            Backend::Sftp { session, .. } => {
+                session.set_timeout(3000);
+                let _ = session.disconnect(None, "bye", None);
+            }
+            Backend::Ftp(ftp) => {
+                let _ = ftp.quit();
+            }
         }
     }
 

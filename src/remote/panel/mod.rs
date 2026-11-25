@@ -96,10 +96,14 @@ struct ProfileEditor {
     note: Option<Result<String, String>>,
 }
 
+const SAVER_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+
 struct Saver {
     conn: Connection,
     connected: bool,
     queue: Vec<Cmd>,
+    waiting: usize,
+    idle: Option<std::time::Instant>,
 }
 
 struct Transfer {
@@ -744,6 +748,8 @@ impl RemotePanel {
         }
         match &mut self.saver {
             Some(saver) if saver.conn.profile == profile => {
+                saver.waiting += 1;
+                saver.idle = None;
                 if saver.connected {
                     let _ = saver.conn.tx.send(cmd);
                 } else {
@@ -758,6 +764,8 @@ impl RemotePanel {
                     conn: remote::connect(target, known, move || ctx.request_repaint()),
                     connected: false,
                     queue: vec![cmd],
+                    waiting: 1,
+                    idle: None,
                 });
             }
         }
@@ -851,7 +859,18 @@ impl RemotePanel {
         };
         let (events, dead) = Self::drain(&saver.conn);
         let mut logs = Vec::new();
-        let close = dead;
+        for event in &events {
+            if matches!(
+                event,
+                Event::Uploaded { .. } | Event::Conflict { .. } | Event::Error(_) | Event::Failed { .. }
+            ) {
+                saver.waiting = saver.waiting.saturating_sub(1);
+            }
+        }
+        if saver.waiting == 0 && saver.idle.is_none() {
+            saver.idle = Some(std::time::Instant::now());
+        }
+        let close = dead || saver.idle.is_some_and(|t| t.elapsed() > SAVER_IDLE);
         for event in events {
             match event {
                 Event::Connected { .. } => {
@@ -1552,6 +1571,7 @@ impl RemotePanel {
         if ui.add(Button::new(label)).clicked() {
             if active {
                 self.disconnect();
+                self.saver = None;
             } else {
                 self.connect(&ctx);
             }

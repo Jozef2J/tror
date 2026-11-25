@@ -325,12 +325,7 @@ pub fn search(
                     if let Some(hits) = search_remote_shell(&session, &params, &flag, &emit)? {
                         return Ok((hits, tr!("поиск командами сервера")));
                     }
-                    let sftp = session.sftp().map_err(|e| e.to_string())?;
-                    let mut backend = Backend::Sftp {
-                        session,
-                        sftp,
-                        socket: None,
-                    };
+                    let mut backend = Backend::sftp(session, None)?;
                     Ok((
                         search_walk(&mut backend, &params, &flag, &emit),
                         tr!("обход каталогов"),
