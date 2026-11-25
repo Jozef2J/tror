@@ -1,14 +1,14 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
 
 PackageIdentifier: Jozef2J.TrorPad
-PackageVersion: 0.30.1
+PackageVersion: 0.30.2
 InstallerType: inno
 Scope: machine
 UpgradeBehavior: install
-ReleaseDate: 2026-11-24
+ReleaseDate: 2026-11-25
 Installers:
 - Architecture: x64
-  InstallerUrl: https://github.com/Jozef2J/tror/releases/download/v0.30.1/trorpad-setup.exe
-  InstallerSha256: 0A37FF9C0A265B73121A7F4A7A598D34D269E5EA6E422513DB8C112375A68573
+  InstallerUrl: https://github.com/Jozef2J/tror/releases/download/v0.30.2/trorpad-setup.exe
+  InstallerSha256: 5484664362C47F2EB1AF0DB0EC175203786025A26F80FEE543DEBC5A0DA0A37B
 ManifestType: installer
 ManifestVersion: 1.9.0
