@@ -497,6 +497,12 @@ impl Backend {
         }
     }
 
+    pub(super) fn abandon(&self) {
+        if let Backend::Sftp { session, .. } = self {
+            session.set_timeout(1);
+        }
+    }
+
     pub(super) fn ping(&mut self) -> Result<(), String> {
         match self {
             Backend::Sftp { sftp, .. } => sftp

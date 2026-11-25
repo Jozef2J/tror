@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::trace;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
-const IO_TIMEOUT_MS: u32 = 30_000;
+const IO_TIMEOUT_MS: u32 = 20_000;
 const KEEPALIVE: Duration = Duration::from_secs(25);
 const CHECK_LIMIT: u64 = 8 * 1024 * 1024;
 const KEEP_BACKUPS: usize = 10;
@@ -460,6 +460,13 @@ pub fn extract_command(path: &str, dest: Option<&str>) -> Option<String> {
     Some(format!("mkdir -p {dest} && cd {dest} && {run}"))
 }
 
+fn timed_out(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    ["timed out", "session(-9)", "timeout", "os error 11)", "os error 35)", "os error 10060)"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
 fn serve(
     profile: Profile,
     known: Option<String>,
@@ -534,6 +541,7 @@ fn serve(
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if alive && backend.ping().is_err() {
                     alive = false;
+                    backend.abandon();
                     log(format!("{tag} idle connection closed by server"), false);
                 }
                 continue;
@@ -552,10 +560,12 @@ fn serve(
         } else {
             Err("connection closed".into())
         };
-        if result.is_err() && (!alive || backend.ping().is_err()) {
+        let stalled = result.as_ref().is_err_and(|e| timed_out(e));
+        if result.is_err() && (!alive || stalled || backend.ping().is_err()) {
             if let Err(e) = &result {
                 log(format!("{tag} {e}"), true);
             }
+            backend.abandon();
             log(format!("{tag} connection lost, reconnecting"), false);
             match open(known.as_deref()) {
                 Ok((fresh, _, fingerprint)) => {
@@ -1077,6 +1087,54 @@ mod tests {
             .send(Cmd::Download(join(&www, "missing.txt")))
             .unwrap();
         assert!(matches!(next(), Event::Failed { .. }));
+    }
+
+    #[test]
+    fn stalls_are_recognised() {
+        assert!(timed_out("[Session(-9)] Timed out waiting on socket"));
+        assert!(timed_out("Resource temporarily unavailable (os error 11)"));
+        assert!(timed_out("Попытка установить соединение была безуспешной (os error 10060)"));
+        assert!(!timed_out("[SFTP(2)] no such file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn live_stalled_server_reconnects_quickly() {
+        let profile = Profile {
+            name: "p".into(),
+            host: "127.0.0.1".into(),
+            port: 2222,
+            user: "sftpu".into(),
+            password: "test123".into(),
+            ..Default::default()
+        };
+        let conn = connect(&profile, None, || {});
+        loop {
+            match conn.rx.recv_timeout(Duration::from_secs(20)).unwrap() {
+                Event::HostKey { .. } => conn.tx.send(Cmd::TrustHost(true)).unwrap(),
+                Event::Connected { .. } => break,
+                _ => {}
+            }
+        }
+        let signal = |sig: &str| {
+            let found = std::process::Command::new("pgrep").args(["-u", "sftpu"]).output().unwrap();
+            for pid in String::from_utf8_lossy(&found.stdout).split_whitespace() {
+                std::process::Command::new("kill").args([sig, pid]).status().unwrap();
+            }
+        };
+        signal("-STOP");
+        let started = std::time::Instant::now();
+        conn.tx.send(Cmd::List("/home/sftpu/www".into())).unwrap();
+        let event = loop {
+            match conn.rx.recv_timeout(Duration::from_secs(120)).unwrap() {
+                Event::Log(..) | Event::Progress { .. } => {}
+                event => break event,
+            }
+        };
+        signal("-CONT");
+        assert!(matches!(event, Event::Listing { .. }));
+        assert!(started.elapsed() < Duration::from_secs(30), "{:?}", started.elapsed());
     }
 
     #[cfg(unix)]
