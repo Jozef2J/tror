@@ -34,6 +34,9 @@ jobs:
           else
             deslop-please 2>&1 | tee deslop.txt || true
             deslop-please --update-allow deslop-allow.txt > /dev/null 2>&1 || true
+            echo "----- allow list -----"
+            cat deslop-allow.txt || true
+            echo "----- end -----"
           fi
       - if: always()
         run: |
