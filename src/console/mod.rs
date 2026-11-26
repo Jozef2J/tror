@@ -12,7 +12,7 @@ use eframe::egui::{
 };
 
 use crate::widgets::{dialog, dialog_button, port_field};
-use crate::remote::{self, Shell, ShellCmd, ShellEvent, Store, TermProfile, TermProtocol};
+use crate::remote::{self, Profile, Shell, ShellCmd, ShellEvent, Store, TermProfile, TermProtocol};
 use terminal::Screen;
 use crate::theme::Palette;
 
@@ -189,11 +189,10 @@ impl ConsolePanel {
     pub fn fonts(&self) -> Vec<PathBuf> {
         let mut fonts: Vec<PathBuf> = self
             .store
-            .terminals
-            .iter()
+            .iter::<TermProfile>()
             .chain(self.sessions.iter().map(|s| &s.profile))
             .map(|p| p.font.trim())
-            .chain(self.store.profiles.iter().map(|p| p.term_font.trim()))
+            .chain(self.store.iter::<Profile>().map(|p| p.term_font.trim()))
             .filter(|f| !f.is_empty())
             .map(PathBuf::from)
             .collect();
@@ -203,7 +202,7 @@ impl ConsolePanel {
     }
 
     fn known(&self, profile: &TermProfile) -> Option<String> {
-        self.store.known_hosts.get(&profile.address()).cloned()
+        self.store.known_host(&profile.address())
     }
 
     pub fn open(&mut self, profile: TermProfile, ctx: &egui::Context) {
@@ -326,10 +325,10 @@ impl ConsolePanel {
             }
         }
         if !trusted.is_empty() {
-            for (host, print) in trusted {
-                self.store.known_hosts.insert(host, print);
-            }
-            if let Err(e) = self.store.save() {
+            let saved: Result<(), String> = trusted
+                .into_iter()
+                .try_for_each(|(host, print)| self.store.trust_host(host, print));
+            if let Err(e) = saved {
                 notes.push(tf!("Не удалось сохранить ключ: {e}", "Could not save the key: {e}"));
             }
         }
@@ -374,14 +373,12 @@ impl ConsolePanel {
         ui.separator();
         let names: Vec<(String, String)> = self
             .store
-            .terminals
-            .iter()
+            .iter::<TermProfile>()
             .map(|p| (p.name.clone(), p.protocol.label().to_owned()))
             .collect();
         let hosts: Vec<_> = self
             .store
-            .profiles
-            .iter()
+            .iter::<Profile>()
             .filter(|p| p.protocol == remote::Protocol::Sftp)
             .cloned()
             .collect();
@@ -415,7 +412,7 @@ impl ConsolePanel {
         use crate::widgets::ProfileAction;
         match action {
             ProfileAction::Select(i) => {
-                if let Some(profile) = self.store.terminals.get(i).cloned() {
+                if let Some(profile) = self.store.get::<TermProfile>(i).cloned() {
                     self.open(profile, ctx);
                 }
             }
@@ -426,23 +423,17 @@ impl ConsolePanel {
                 }
             }
             ProfileAction::Rename(i, name) => {
-                if let Some(profile) = self.store.terminals.get_mut(i) {
-                    profile.name = name;
-                    let _ = self.store.save();
-                }
+                let _ = self.store.rename::<TermProfile>(i, name);
             }
             ProfileAction::Delete(i) => {
-                if i < self.store.terminals.len() {
-                    self.store.terminals.remove(i);
-                    let _ = self.store.save();
-                }
+                let _ = self.store.remove::<TermProfile>(i);
             }
             ProfileAction::Add => self.open_editor(true),
         }
     }
 
     fn open_editor(&mut self, new: bool) {
-        let mut drafts = self.store.terminals.clone();
+        let mut drafts = self.store.drafts::<TermProfile>();
         if new || drafts.is_empty() {
             drafts.push(TermProfile {
                 name: tf!("Сервер {}", "Server {}", drafts.len() + 1),
@@ -470,8 +461,7 @@ impl ConsolePanel {
         let ctx = ui.ctx().clone();
         let names: Vec<(String, String)> = self
             .store
-            .terminals
-            .iter()
+            .iter::<TermProfile>()
             .map(|p| (p.name.clone(), p.protocol.label().to_owned()))
             .collect();
         if let Some(action) =
@@ -837,30 +827,22 @@ impl ConsolePanel {
         session.profile.font_size = size;
         let name = session.profile.name.clone();
         let saved = match session.profile.origin.clone() {
-            Some(host) => self
-                .store
-                .profiles
-                .iter_mut()
-                .find(|p| p.name == host)
-                .map(|p| {
-                    p.term_theme = theme;
-                    p.term_font_size = size;
-                }),
-            None => self
-                .store
-                .terminals
-                .iter_mut()
-                .find(|p| p.name == name)
-                .map(|p| {
-                    p.theme = theme;
-                    p.font_size = size;
-                }),
+            Some(host) => self.store.update::<Profile>(&host, |p| {
+                p.term_theme = theme;
+                p.term_font_size = size;
+            }),
+            None => self.store.update::<TermProfile>(&name, |p| {
+                p.theme = theme;
+                p.font_size = size;
+            }),
         };
-        if saved.is_some() {
-            if let Err(e) = self.store.save() {
+        match saved {
+            Ok(false) => {}
+            Ok(true) => self.store_seen = Store::generation(),
+            Err(e) => {
                 crate::trace::popup(tf!("Оформление не сохранено: {e}", "Appearance not saved: {e}"), false);
+                self.store_seen = Store::generation();
             }
-            self.store_seen = Store::generation();
         }
     }
 
@@ -887,7 +869,7 @@ impl ConsolePanel {
                     if ui.add(Button::new(tr!("Локальный терминал"))).clicked() {
                         open = Some(self.local_profile());
                     }
-                    let mut order: Vec<_> = self.store.terminals.iter().enumerate().collect();
+                    let mut order: Vec<_> = self.store.iter::<TermProfile>().enumerate().collect();
                     order.sort_by_cached_key(|(_, p)| p.name.to_lowercase());
                     for (index, profile) in order {
                         let text = format!("{}  ·  {}", profile.name, profile.protocol.label());
@@ -904,8 +886,7 @@ impl ConsolePanel {
                     }
                     for host in self
                         .store
-                        .profiles
-                        .iter()
+                        .iter::<Profile>()
                         .filter(|p| p.protocol == remote::Protocol::Sftp)
                     {
                         let text = tf!("{}  ·  SFTP-профиль", "{}  ·  SFTP profile", host.name);
@@ -951,15 +932,11 @@ impl ConsolePanel {
             let look = match &session.profile.origin {
                 Some(host) => self
                     .store
-                    .profiles
-                    .iter()
-                    .find(|p| p.name == *host)
+                    .find::<Profile>(host)
                     .map(|p| (p.term_theme.clone(), p.term_font.clone(), p.term_font_size)),
                 None => self
                     .store
-                    .terminals
-                    .iter()
-                    .find(|p| p.name == session.profile.name)
+                    .find::<TermProfile>(&session.profile.name)
                     .map(|p| (p.theme.clone(), p.font.clone(), p.font_size)),
             };
             if let Some((theme, font, size)) = look {
@@ -1220,7 +1197,7 @@ impl ConsolePanel {
             && let Some(editor) = &mut self.editor
             && let Some(profile) = editor.drafts.get(editor.index).cloned()
         {
-            let known = self.store.known_hosts.get(&profile.address()).cloned();
+            let known = self.store.known_host(&profile.address());
             editor.result = None;
             editor.probe = Some(remote::probe(move || test_terminal(&profile, known)));
         }
@@ -1229,7 +1206,7 @@ impl ConsolePanel {
             && editor
                 .drafts
                 .get(editor.index)
-                .is_some_and(|p| p.host.trim().is_empty() && !self.store.terminals.contains(p))
+                .is_some_and(|p| p.host.trim().is_empty() && !self.store.iter::<TermProfile>().any(|q| q == p))
         {
             editor.result = Some(Err(tr!("Укажите сервер").into()));
             save = false;
@@ -1237,12 +1214,11 @@ impl ConsolePanel {
         if save {
             if let Some(mut editor) = self.editor.take() {
                 let chosen = editor.drafts.get(editor.index).cloned();
-                let known = &self.store.terminals;
+                let store = &self.store;
                 editor
                     .drafts
-                    .retain(|p| !p.host.trim().is_empty() || known.contains(p));
-                self.store.terminals = editor.drafts;
-                if let Err(e) = self.store.save() {
+                    .retain(|p| !p.host.trim().is_empty() || store.iter::<TermProfile>().any(|q| q == p));
+                if let Err(e) = self.store.replace(editor.drafts) {
                     crate::trace::popup(tf!("Подключения не сохранены: {e}", "Connections not saved: {e}"), false);
                 }
                 if connect && let Some(profile) = chosen {

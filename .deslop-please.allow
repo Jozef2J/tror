@@ -67,14 +67,6 @@ field-leak trorpad::remote::panel::RemotePanel::store
 field-leak trorpad::remote::panel::RemotePanel::tree
 field-leak trorpad::remote::panel::RemotePanel::visible
 field-leak trorpad::remote::panel::RemotePanel::want_search
-field-leak trorpad::remote::store::Store::databases
-field-leak trorpad::remote::store::Store::hide_size
-field-leak trorpad::remote::store::Store::known_hosts
-field-leak trorpad::remote::store::Store::profiles
-field-leak trorpad::remote::store::Store::search_excludes
-field-leak trorpad::remote::store::Store::show_date
-field-leak trorpad::remote::store::Store::show_perm
-field-leak trorpad::remote::store::Store::terminals
 field-leak trorpad::text::complete::Completion::hint
 field-leak trorpad::text::complete::Completion::items
 field-leak trorpad::text::complete::Completion::selected

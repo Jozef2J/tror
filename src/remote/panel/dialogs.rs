@@ -96,8 +96,7 @@ impl RemotePanel {
         let mut cancel = false;
         let sftp = self
             .store
-            .profiles
-            .get(self.selected)
+            .get::<Profile>(self.selected)
             .is_some_and(|p| p.protocol == Protocol::Sftp);
         let modal = dialog(("tror_remote_attrs", self.id), pal).show(ctx, |ui| {
             ui.set_width(400.0);
@@ -710,7 +709,7 @@ impl RemotePanel {
             && let Some(profile) = editor.drafts.get(editor.index).cloned()
         {
             let key = format!("{}:{}", profile.host.trim(), profile.port);
-            let known = self.store.known_hosts.get(&key).cloned();
+            let known = self.store.known_host(&key);
             editor.result = None;
             editor.probe = Some(remote::probe(move || remote::test(&profile, known)));
         }
@@ -719,7 +718,7 @@ impl RemotePanel {
             && editor
                 .drafts
                 .get(editor.index)
-                .is_some_and(|p| p.host.trim().is_empty() && !self.store.profiles.contains(p))
+                .is_some_and(|p| p.host.trim().is_empty() && !self.store.iter::<Profile>().any(|q| q == p))
         {
             editor.result = Some(Err(tr!("Укажите сервер").into()));
             save = false;
@@ -727,15 +726,14 @@ impl RemotePanel {
         if save {
             if let Some(mut editor) = self.editor.take() {
                 let chosen = editor.drafts.get(editor.index).cloned();
-                let known = &self.store.profiles;
+                let store = &self.store;
                 editor
                     .drafts
-                    .retain(|p| !p.host.trim().is_empty() || known.contains(p));
+                    .retain(|p| !p.host.trim().is_empty() || store.iter::<Profile>().any(|q| q == p));
                 self.selected = chosen
                     .and_then(|c| editor.drafts.iter().position(|p| *p == c))
                     .unwrap_or(0);
-                self.store.profiles = editor.drafts;
-                if let Err(e) = self.store.save() {
+                if let Err(e) = self.store.replace(editor.drafts) {
                     self.busy = Some(tf!("Профили не сохранены: {e}", "Profiles not saved: {e}"));
                 }
             }

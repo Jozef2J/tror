@@ -7,6 +7,7 @@ pub mod vault;
 
 mod backend;
 mod database;
+pub mod masked;
 mod search;
 mod ssh;
 mod store;

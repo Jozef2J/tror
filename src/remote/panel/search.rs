@@ -33,10 +33,7 @@ impl RemotePanel {
         self.search_status = tr!("поиск…").into();
         self.push_log(tf!("Поиск «{query}» в {root}", "Searching \"{query}\" in {root}"), false);
         self.search_job = Some(job);
-        if self.store.search_excludes.as_deref() != Some(self.search_excludes.as_str()) {
-            self.store.search_excludes = Some(self.search_excludes.clone());
-            let _ = self.store.save();
-        }
+        let _ = self.store.set_excludes(self.search_excludes.clone());
     }
 
     pub fn search_ui(&mut self, ui: &mut Ui, pal: &Palette) {

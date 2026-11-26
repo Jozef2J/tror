@@ -1,7 +1,5 @@
 use super::*;
 
-pub(super) const MASK: &[u8] = b"tror-profile-mask";
-
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
 pub enum Protocol {
     #[default]
@@ -38,42 +36,6 @@ impl Protocol {
 
     pub fn tls(self) -> bool {
         matches!(self, Protocol::Ftps | Protocol::FtpsImplicit)
-    }
-}
-
-pub mod masked {
-    use super::MASK;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn hide(plain: &str) -> String {
-        plain
-            .bytes()
-            .enumerate()
-            .map(|(i, b)| format!("{:02x}", b ^ MASK[i % MASK.len()]))
-            .collect()
-    }
-
-    pub fn reveal(hidden: &str) -> Option<String> {
-        if !hidden.len().is_multiple_of(2) || !hidden.is_ascii() {
-            return None;
-        }
-        let bytes: Option<Vec<u8>> = (0..hidden.len() / 2)
-            .map(|i| {
-                u8::from_str_radix(&hidden[i * 2..i * 2 + 2], 16)
-                    .ok()
-                    .map(|b| b ^ MASK[i % MASK.len()])
-            })
-            .collect();
-        String::from_utf8(bytes?).ok()
-    }
-
-    pub fn serialize<S: Serializer>(plain: &str, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&hide(plain))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-        let hidden = String::deserialize(d)?;
-        Ok(reveal(&hidden).unwrap_or_default())
     }
 }
 
@@ -252,7 +214,186 @@ impl Store {
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
+
+    pub fn get<T>(&self, index: usize) -> Option<&T>
+    where
+        Self: Shelf<T>,
+    {
+        self.shelf().get(index)
+    }
+
+    pub fn find<T>(&self, name: &str) -> Option<&T>
+    where
+        Self: Shelf<T>,
+    {
+        self.shelf().iter().find(|item| Self::name_of(item) == name)
+    }
+
+    pub fn position<T>(&self, name: &str) -> Option<usize>
+    where
+        Self: Shelf<T>,
+    {
+        self.shelf().iter().position(|item| Self::name_of(item) == name)
+    }
+
+    pub fn count<T>(&self) -> usize
+    where
+        Self: Shelf<T>,
+    {
+        self.shelf().len()
+    }
+
+    pub fn iter<T>(&self) -> std::slice::Iter<'_, T>
+    where
+        Self: Shelf<T>,
+    {
+        self.shelf().iter()
+    }
+
+    pub fn drafts<T: Clone>(&self) -> Vec<T>
+    where
+        Self: Shelf<T>,
+    {
+        self.shelf().clone()
+    }
+
+    pub fn replace<T>(&mut self, items: Vec<T>) -> Result<(), String>
+    where
+        Self: Shelf<T>,
+    {
+        *self.shelf_mut() = items;
+        self.save()
+    }
+
+    pub fn rename<T>(&mut self, index: usize, name: String) -> Result<(), String>
+    where
+        Self: Shelf<T>,
+    {
+        let Some(item) = self.shelf_mut().get_mut(index) else {
+            return Ok(());
+        };
+        Self::set_name(item, name);
+        self.save()
+    }
+
+    pub fn update<T>(&mut self, name: &str, change: impl FnOnce(&mut T)) -> Result<bool, String>
+    where
+        Self: Shelf<T>,
+    {
+        let Some(item) = self.shelf_mut().iter_mut().find(|item| Self::name_of(item) == name) else {
+            return Ok(false);
+        };
+        change(item);
+        self.save().map(|_| true)
+    }
+
+    pub fn remove<T>(&mut self, index: usize) -> Result<(), String>
+    where
+        Self: Shelf<T>,
+    {
+        if index >= self.shelf().len() {
+            return Ok(());
+        }
+        self.shelf_mut().remove(index);
+        self.save()
+    }
+
+    pub fn known_host(&self, address: &str) -> Option<String> {
+        self.known_hosts.get(address).cloned()
+    }
+
+    pub fn host_with_key(&self, name: &str) -> Option<(Profile, Option<String>)> {
+        let host = self.find::<Profile>(name)?;
+        let key = format!("{}:{}", host.host.trim(), host.port);
+        Some((host.clone(), self.known_host(&key)))
+    }
+
+    pub fn trust_host(&mut self, address: String, fingerprint: String) -> Result<(), String> {
+        self.known_hosts.insert(address, fingerprint);
+        self.save()
+    }
+
+    pub fn set_columns(&mut self, size: bool, date: bool, perm: bool) -> Result<(), String> {
+        self.hide_size = !size;
+        self.show_date = date;
+        self.show_perm = perm;
+        self.save()
+    }
+
+    pub fn excludes(&self) -> Option<&str> {
+        self.search_excludes.as_deref()
+    }
+
+    pub fn set_excludes(&mut self, excludes: String) -> Result<(), String> {
+        if self.search_excludes.as_deref() == Some(excludes.as_str()) {
+            return Ok(());
+        }
+        self.search_excludes = Some(excludes);
+        self.save()
+    }
 }
+
+pub trait Shelf<T> {
+    fn shelf(&self) -> &Vec<T>;
+    fn shelf_mut(&mut self) -> &mut Vec<T>;
+    fn name_of(item: &T) -> &str;
+    fn set_name(item: &mut T, name: String);
+}
+
+impl Shelf<Profile> for Store {
+    fn shelf(&self) -> &Vec<Profile> {
+        &self.profiles
+    }
+
+    fn shelf_mut(&mut self) -> &mut Vec<Profile> {
+        &mut self.profiles
+    }
+
+    fn name_of(item: &Profile) -> &str {
+        &item.name
+    }
+
+    fn set_name(item: &mut Profile, name: String) {
+        item.name = name;
+    }
+}
+
+impl Shelf<TermProfile> for Store {
+    fn shelf(&self) -> &Vec<TermProfile> {
+        &self.terminals
+    }
+
+    fn shelf_mut(&mut self) -> &mut Vec<TermProfile> {
+        &mut self.terminals
+    }
+
+    fn name_of(item: &TermProfile) -> &str {
+        &item.name
+    }
+
+    fn set_name(item: &mut TermProfile, name: String) {
+        item.name = name;
+    }
+}
+
+impl Shelf<DbProfile> for Store {
+    fn shelf(&self) -> &Vec<DbProfile> {
+        &self.databases
+    }
+
+    fn shelf_mut(&mut self) -> &mut Vec<DbProfile> {
+        &mut self.databases
+    }
+
+    fn name_of(item: &DbProfile) -> &str {
+        &item.name
+    }
+
+    fn set_name(item: &mut DbProfile, name: String) {
+        item.name = name;
+    }
+}
+
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
 pub enum TermProtocol {

@@ -358,16 +358,14 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
             Ok(if method == "hosts" {
                 Value::Array(
                     store
-                        .profiles
-                        .iter()
+                        .iter::<crate::remote::Profile>()
                         .map(|p| json!({"name": p.name, "protocol": p.protocol.label(), "host": p.host, "directory": p.directory}))
                         .collect(),
                 )
             } else {
                 Value::Array(
                     store
-                        .databases
-                        .iter()
+                        .iter::<crate::remote::DbProfile>()
                         .map(|p| json!({"name": p.name, "kind": p.kind.label()}))
                         .collect(),
                 )
@@ -377,21 +375,15 @@ fn request(host: &mut Host, method: &str, params: &Value) -> Result<Value, Strin
             allowed(host, "hosts")?;
             let store = store();
             let name = s("profile");
-            let profile = store
-                .profiles
-                .iter()
-                .find(|p| p.name == name)
+            let (profile, known) = store
+                .host_with_key(&name)
                 .ok_or_else(|| tf!("профиль «{name}» не найден", "profile \"{name}\" not found"))?;
-            let known = store
-                .known_hosts
-                .get(&format!("{}:{}", profile.host.trim(), profile.port))
-                .cloned();
             let op = match method {
                 "remote_list" => crate::remote::OneShot::List(s("path")),
                 "remote_read" => crate::remote::OneShot::Read(s("path")),
                 _ => crate::remote::OneShot::Write(s("path"), s("text").into_bytes()),
             };
-            crate::remote::one_shot(profile, known.as_deref(), op)
+            crate::remote::one_shot(&profile, known.as_deref(), op)
         }
         "db_query" => {
             allowed(host, "db")?;

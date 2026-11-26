@@ -115,20 +115,16 @@ struct Conn {
 
 pub fn one_shot(store: &Store, name: &str, sql: &str) -> Result<serde_json::Value, String> {
     let profile = store
-        .databases
-        .iter()
-        .find(|p| p.name == name)
+        .find::<DbProfile>(name)
         .cloned()
         .ok_or_else(|| tf!("подключение «{name}» не найдено", "connection \"{name}\" not found"))?;
     let mut ssh = None;
     if !profile.tunnel.is_empty() && profile.kind != DbKind::Sqlite {
-        let host = store
-            .profiles
-            .iter()
-            .find(|p| p.name == profile.tunnel)
-            .ok_or_else(|| tf!("хост «{}» для туннеля не найден", "host \"{}\" for the tunnel not found", profile.tunnel))?;
-        let key = format!("{}:{}", host.host.trim(), host.port);
-        ssh = Some((host.clone(), store.known_hosts.get(&key).cloned()));
+        ssh = Some(
+            store
+                .host_with_key(&profile.tunnel)
+                .ok_or_else(|| tf!("хост «{}» для туннеля не найден", "host \"{}\" for the tunnel not found", profile.tunnel))?,
+        );
     }
     let (mut engine, _, _tunnel) = link(&profile, &ssh)?;
     let table = engine.query(sql)?;
@@ -444,18 +440,17 @@ impl DbPanel {
     }
 
     fn connect(&mut self, store: &Store, ctx: &egui::Context) {
-        let Some(profile) = store.databases.get(self.selected).cloned() else {
+        let Some(profile) = store.get::<DbProfile>(self.selected).cloned() else {
             return;
         };
         let mut ssh = None;
         if !profile.tunnel.is_empty() && profile.kind != DbKind::Sqlite {
-            let Some(host) = store.profiles.iter().find(|p| p.name == profile.tunnel) else {
+            let Some(host) = store.host_with_key(&profile.tunnel) else {
                 self.status = tf!("Хост «{}» для туннеля не найден", "Host \"{}\" for the tunnel not found", profile.tunnel);
                 self.error = true;
                 return;
             };
-            let key = format!("{}:{}", host.host.trim(), host.port);
-            ssh = Some((host.clone(), store.known_hosts.get(&key).cloned()));
+            ssh = Some(host);
         }
         let (tx, cmds) = channel();
         let (events, rx) = channel();
@@ -632,7 +627,7 @@ impl DbPanel {
         let ctx = ui.ctx().clone();
         self.poll();
         ui.add_space(8.0);
-        if store.databases.is_empty() {
+        if store.count::<DbProfile>() == 0 {
             crate::widgets::wrapped_row(ui, 8.0, |ui| {
                 ui.label(RichText::new(tr!("Подключений к базам пока нет.")).color(pal.subtext));
                 if ui
@@ -644,11 +639,10 @@ impl DbPanel {
             });
             return;
         }
-        self.selected = self.selected.min(store.databases.len() - 1);
+        self.selected = self.selected.min(store.count::<DbProfile>() - 1);
         let active = self.conn.is_some();
         let names: Vec<(String, String)> = store
-            .databases
-            .iter()
+            .iter::<DbProfile>()
             .map(|p| (p.name.clone(), p.kind.label().to_owned()))
             .collect();
         let list_id = egui::Id::unique("tror_db_profile");
@@ -697,17 +691,13 @@ impl DbPanel {
                 self.open_editor(store, false);
             }
             Some(crate::widgets::ProfileAction::Rename(i, name)) => {
-                if let Some(profile) = store.databases.get_mut(i) {
-                    profile.name = name;
-                    let _ = store.save();
-                }
+                let _ = store.rename::<DbProfile>(i, name);
             }
             Some(crate::widgets::ProfileAction::Delete(i)) => {
-                if i < store.databases.len() && !active {
-                    store.databases.remove(i);
-                    let _ = store.save();
-                    self.selected = self.selected.min(store.databases.len().saturating_sub(1));
-                    if store.databases.is_empty() {
+                if i < store.count::<DbProfile>() && !active {
+                    let _ = store.remove::<DbProfile>(i);
+                    self.selected = self.selected.min(store.count::<DbProfile>().saturating_sub(1));
+                    if store.count::<DbProfile>() == 0 {
                         return;
                     }
                 }

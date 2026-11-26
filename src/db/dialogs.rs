@@ -123,7 +123,7 @@ impl DbPanel {
                                         String::new(),
                                         tr!("нет, подключаться напрямую"),
                                     );
-                                    for host in &store.profiles {
+                                    for host in store.iter::<Profile>() {
                                         if host.protocol == remote::Protocol::Sftp {
                                             ui.selectable_value(
                                                 &mut p.tunnel,
@@ -204,8 +204,7 @@ impl DbPanel {
                         );
                     } else {
                         let sftp_hosts = store
-                            .profiles
-                            .iter()
+                            .iter::<Profile>()
                             .filter(|h| h.protocol == remote::Protocol::Sftp)
                             .count();
                         let default_port = p.kind.default_port();
@@ -251,12 +250,8 @@ impl DbPanel {
         if test {
             let profile = editor.drafts.get(editor.index).cloned().unwrap_or_default();
             let ssh = (!profile.tunnel.is_empty() && profile.kind != DbKind::Sqlite)
-                .then(|| store.profiles.iter().find(|p| p.name == profile.tunnel))
-                .flatten()
-                .map(|host| {
-                    let key = format!("{}:{}", host.host.trim(), host.port);
-                    (host.clone(), store.known_hosts.get(&key).cloned())
-                });
+                .then(|| store.host_with_key(&profile.tunnel))
+                .flatten();
             let (tx, rx) = channel();
             let ctx = ctx.clone();
             std::thread::spawn(move || {
@@ -270,9 +265,9 @@ impl DbPanel {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if save && let Some(editor) = self.editor.take() {
-            store.databases = editor.drafts;
-            self.selected = editor.index.min(store.databases.len().saturating_sub(1));
-            if let Err(e) = store.save() {
+            let saved = store.replace(editor.drafts);
+            self.selected = editor.index.min(store.count::<DbProfile>().saturating_sub(1));
+            if let Err(e) = saved {
                 self.status = tf!("Не удалось сохранить профили: {e}", "Could not save profiles: {e}");
                 self.error = true;
             }

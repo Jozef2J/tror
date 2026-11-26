@@ -300,8 +300,8 @@ impl RemotePanel {
             search_word: false,
             search_regex: false,
             search_excludes: store
-                .search_excludes
-                .clone()
+                .excludes()
+                .map(str::to_owned)
                 .unwrap_or_else(|| DEFAULT_EXCLUDES.to_owned()),
             search_job: None,
             hits: Vec::new(),
@@ -352,7 +352,7 @@ impl RemotePanel {
         if !self.connected {
             return None;
         }
-        let name = self.store.profiles.get(self.selected)?.name.clone();
+        let name = self.store.get::<Profile>(self.selected)?.name.clone();
         let mut files: Vec<String> = self
             .entries
             .iter()
@@ -385,18 +385,17 @@ impl RemotePanel {
     }
 
     pub fn selected_profile(&self) -> Option<(&Profile, Option<String>)> {
-        let profile = self.store.profiles.get(self.selected)?;
+        let profile = self.store.get::<Profile>(self.selected)?;
         Some((profile, self.known(profile)))
     }
 
     fn known(&self, profile: &Profile) -> Option<String> {
         let key = format!("{}:{}", profile.host.trim(), profile.port);
-        self.store.known_hosts.get(&key).cloned()
+        self.store.known_host(&key)
     }
 
     pub fn trust(&mut self, host: String, fingerprint: String) -> Result<(), String> {
-        self.store.known_hosts.insert(host, fingerprint);
-        self.store.save()
+        self.store.trust_host(host, fingerprint)
     }
 
     pub fn modal_open(&self) -> bool {
@@ -578,16 +577,15 @@ impl RemotePanel {
     }
 
     pub fn site_url(&self, profile: &str, path: &str) -> Option<String> {
-        let profile = self.store.profiles.iter().find(|p| p.name == profile)?;
+        let profile = self.store.find::<Profile>(profile)?;
         crate::preview::remote_url(&profile.url, &profile.directory, path)
     }
 
     fn sftp(&self) -> bool {
         self.conn.as_ref().is_some_and(|c| {
             self.store
-                .profiles
-                .iter()
-                .any(|p| p.name == c.profile && p.protocol == Protocol::Sftp)
+                .find::<Profile>(&c.profile)
+                .is_some_and(|p| p.protocol == Protocol::Sftp)
         })
     }
 
@@ -748,7 +746,7 @@ impl RemotePanel {
             self.queue.push(cmd);
             return Ok(tr!("Файл будет загружен после подключения…"));
         }
-        let Some(index) = self.store.profiles.iter().position(|p| p.name == profile) else {
+        let Some(index) = self.store.position::<Profile>(profile) else {
             return Err(tf!("профиль «{profile}» не найден", "profile \"{profile}\" not found"));
         };
         if self.conn.is_none() {
@@ -768,7 +766,9 @@ impl RemotePanel {
                 }
             }
             _ => {
-                let target = &self.store.profiles[index];
+                let Some(target) = self.store.get::<Profile>(index) else {
+                    return Err(tf!("профиль «{profile}» не найден", "profile \"{profile}\" not found"));
+                };
                 let known = self.known(target);
                 let ctx = ctx.clone();
                 self.saver = Some(Saver {
@@ -950,9 +950,7 @@ impl RemotePanel {
         }
         let index = self
             .store
-            .profiles
-            .iter()
-            .position(|p| p.name == profile)
+            .position::<Profile>(profile)
             .ok_or_else(|| tf!("профиль «{profile}» не найден", "profile \"{profile}\" not found"))?;
         self.selected = index;
         self.connect(ctx);
@@ -1006,7 +1004,7 @@ impl RemotePanel {
             self.store = Store::load(self.store.path().map(|p| p.to_path_buf()));
             self.selected = self
                 .selected
-                .min(self.store.profiles.len().saturating_sub(1));
+                .min(self.store.count::<Profile>().saturating_sub(1));
         }
         let mut out = std::mem::take(&mut self.notes);
         if let Some(editor) = &mut self.editor
@@ -1065,7 +1063,7 @@ impl RemotePanel {
                     self.no_times = false;
                     self.pending = 0;
                     if let (Some(print), Some(p)) =
-                        (fingerprint, self.store.profiles.get(self.selected))
+                        (fingerprint, self.store.get::<Profile>(self.selected))
                     {
                         let key = format!("{}:{}", p.host.trim(), p.port);
                         if let Err(e) = self.trust(key, print) {
@@ -1386,7 +1384,7 @@ impl RemotePanel {
     }
 
     fn open_editor(&mut self) {
-        let mut drafts = self.store.profiles.clone();
+        let mut drafts = self.store.drafts::<Profile>();
         if drafts.is_empty() {
             drafts.push(Profile::new(tr!("Новый профиль").into()));
         }
@@ -1479,7 +1477,7 @@ impl RemotePanel {
         let Some(name) = self.conn.as_ref().map(|c| c.profile.clone()) else {
             return;
         };
-        let Some(profile) = self.store.profiles.iter().find(|p| p.name == name) else {
+        let Some(profile) = self.store.find::<Profile>(&name) else {
             return;
         };
         if profile.protocol != remote::Protocol::Sftp {
@@ -1521,7 +1519,7 @@ impl RemotePanel {
         self.area = ui.max_rect();
         ui.take_available_width();
         ui.add_space(8.0);
-        if self.store.profiles.is_empty() {
+        if self.store.count::<Profile>() == 0 {
             ui.add_space(4.0);
             ui.label(RichText::new(tr!("Подключений пока нет.")).color(pal.subtext));
             if ui
@@ -1532,13 +1530,12 @@ impl RemotePanel {
             }
             return;
         }
-        self.selected = self.selected.min(self.store.profiles.len() - 1);
+        self.selected = self.selected.min(self.store.count::<Profile>() - 1);
         let active = self.conn.is_some();
         let label = if active { tr!("Отключить") } else { tr!("Подключить") };
         let names: Vec<(String, String)> = self
             .store
-            .profiles
-            .iter()
+            .iter::<Profile>()
             .map(|p| (p.name.clone(), p.protocol.label().to_owned()))
             .collect();
         let list_id = egui::Id::unique(("tror_profile", self.id));
@@ -1594,17 +1591,13 @@ impl RemotePanel {
                 self.open_editor();
             }
             Some(crate::widgets::ProfileAction::Rename(i, name)) => {
-                if let Some(profile) = self.store.profiles.get_mut(i) {
-                    profile.name = name;
-                    let _ = self.store.save();
-                }
+                let _ = self.store.rename::<Profile>(i, name);
             }
             Some(crate::widgets::ProfileAction::Delete(i)) => {
-                if i < self.store.profiles.len() && !active {
-                    self.store.profiles.remove(i);
-                    let _ = self.store.save();
-                    self.selected = self.selected.min(self.store.profiles.len().saturating_sub(1));
-                    if self.store.profiles.is_empty() {
+                if i < self.store.count::<Profile>() && !active {
+                    let _ = self.store.remove::<Profile>(i);
+                    self.selected = self.selected.min(self.store.count::<Profile>().saturating_sub(1));
+                    if self.store.count::<Profile>() == 0 {
                         return;
                     }
                 }
@@ -1678,22 +1671,15 @@ impl RemotePanel {
                     if tree != self.tree {
                         self.notes.push(PanelEvent::Tree(tree));
                     }
-                    let mut size = !self.store.hide_size;
-                    if ui.checkbox(&mut size, tr!("Показывать размер")).changed() {
-                        self.store.hide_size = !size;
-                        let _ = self.store.save();
-                    }
-                    if ui
-                        .checkbox(&mut self.store.show_date, tr!("Показывать дату изменения"))
-                        .changed()
-                    {
-                        let _ = self.store.save();
-                    }
-                    if ui
-                        .checkbox(&mut self.store.show_perm, tr!("Показывать права"))
-                        .changed()
-                    {
-                        let _ = self.store.save();
+                    let (mut size, mut date, mut perm) =
+                        (!self.store.hide_size, self.store.show_date, self.store.show_perm);
+                    let mut changed = ui.checkbox(&mut size, tr!("Показывать размер")).changed();
+                    changed |= ui
+                        .checkbox(&mut date, tr!("Показывать дату изменения"))
+                        .changed();
+                    changed |= ui.checkbox(&mut perm, tr!("Показывать права")).changed();
+                    if changed {
+                        let _ = self.store.set_columns(size, date, perm);
                     }
                 });
             });
