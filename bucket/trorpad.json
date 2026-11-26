@@ -1,12 +1,12 @@
 {
-    "version": "0.30.6",
+    "version": "0.30.7",
     "description": "Fast, compact code editor with SFTP/FTP, SSH console and database tools",
     "homepage": "https://github.com/Jozef2J/tror",
     "license": "MIT|Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/Jozef2J/tror/releases/download/v0.30.6/trorpad.exe",
-            "hash": "b1a956c0d5bb22728ae8e04ab23e77183bcd85e94bcc652a40b0819aaa378699"
+            "url": "https://github.com/Jozef2J/tror/releases/download/v0.30.7/trorpad.exe",
+            "hash": "ffe9f73c004447f549d0cf7a26e9031f67adf4feea56af525075e04ba80b31ab"
         }
     },
     "bin": "trorpad.exe",
