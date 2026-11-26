@@ -266,32 +266,29 @@ impl TrorApp {
         let rect = ui.available_rect_before_wrap();
         ui.painter().rect_filled(rect, 0.0, pal.base);
         let font = FontId::monospace(12.5);
-        let row_h = ui.fonts_mut(|f| f.row_height(&font));
         let [server, client, error, info] = self.settings.look.log_colors();
-        ui.spacing_mut().item_spacing.y = 0.0;
+        let mut job = egui::text::LayoutJob::default();
+        for (index, (text, kind)) in self.log.iter().enumerate() {
+            let color = match kind {
+                crate::trace::Kind::Server => server,
+                crate::trace::Kind::Client => client,
+                crate::trace::Kind::Error => error,
+                crate::trace::Kind::Info => info,
+            };
+            let (stamp, body) = text.split_at(text.find("  ").unwrap_or(0));
+            job.append("  ", 0.0, egui::TextFormat::simple(font.clone(), pal.faint));
+            job.append(stamp, 0.0, egui::TextFormat::simple(font.clone(), pal.faint));
+            job.append(body, 0.0, egui::TextFormat::simple(font.clone(), color));
+            if index + 1 < self.log.len() {
+                job.append("\n", 0.0, egui::TextFormat::simple(font.clone(), color));
+            }
+        }
         ScrollArea::both()
             .id_salt("tror_log")
             .auto_shrink(false)
             .stick_to_bottom(true)
-            .show_rows(ui, row_h, self.log.len(), |ui, range| {
-                for (text, kind) in &self.log[range] {
-                    let color = match kind {
-                        crate::trace::Kind::Server => server,
-                        crate::trace::Kind::Client => client,
-                        crate::trace::Kind::Error => error,
-                        crate::trace::Kind::Info => info,
-                    };
-                    let (stamp, body) = text.split_at(text.find("  ").unwrap_or(0));
-                    let mut job = egui::text::LayoutJob::default();
-                    job.append("  ", 0.0, egui::TextFormat::simple(font.clone(), pal.faint));
-                    job.append(
-                        stamp,
-                        0.0,
-                        egui::TextFormat::simple(font.clone(), pal.faint),
-                    );
-                    job.append(body, 0.0, egui::TextFormat::simple(font.clone(), color));
-                    ui.add(egui::Label::new(job).extend());
-                }
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(job).extend());
             });
     }
 

@@ -207,6 +207,13 @@ pub struct Connection {
     pub profile: String,
     pub tx: Sender<Cmd>,
     pub rx: Receiver<Event>,
+    hangup: Arc<AtomicBool>,
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.hangup.store(true, Ordering::Relaxed);
+    }
 }
 
 pub fn join(dir: &str, name: &str) -> String {
@@ -477,14 +484,16 @@ struct Watchdog {
     fired: Arc<AtomicBool>,
     gone: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    hangup: Arc<AtomicBool>,
     escape: std::sync::Mutex<Option<Escape>>,
 }
 
 impl Watchdog {
-    fn new(limit: Duration, grace: Duration, escape: Escape) -> Self {
+    fn new(limit: Duration, grace: Duration, hangup: Arc<AtomicBool>, escape: Escape) -> Self {
         Watchdog {
             limit,
             grace,
+            hangup,
             escape: std::sync::Mutex::new(Some(escape)),
             socket: Default::default(),
             since: Default::default(),
@@ -502,12 +511,13 @@ impl Watchdog {
             return;
         };
         let (limit, grace) = (self.limit, self.grace);
-        let (socket, since, fired, gone, stop) = (
+        let (socket, since, fired, gone, stop, hangup) = (
             self.socket.clone(),
             self.since.clone(),
             self.fired.clone(),
             self.gone.clone(),
             self.stop.clone(),
+            self.hangup.clone(),
         );
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) && !gone.load(Ordering::Relaxed) {
@@ -515,6 +525,12 @@ impl Watchdog {
                 let Some(waited) = since.lock().ok().and_then(|busy| busy.map(|t| t.elapsed())) else {
                     continue;
                 };
+                if hangup.load(Ordering::Relaxed) {
+                    if let Some(socket) = socket.lock().ok().as_deref().and_then(Option::as_ref) {
+                        let _ = socket.shutdown(std::net::Shutdown::Both);
+                    }
+                    return;
+                }
                 if waited > limit && !fired.swap(true, Ordering::Relaxed) {
                     if let Some(socket) = socket.lock().ok().as_deref().and_then(Option::as_ref) {
                         let _ = socket.shutdown(std::net::Shutdown::Both);
@@ -584,6 +600,7 @@ fn serve(
     cmds: Receiver<Cmd>,
     events: Sender<Event>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    hangup: Arc<AtomicBool>,
 ) {
     let send = |event: Event| {
         let _ = events.send(event);
@@ -593,7 +610,7 @@ fn serve(
         trace::line(text, error);
         wake();
     };
-    let watch = Watchdog::new(STALL, GRACE, {
+    let watch = Watchdog::new(STALL, GRACE, hangup.clone(), {
         let (events, wake) = (events.clone(), wake.clone());
         Box::new(move || {
             let _ = events.send(Event::Closed(tr!("сервер не отвечает").into()));
@@ -643,6 +660,11 @@ fn serve(
     if fingerprint.is_some() {
         known = fingerprint.clone();
     }
+    if hangup.load(Ordering::Relaxed) {
+        backend.close();
+        log(format!("{tag} disconnected"), false);
+        return;
+    }
     watch.watch(backend.socket(), tag);
     log(format!("{tag} connected, home directory {home}"), false);
     let start = profile.directory.trim();
@@ -685,6 +707,9 @@ fn serve(
         };
         if watch.gone() {
             return;
+        }
+        if hangup.load(Ordering::Relaxed) {
+            break;
         }
         let stalled = watch.fired() || result.as_ref().is_err_and(|e| timed_out(e));
         if result.is_err() && (!alive || stalled || watch.guard(|| backend.ping()).is_err()) {
@@ -917,11 +942,14 @@ pub fn connect(
             wake();
         }
     });
-    std::thread::spawn(move || serve(profile, known, cmds, events, wake));
+    let hangup = Arc::new(AtomicBool::new(false));
+    let flag = hangup.clone();
+    std::thread::spawn(move || serve(profile, known, cmds, events, wake, flag));
     Connection {
         profile: name,
         tx,
         rx,
+        hangup,
     }
 }
 
@@ -1238,7 +1266,7 @@ mod tests {
                 peer.lock().unwrap().take();
             })
         };
-        let watch = Watchdog::new(Duration::from_millis(600), Duration::from_millis(600), escape);
+        let watch = Watchdog::new(Duration::from_millis(600), Duration::from_millis(600), Default::default(), escape);
         watch.watch(stream.try_clone().ok(), "[SFTP]");
         let started = std::time::Instant::now();
         let read = watch.guard(|| stream.read(&mut [0u8; 8]));
@@ -1258,7 +1286,7 @@ mod tests {
         let escaped = Arc::new(AtomicBool::new(false));
         let flag = escaped.clone();
         let escape = Box::new(move || flag.store(true, Ordering::Relaxed));
-        let watch = Watchdog::new(Duration::from_millis(300), Duration::from_millis(300), escape);
+        let watch = Watchdog::new(Duration::from_millis(300), Duration::from_millis(300), Default::default(), escape);
         watch.watch(None, "[SFTP]");
         let started = std::time::Instant::now();
         watch.guard(|| {
@@ -1335,7 +1363,7 @@ mod tests {
         };
         let conn = connect(&profile, None, || {});
         let next = || loop {
-            match conn.rx.recv_timeout(Duration::from_secs(60)).expect("ответ сервера") {
+            match conn.rx.recv_timeout(Duration::from_secs(12)).expect("ответ сервера") {
                 Event::Log(..) | Event::Progress { .. } => {}
                 event => break event,
             }
@@ -1348,23 +1376,108 @@ mod tests {
                 _ => {}
             }
         }
-        let data: Vec<u8> = (0..120_000u32).map(|i| b"abcdefghij\n"[(i % 11) as usize]).collect();
-        let started = std::time::Instant::now();
-        conn.tx
-            .send(Cmd::Upload {
-                path: target.into(),
-                data: data.clone(),
-                doc: None,
-                expect: None,
-            })
-            .unwrap();
-        let event = next();
-        if let Event::Failed { error, .. } | Event::Error(error) | Event::Closed(error) = &event {
-            panic!("{error}");
+        let sizes = [120_000u32, 26_096, 26_096, 5_000, 26_096, 11_000, 300_000, 26_096, 12_345, 26_096, 700, 26_096];
+        for (round, size) in sizes.into_iter().chain(sizes).enumerate() {
+            let data: Vec<u8> = (0..size + round as u32).map(|i| b"abcdefghij\n"[(i % 11) as usize]).collect();
+            conn.tx.send(Cmd::Download(target.into())).unwrap();
+            assert!(matches!(next(), Event::Downloaded { .. }));
+            conn.tx.send(Cmd::List("/home/sftponly/rw".into())).unwrap();
+            assert!(matches!(next(), Event::Listing { .. }));
+            let started = std::time::Instant::now();
+            conn.tx
+                .send(Cmd::Upload {
+                    path: target.into(),
+                    data: data.clone(),
+                    doc: None,
+                    expect: None,
+                })
+                .unwrap();
+            let event = next();
+            if let Event::Failed { error, .. } | Event::Error(error) | Event::Closed(error) = &event {
+                panic!("{error}");
+            }
+            assert!(matches!(event, Event::Uploaded { .. }));
+            assert!(started.elapsed() < Duration::from_secs(5), "round {round}: {:?}", started.elapsed());
+            assert_eq!(std::fs::read(target).unwrap(), data);
         }
-        assert!(matches!(event, Event::Uploaded { .. }));
-        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
-        assert_eq!(std::fs::read(target).unwrap(), data);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn live_dropbear_disconnect_closes_the_session() {
+        let established = || {
+            std::fs::read_to_string("/proc/net/tcp")
+                .unwrap()
+                .lines()
+                .filter(|l| l.contains(":08B0 ") && l.split_whitespace().nth(3) == Some("01"))
+                .count()
+        };
+        let before = established();
+        let profile = Profile {
+            name: "dropbear".into(),
+            host: "127.0.0.1".into(),
+            port: 2224,
+            user: "sftponly".into(),
+            password: "test123".into(),
+            ..Default::default()
+        };
+        let conn = connect(&profile, Some(String::new()), || {});
+        loop {
+            match conn.rx.recv_timeout(Duration::from_secs(12)).expect("ответ сервера") {
+                Event::HostKey { .. } => conn.tx.send(Cmd::TrustHost(true)).unwrap(),
+                Event::Connected { .. } => break,
+                Event::Closed(e) | Event::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        assert!(established() > before);
+        drop(conn);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(established(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn live_dropbear_disconnect_interrupts_a_stuck_operation() {
+        let established = || {
+            std::fs::read_to_string("/proc/net/tcp")
+                .unwrap()
+                .lines()
+                .filter(|l| l.contains(":08B0 ") && l.split_whitespace().nth(3) == Some("01"))
+                .count()
+        };
+        let before = established();
+        let profile = Profile {
+            name: "dropbear".into(),
+            host: "127.0.0.1".into(),
+            port: 2224,
+            user: "sftponly".into(),
+            password: "test123".into(),
+            ..Default::default()
+        };
+        let conn = connect(&profile, Some(String::new()), || {});
+        loop {
+            match conn.rx.recv_timeout(Duration::from_secs(12)).expect("ответ сервера") {
+                Event::HostKey { .. } => conn.tx.send(Cmd::TrustHost(true)).unwrap(),
+                Event::Connected { .. } => break,
+                Event::Closed(e) | Event::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        let child = std::process::Command::new("pgrep").args(["-n", "-f", "dropbear -p 2224"]).output().unwrap();
+        let child = String::from_utf8_lossy(&child.stdout).trim().to_owned();
+        std::process::Command::new("kill").args(["-STOP", &child]).status().unwrap();
+        conn.tx.send(Cmd::List("/home/sftponly".into())).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        drop(conn);
+        std::thread::sleep(Duration::from_millis(1500));
+        let left = established();
+        std::process::Command::new("kill").args(["-CONT", &child]).status().unwrap();
+        assert_eq!(left, before);
+        std::thread::sleep(Duration::from_secs(1));
+        assert_eq!(established(), before);
     }
 
     #[cfg(unix)]

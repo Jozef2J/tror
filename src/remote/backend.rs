@@ -136,8 +136,8 @@ impl Backend {
                 window
             });
         let chunk = match window {
-            Some(window) if window > CHUNK + 1024 => CHUNK,
-            Some(window) => window.saturating_sub(1024).max(1024),
+            Some(window) if window / 3 > CHUNK + 512 => CHUNK,
+            Some(window) => (window / 3).saturating_sub(512).max(1024),
             None => 16 * 1024,
         };
         trace::client(format!("[SFTP] write window {}, chunk {chunk} bytes", window.map_or("?".into(), |w| w.to_string())));

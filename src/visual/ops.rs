@@ -453,6 +453,21 @@ impl Visual {
             .get(self.head.para)
             .and_then(|p| self.html.block(p))
             .is_some_and(|b| b.tag() == "pre");
+        let tagged = blocks.len() > 1
+            || blocks
+                .first()
+                .is_some_and(|b| matches!(&b.kind, Kind::Para { tag, .. } if !tag.is_empty()));
+        if tagged
+            && let Some(path) = self.paras.get(self.head.para).cloned()
+            && path.len() == 1
+            && let Some(Block {
+                kind: Kind::Para { tag, .. },
+                ..
+            }) = self.html.block_mut(&path)
+            && tag.is_empty()
+        {
+            *tag = "p".into();
+        }
         if in_pre || (blocks.len() == 1 && simple(&blocks[0])) {
             let mut runs = Vec::new();
             for (i, block) in blocks.into_iter().enumerate() {
@@ -1361,4 +1376,20 @@ pub fn table_html(rows: usize, cols: usize, header: bool, width: &str, border: &
         attrs,
         children,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pasted_paragraphs_wrap_a_loose_line() {
+        let doc = crate::text::document::Document::from_text("текст");
+        let mut visual = Visual::new(&doc);
+        visual.collapse_to(Pos { para: 0, off: visual.len(0) });
+        assert!(visual.insert_html("<p>раз</p><p>два</p>"));
+        let out = crate::visual::model::serialize(&visual.html);
+        assert!(out.starts_with("<p>текстраз</p>"), "{out}");
+        assert!(out.contains("<p>два</p>"), "{out}");
+    }
 }

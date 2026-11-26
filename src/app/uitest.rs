@@ -440,3 +440,63 @@ fn ui_database_structure_renames_column() {
         .collect();
     assert_eq!(names, ["id", "name", "price"]);
 }
+
+#[test]
+#[ignore]
+fn ui_log_selection_survives_wheel_scroll() {
+    sandbox("logscroll");
+    let mut harness = app();
+    harness.key_press(egui::Key::F1);
+    harness.run_steps(2);
+    harness.event(egui::Event::Text("журн".into()));
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(3);
+    harness.state_mut().log = (0..400)
+        .map(|i| (format!("10:00:00  line {i:03}"), crate::trace::Kind::Info))
+        .collect();
+    harness.run_steps(3);
+    let top = harness.get_by_label_contains("Сырой обмен").rect();
+    let start = egui::pos2(top.left() + 40.0, top.bottom() + 60.0);
+    let pointer = |harness: &mut Harness<'_, TrorApp>, pos: egui::Pos2, pressed: Option<bool>| {
+        harness.event(egui::Event::PointerMoved(pos));
+        if let Some(pressed) = pressed {
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        harness.run_steps(2);
+    };
+    pointer(&mut harness, start, None);
+    pointer(&mut harness, start, Some(true));
+    let end = start + egui::vec2(60.0, 40.0);
+    pointer(&mut harness, end, None);
+    for _ in 0..6 {
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 3.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        harness.run_steps(2);
+        pointer(&mut harness, end, None);
+    }
+    pointer(&mut harness, end, Some(false));
+    harness.event(egui::Event::Copy);
+    harness.run_steps(1);
+    let copied = harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert!(copied.lines().count() > 3, "{copied:?}");
+}
