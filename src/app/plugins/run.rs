@@ -50,7 +50,7 @@ impl TrorApp {
                 _ => 0..doc.len(),
             };
             if plugin.input != Input::None {
-                input = doc.rope.slice(range.clone()).to_string();
+                input = doc.slice(range.clone()).to_string();
             }
             id = doc.id;
             version = doc.version;
@@ -95,7 +95,7 @@ impl TrorApp {
                     }
                 }
                 (Output::Replace | Output::Insert, Some(doc)) if doc.version == done.version => {
-                    let source = doc.rope.slice(done.range.clone()).to_string();
+                    let source = doc.slice(done.range.clone()).to_string();
                     let text = match text.strip_suffix('\n') {
                         Some(cut) if !source.ends_with('\n') => {
                             cut.strip_suffix('\r').unwrap_or(cut)
@@ -223,7 +223,7 @@ impl TrorApp {
                         if let Some(doc) = self.docs.last_mut() {
                             doc.insert_text(&text);
                             doc.move_to(0, false);
-                            doc.syntax = syntax;
+                            doc.set_syntax(syntax);
                         }
                     }
                 }

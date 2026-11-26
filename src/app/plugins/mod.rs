@@ -23,7 +23,7 @@ impl TrorApp {
         let doc = target.and_then(|i| self.docs.get(i));
         let snap = match doc {
             Some(doc) => Some(Snapshot {
-                rope: doc.rope.clone(),
+                rope: doc.rope(),
                 sel: doc.sel,
                 path: doc.location(),
                 syntax: doc.syntax.clone(),

@@ -149,13 +149,13 @@ fn class_name(name: &str) -> Option<&str> {
 }
 
 fn document_sigs(doc: &Document, name: &str) -> Vec<Signature> {
-    let head_line = doc.rope.char_to_line(doc.sel.1);
+    let head_line = doc.char_to_line(doc.sel.1);
     let first = head_line.saturating_sub(SCAN_LINES * 2);
     let last = (head_line + SCAN_LINES * 2).min(doc.line_count());
     let mut out = Vec::new();
     let mut buf = String::new();
     for line in first..last {
-        let slice = doc.rope.line(line);
+        let slice = doc.line(line);
         if slice.len_bytes() > MAX_SCAN_LINE_BYTES {
             continue;
         }
@@ -219,7 +219,7 @@ fn find_sigs(doc: &Document, lang: Lang, called: &str) -> Vec<Signature> {
 
 fn call_at(doc: &Document) -> Option<(usize, usize, String)> {
     let head = doc.sel.1;
-    let mut chars = doc.rope.chars_at(head);
+    let mut chars = doc.chars_at(head);
     let mut pos = head;
     let mut nested = 0i32;
     let mut commas = 0;
@@ -233,7 +233,7 @@ fn call_at(doc: &Document) -> Option<(usize, usize, String)> {
             return None;
         }
         if let Some(q) = quote {
-            if c == q && (pos == 0 || doc.rope.char(pos - 1) != '\\') {
+            if c == q && (pos == 0 || doc.char_at(pos - 1) != '\\') {
                 quote = None;
             }
             continue;
@@ -250,7 +250,7 @@ fn call_at(doc: &Document) -> Option<(usize, usize, String)> {
         }
     };
     let mut start = open;
-    let mut back = doc.rope.chars_at(open);
+    let mut back = doc.chars_at(open);
     while let Some(c) = back.prev() {
         if c.is_alphanumeric() || matches!(c, '_' | '$' | ':' | '\\' | '.' | '>' | '-') {
             start -= 1;
@@ -261,7 +261,7 @@ fn call_at(doc: &Document) -> Option<(usize, usize, String)> {
             break;
         }
     }
-    let name: String = doc.rope.slice(start..open).to_string();
+    let name: String = doc.slice(start..open).to_string();
     let name = name.trim_start_matches(['$', '.', '-', '>', ':']).to_owned();
     let name = if name.starts_with("this->") || name.contains("->") {
         format!("->{}", name.rsplit("->").next().unwrap_or(""))
@@ -408,13 +408,13 @@ fn dictionaries(
 }
 
 fn document_words(doc: &Document, lang: Lang, prefix_lower: &str, out: &mut Vec<String>) {
-    let head_line = doc.rope.char_to_line(doc.sel.1);
+    let head_line = doc.char_to_line(doc.sel.1);
     let first = head_line.saturating_sub(SCAN_LINES);
     let last = (head_line + SCAN_LINES).min(doc.line_count());
     let mut seen = HashSet::new();
     let mut buf = String::new();
     for line in first..last {
-        let slice = doc.rope.line(line);
+        let slice = doc.line(line);
         if slice.len_bytes() > MAX_SCAN_LINE_BYTES {
             continue;
         }
@@ -449,18 +449,18 @@ impl Completion {
         let lang = lang(&doc.syntax);
         let head = doc.sel.1;
         let mut start = head;
-        let mut back = doc.rope.chars_at(head);
+        let mut back = doc.chars_at(head);
         while head - start < 80 && back.prev().is_some_and(|c| is_word(c, lang)) {
             start -= 1;
         }
-        let prefix = doc.rope.slice(start..head).to_string();
+        let prefix = doc.slice(start..head).to_string();
         if prefix.chars().count() < if manual { 1 } else { 2 } {
             return;
         }
         if prefix.starts_with(|c: char| c.is_ascii_digit()) {
             return;
         }
-        let before = (start > 0).then(|| doc.rope.char(start - 1));
+        let before = (start > 0).then(|| doc.char_at(start - 1));
         let lower = prefix.to_lowercase();
 
         let mut words = Vec::new();

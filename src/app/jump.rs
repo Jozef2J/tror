@@ -131,7 +131,7 @@ impl TrorApp {
                         hits,
                         detail: doc.location().unwrap_or_default(),
                         key: tr!("открыт").to_owned(),
-                        remote: doc.remote.is_some(),
+                        remote: doc.is_remote(),
                         score: score + 20,
                     });
                 }

@@ -91,8 +91,8 @@ pub fn inline(old: &str, new: &str) -> [Vec<Range<usize>>; 2] {
 }
 
 fn lines(doc: &Document) -> Vec<String> {
-    let mut lines: Vec<String> = doc
-        .rope
+    let rope = doc.rope();
+    let mut lines: Vec<String> = rope
         .lines()
         .map(|line| {
             let mut text = String::from(line);
@@ -184,7 +184,7 @@ impl DiffPanel {
         self.rows.clear();
         self.hunks.clear();
         self.note.clear();
-        if a.rope.len_bytes() > MAX_BYTES || b.rope.len_bytes() > MAX_BYTES {
+        if a.len_bytes() > MAX_BYTES || b.len_bytes() > MAX_BYTES {
             self.note = tr!("Файлы больше 32 МБ не сравниваются").into();
             return;
         }

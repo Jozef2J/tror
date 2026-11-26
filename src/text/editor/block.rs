@@ -30,21 +30,12 @@ pub(super) fn apply_block(ui: &Ui, doc: &mut Document, m: &Metrics) {
     let mut cursors = Vec::with_capacity(lines.len());
     for line in &lines {
         let layout = layout_line(ui, doc, *line, m);
-        let start = doc.rope.line_to_char(*line);
+        let start = doc.line_to_char(*line);
         let a = start + layout.col_at(x0);
         let h = start + layout.col_at(x1);
         cursors.push((a, h));
     }
-    let primary = cursors.len().saturating_sub(1);
-    let block = doc.block;
-    let sel = cursors[primary];
-    doc.set_cursors(cursors.clone(), primary);
-    if doc.cursors().len() != cursors.len() {
-        doc.sel = sel;
-        doc.extra = cursors[..primary].to_vec();
-    }
-    doc.block = block;
-    doc.reveal = true;
+    doc.set_block_cursors(cursors);
 }
 
 pub(super) fn block_step(ui: &Ui, doc: &mut Document, m: &Metrics, key: Key) {
@@ -52,11 +43,11 @@ pub(super) fn block_step(ui: &Ui, doc: &mut Document, m: &Metrics, key: Key) {
     let (anchor, mut target) = match doc.block {
         Some(block) => block,
         None => {
-            let line = doc.rope.char_to_line(head);
-            let col = head - doc.rope.line_to_char(line);
+            let line = doc.char_to_line(head);
+            let col = head - doc.line_to_char(line);
             let x = layout_line(ui, doc, line, m).x_of(col, m.char_w);
-            let anchor_line = doc.rope.char_to_line(doc.sel.0);
-            let anchor_col = doc.sel.0 - doc.rope.line_to_char(anchor_line);
+            let anchor_line = doc.char_to_line(doc.sel.0);
+            let anchor_col = doc.sel.0 - doc.line_to_char(anchor_line);
             let ax = layout_line(ui, doc, anchor_line, m).x_of(anchor_col, m.char_w);
             ((anchor_line, ax), (line, x))
         }
@@ -70,13 +61,13 @@ pub(super) fn block_step(ui: &Ui, doc: &mut Document, m: &Metrics, key: Key) {
         _ => {}
     }
     target.1 = (target.1 / cw).round() * cw;
-    doc.block = Some((anchor, target));
+    doc.set_block(anchor, target);
     apply_block(ui, doc, m);
 }
 
 pub(super) fn vertical_char(doc: &Document, pos: usize, down: bool) -> usize {
-    let line = doc.rope.char_to_line(pos);
-    let col = pos - doc.rope.line_to_char(line);
+    let line = doc.char_to_line(pos);
+    let col = pos - doc.line_to_char(line);
     let target = if down {
         if line + 1 >= doc.line_count() {
             return doc.len();
@@ -88,5 +79,5 @@ pub(super) fn vertical_char(doc: &Document, pos: usize, down: bool) -> usize {
         }
         line - 1
     };
-    doc.rope.line_to_char(target) + col.min(doc.line_len(target))
+    doc.line_to_char(target) + col.min(doc.line_len(target))
 }

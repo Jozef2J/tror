@@ -427,7 +427,7 @@ impl TrorApp {
             top = top.max(id + 1);
         }
         for doc in &mut app.docs {
-            doc.pinned = doc.path.as_ref().is_some_and(|p| pinned.contains(p));
+            doc.pin_if_listed(&pinned);
         }
         crate::widgets::set_columns(app.settings.columns);
         app.recover();
@@ -462,7 +462,7 @@ impl TrorApp {
         let taken: Vec<u32> = self
             .docs
             .iter()
-            .filter(|d| d.path.is_none() && d.remote.is_none())
+            .filter(|d| d.is_new())
             .map(|d| d.untitled)
             .collect();
         let number = (1..).find(|n| !taken.contains(n)).unwrap_or(1);

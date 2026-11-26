@@ -191,11 +191,11 @@ impl Macro {
         }
         let start = std::time::Instant::now();
         while self.play > 0 && start.elapsed() < std::time::Duration::from_millis(40) {
-            let before = doc.rope.char_to_line(doc.sel.1);
+            let before = doc.char_to_line(doc.sel.1);
             process_events(ui, doc, m, self.events.clone());
             self.play -= 1;
             if self.until_end {
-                let line = doc.rope.char_to_line(doc.sel.1);
+                let line = doc.char_to_line(doc.sel.1);
                 if line <= before || line + 1 >= doc.line_count() {
                     self.play = 0;
                 }
@@ -331,7 +331,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         wrap,
     };
     if wrap {
-        doc.scroll_x = 0.0;
+        doc.scroll_by(-doc.scroll_x, 0.0);
     }
     let view_h = (text_rect.height() - PAD_TOP) as f64;
     let row = row_h as f64;
@@ -424,10 +424,9 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             let rows = visible_lines(ui, doc, &m, 1.0)
                 .first()
                 .map_or(1, |(line, _)| layout_line(ui, doc, *line, &m).rows());
-            doc.scroll_y -= delta.y as f64 / rows as f64;
+            doc.scroll_by(0.0, -(delta.y as f64 / rows as f64));
         } else {
-            doc.scroll_x -= delta.x as f64;
-            doc.scroll_y -= delta.y as f64;
+            doc.scroll_by(-(delta.x as f64), -(delta.y as f64));
         }
     }
 
@@ -441,7 +440,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 return doc.len();
             }
             let line = doc.line_of_visual(visual);
-            return doc.rope.line_to_char(line) + layout_line(ui, doc, line, &m).col_at(x);
+            return doc.line_to_char(line) + layout_line(ui, doc, line, &m).col_at(x);
         }
         let visible = visible_lines(ui, doc, &m, view_h as f32);
         let (line, top) = visible
@@ -457,7 +456,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             return doc.len();
         }
         let at = at.min(layout.rows() - 1);
-        doc.rope.line_to_char(line) + layout.col_at_row(x, at, char_w)
+        doc.line_to_char(line) + layout.col_at_row(x, at, char_w)
     };
     let pointer = ui.input(|i| i.pointer.interact_pos());
     let mut state = ui.data(|d| d.get_temp::<Pointer>(id)).unwrap_or_default();
@@ -472,13 +471,13 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         && let Some(p) = pointer
     {
         let pos = char_at(ui, doc, p);
-        let line = doc.rope.char_to_line(pos);
+        let line = doc.char_to_line(pos);
         let x = (point_x(doc, p) / char_w as f64).round() * char_w as f64;
         state.block = Some((line, x.max(0.0)));
         state.origin = None;
         doc.move_to(pos, false);
-        doc.block = Some(((line, x.max(0.0)), (line, x.max(0.0))));
-        doc.reveal = false;
+        doc.set_block((line, x), (line, x));
+        doc.stop_reveal();
     } else if pressed
         && modifiers.command
         && !modifiers.shift
@@ -509,7 +508,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             cursors[last] = (start, head);
             doc.set_cursors(cursors, last);
         }
-        doc.reveal = false;
+        doc.stop_reveal();
     } else if response.is_pointer_button_down_on()
         && let (Some(p), Some(anchor)) = (pointer, state.block)
     {
@@ -518,11 +517,11 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             p.y.clamp(text_rect.top(), text_rect.bottom() - 1.0),
         );
         let pos = char_at(ui, doc, clamped);
-        let line = doc.rope.char_to_line(pos);
+        let line = doc.char_to_line(pos);
         let x = (point_x(doc, clamped) / char_w as f64).round() * char_w as f64;
-        doc.block = Some((anchor, (line, x.max(0.0))));
+        doc.set_block(anchor, (line, x));
         apply_block(ui, doc, &m);
-        doc.reveal = false;
+        doc.stop_reveal();
     } else if pressed && let Some(p) = pointer {
         state.block = None;
         let pos = char_at(ui, doc, p);
@@ -540,7 +539,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             3 => doc.select_line_at(pos),
             _ => doc.move_to(pos, shift),
         }
-        doc.reveal = false;
+        doc.stop_reveal();
         state.origin = Some(if state.clicks == 1 {
             (doc.sel.0, doc.sel.0)
         } else {
@@ -555,16 +554,14 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             p.y.clamp(text_rect.top(), text_rect.bottom() - 1.0),
         );
         let head = char_at(ui, doc, clamped);
-        doc.sel = if head < origin.0 {
-            (origin.1, head)
+        if head < origin.0 {
+            doc.select(origin.1, head);
         } else {
-            (origin.0, head.max(origin.1))
-        };
-        doc.goal_x = None;
+            doc.select(origin.0, head.max(origin.1));
+        }
         let over = egui::vec2(p.x - clamped.x, p.y - clamped.y);
         if over != egui::Vec2::ZERO {
-            doc.scroll_x += (over.x * 0.3) as f64;
-            doc.scroll_y += (over.y * 0.3) as f64;
+            doc.scroll_by((over.x * 0.3) as f64, (over.y * 0.3) as f64);
             ctx.request_repaint();
         }
     }
@@ -601,11 +598,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     }
     response.context_menu(|ui| context_items(ui, doc, id));
 
-    let head_line = doc.rope.char_to_line(doc.sel.1);
-    if doc.hidden_range(head_line).is_some() {
-        doc.reveal_line(head_line);
-        doc.reveal = true;
-    }
+    doc.reveal_cursor();
     let lines = doc.shown_count();
     let cw = char_w as f64;
     let view_w = m.view_w as f64;
@@ -620,12 +613,13 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     } else {
         (lines as f64 * row - view_h + row * 3.0).max(0.0)
     };
-    let reveal = std::mem::take(&mut doc.reveal);
-    if reveal && wrap {
-        let head = doc.sel.1;
-        let line = doc.rope.char_to_line(head);
+    let reveal = doc.take_reveal();
+    let (mut scroll_x, mut scroll_y) = (doc.scroll_x, doc.scroll_y);
+    let mut limit_x = max_x;
+    if let Some(head) = reveal.filter(|_| wrap) {
+        let line = doc.char_to_line(head);
         let layout = layout_line(ui, doc, line, &m);
-        let (_, at) = layout.place(head - doc.rope.line_to_char(line), char_w);
+        let (_, at) = layout.place(head - doc.line_to_char(line), char_w);
         let visible = visible_lines(ui, doc, &m, view_h as f32);
         let shown = visible.iter().find(|(l, _)| *l == line).map(|(_, y)| *y);
         let cursor_y = shown.map(|y| y + at as f64 * row);
@@ -636,7 +630,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         };
         let below = cursor_y.is_none_or(|y| y + row > view_h);
         if above {
-            doc.scroll_y = (doc.to_visual(line) as f64 + at as f64 / layout.rows() as f64) * row;
+            scroll_y = (doc.to_visual(line) as f64 + at as f64 / layout.rows() as f64) * row;
         } else if below {
             let mut room = (view_h as f32 - row_h).max(0.0);
             let mut top_line = line;
@@ -659,31 +653,28 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                     break;
                 }
             }
-            doc.scroll_y = (doc.to_visual(top_line) as f64 + top_row as f64 / rows as f64) * row + 0.01;
+            scroll_y = (doc.to_visual(top_line) as f64 + top_row as f64 / rows as f64) * row + 0.01;
         }
-    } else if reveal {
-        let head = doc.sel.1;
-        let line = doc.rope.char_to_line(head);
+    } else if let Some(head) = reveal {
+        let line = doc.char_to_line(head);
         let top = doc.to_visual(line) as f64 * row;
-        if top < doc.scroll_y - row * 3.0 || top > doc.scroll_y + view_h + row * 2.0 {
-            doc.scroll_y = top - view_h / 2.0;
-        } else if top < doc.scroll_y {
-            doc.scroll_y = top;
-        } else if top + row > doc.scroll_y + view_h {
-            doc.scroll_y = top + row - view_h;
+        if top < scroll_y - row * 3.0 || top > scroll_y + view_h + row * 2.0 {
+            scroll_y = top - view_h / 2.0;
+        } else if top < scroll_y {
+            scroll_y = top;
+        } else if top + row > scroll_y + view_h {
+            scroll_y = top + row - view_h;
         }
-        let col = head - doc.rope.line_to_char(line);
+        let col = head - doc.line_to_char(line);
         let x = layout_line(ui, doc, line, &m).x_of(col, char_w);
-        if x < doc.scroll_x + cw * 2.0 {
-            doc.scroll_x = (x - cw * 8.0).max(0.0);
-        } else if x > doc.scroll_x + view_w - cw * 3.0 {
-            doc.scroll_x = x - view_w + cw * 8.0;
+        if x < scroll_x + cw * 2.0 {
+            scroll_x = (x - cw * 8.0).max(0.0);
+        } else if x > scroll_x + view_w - cw * 3.0 {
+            scroll_x = x - view_w + cw * 8.0;
         }
-        doc.scroll_x = doc.scroll_x.clamp(0.0, max_x.max(doc.scroll_x.min(x)));
-    } else {
-        doc.scroll_x = doc.scroll_x.clamp(0.0, max_x);
+        limit_x = max_x.max(scroll_x.min(x));
     }
-    doc.scroll_y = doc.scroll_y.clamp(0.0, max_y);
+    doc.scroll_to(scroll_x, scroll_y, limit_x, max_y);
 
     let scrolled_y = scrollbar(
         ui,
@@ -702,22 +693,22 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         },
         pal,
     );
-    doc.scroll_y = scrolled_y;
+    doc.scroll_to(doc.scroll_x, scrolled_y, f64::INFINITY, f64::INFINITY);
     if search.showing_matches() {
         let top = full.top();
         let height = text_rect.bottom() - top;
         let total = doc.line_count();
-        let chars = doc.rope.len_chars();
+        let chars = doc.len();
         let slots = ((height / 2.0) as usize).clamp(1, total.max(1));
         let painter = ui.painter();
         for slot in 0..slots {
             let first = slot * total / slots;
             let last = ((slot + 1) * total / slots).max(first + 1);
-            let from = doc.rope.line_to_char(first.min(total));
+            let from = doc.line_to_char(first.min(total));
             let to = if last >= total {
                 chars + 1
             } else {
-                doc.rope.line_to_char(last)
+                doc.line_to_char(last)
             };
             if search.matches_between(from, to) {
                 let y = top + height * slot as f32 / slots as f32;
@@ -745,19 +736,12 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         m.view_w as f64,
         pal,
     );
-    doc.scroll_x = scrolled_x;
+    doc.scroll_to(scrolled_x, doc.scroll_y, f64::INFINITY, f64::INFINITY);
 
     let visible = visible_lines(ui, doc, &m, view_h as f32);
     let first = visible.first().map_or(0, |v| v.0);
     let last = visible.last().map_or(1, |v| v.0 + 1);
-    if doc.hl.process(
-        syn,
-        &doc.rope,
-        &doc.syntax,
-        doc.version,
-        first..last,
-        Some(FRAME_BUDGET),
-    ) {
+    if doc.highlight(syn, first..last, Some(FRAME_BUDGET)) {
         ctx.request_repaint();
     }
     if search.open {
@@ -765,9 +749,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     }
 
     let now = ui.input(|i| i.time);
-    if before != (doc.version, doc.sel) {
-        doc.activity = now;
-    }
+    doc.note_activity(now, before);
     let painter = ui.painter_at(text_rect);
     let gutter_painter = ui.painter_at(gutter_rect);
     let origin_x = text_rect.left() + PAD_X;
@@ -775,7 +757,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     let origin_y = text_rect.top() + PAD_TOP;
     let sel = doc.selection();
     let head = doc.sel.1;
-    let head_line = doc.rope.char_to_line(head);
+    let head_line = doc.char_to_line(head);
     let pair = if edit.brackets && sel.is_empty() {
         doc.bracket_pair(head)
     } else {
@@ -784,12 +766,9 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     let sorted = (sel.start, sel.end);
     let mut cursor_rect = None;
     let mut extra_rects: Vec<Rect> = Vec::new();
-    let extras: Vec<(usize, usize)> = doc
-        .extra
-        .iter()
-        .map(|(a, h)| (*a.min(h), *a.max(h)))
-        .collect();
-    let extra_heads: Vec<usize> = doc.extra.iter().map(|c| c.1).collect();
+    let cursors = doc.extras();
+    let extras: Vec<(usize, usize)> = cursors.iter().map(|(a, h)| (*a.min(h), *a.max(h))).collect();
+    let extra_heads: Vec<usize> = cursors.iter().map(|c| c.1).collect();
     let smart = (!doc.multi() && !sel.is_empty() && sel.len() <= 200)
         .then(|| doc.selected_text())
         .filter(|t| !t.contains('\n') && !t.trim().is_empty());
@@ -804,7 +783,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         let row_top = |r: usize| (top64 + r as f64 * row) as f32;
         let y = top64.max(-1.0e6) as f32;
         let layout = layout_line(ui, doc, line, &m);
-        let line_start = doc.rope.line_to_char(line);
+        let line_start = doc.line_to_char(line);
         let line_end = line_start + layout.len;
         let rows = layout.rows();
         let row_from =
@@ -813,7 +792,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             (((text_rect.bottom() as f64 - top64) / row).ceil().max(1.0) as usize).min(rows);
         let sx = |x: f64| origin_x + (x - scroll_x) as f32;
         if !wrap {
-            doc.content_w = doc.content_w.max(layout.x0 + layout.galley.size().x as f64);
+            doc.widen(layout.x0 + layout.galley.size().x as f64);
         }
         let fill = |a: usize, b: usize, tail: f32, radius: f32, color: egui::Color32| {
             for r in row_from..row_to {
@@ -930,7 +909,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             && layout.len >= needle.chars().count()
             && layout.len <= 20_000
         {
-            let text: String = doc.rope.slice(line_start..line_end).to_string();
+            let text: String = doc.slice(line_start..line_end).to_string();
             let width = needle.chars().count();
             let mut chars_before = 0;
             let mut last_byte = 0;
@@ -977,20 +956,20 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 painter.galley(
                     egui::pos2(origin_x, row_top(r)),
                     grid_row(ui, doc, line_start, &layout, r, &m),
-                    doc.hl.default_color,
+                    doc.text_color(),
                 );
             }
         } else {
             painter.galley(
                 egui::pos2(sx(layout.x0), y),
                 layout.galley.clone(),
-                doc.hl.default_color,
+                doc.text_color(),
             );
         }
         if layout.len <= 4000 {
-            let text: String = doc.rope.line(line).chars().collect();
+            let text: String = doc.line(line).chars().collect();
             if text.contains("://") || text.contains("www.") {
-                let stroke = Stroke::new(1.0, doc.hl.default_color.gamma_multiply(0.7));
+                let stroke = Stroke::new(1.0, doc.text_color().gamma_multiply(0.7));
                 for (a, b) in url_spans(&text) {
                     let (x0, r0) = layout.place(a, char_w);
                     let (x1, r1) = layout.place(b, char_w);
@@ -1024,7 +1003,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         }
         if edit.whitespace && layout.grid == 0 && layout.len <= LONG_LINE {
             let mark = pal.faint.gamma_multiply(0.55);
-            for (col, ch) in doc.rope.line(line).chars().enumerate() {
+            for (col, ch) in doc.line(line).chars().enumerate() {
                 if ch != ' ' && ch != '\t' {
                     continue;
                 }
@@ -1075,7 +1054,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 ));
             }
         }
-        let marked = doc.marks.contains(&line);
+        let marked = doc.has_mark(line);
         if marked {
             if edit.line_numbers {
                 gutter_painter.rect_filled(
@@ -1126,7 +1105,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     }
     let fold_x = gutter_rect.right() - 8.0;
     let current = doc
-        .block_around(doc.rope.char_to_line(doc.sel.1))
+        .block_around(doc.char_to_line(doc.sel.1))
         .filter(|(head, _)| !doc.is_folded(*head));
     let hover_y = ui
         .input(|i| i.pointer.hover_pos())
@@ -1201,10 +1180,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             .rev()
             .find(|r| p.y >= r.1)
     {
-        let line = row.0;
-        if !doc.marks.remove(&line) {
-            doc.marks.insert(line);
-        }
+        doc.toggle_mark_at(row.0);
     }
     let in_numbers = |p: Pos2| {
         p.x < fold_x - 7.0 && (!edit.line_numbers || p.x >= gutter_rect.left() + 14.0)
@@ -1228,23 +1204,24 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             lines_state = None;
         } else {
             let anchor = if modifiers.shift {
-                doc.rope.char_to_line(doc.sel.0.min(doc.len()))
+                doc.anchor_line()
             } else {
                 line
             };
             doc.clear_extra();
-            doc.sel = line_span(doc, anchor, line);
+            let (a, b) = line_span(doc, anchor, line);
+            doc.select(a, b);
             lines_state = Some(anchor);
         }
-        doc.goal_x = None;
-        doc.reveal = false;
+        doc.stop_reveal();
         ui.memory_mut(|mem| mem.request_focus(id));
     } else if gutter_click.dragged()
         && let (Some(anchor), Some(p)) = (lines_state, pointer_at)
         && let Some(line) = line_of(p)
     {
-        doc.sel = line_span(doc, anchor, line);
-        doc.reveal = false;
+        let (a, b) = line_span(doc, anchor, line);
+        doc.select(a, b);
+        doc.stop_reveal();
     }
     if !ui.input(|i| i.pointer.primary_down()) {
         lines_state = None;

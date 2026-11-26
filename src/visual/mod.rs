@@ -79,12 +79,12 @@ pub struct Visual {
 pub const LIMIT: usize = 3 * 1024 * 1024;
 
 pub fn supports(doc: &Document) -> bool {
-    let syntax = doc.syntax.to_ascii_lowercase();
+    let syntax = doc.syntax.clone().to_ascii_lowercase();
     if ["html", "php", "twig", "xml"].iter().any(|s| syntax.contains(s)) {
         return !syntax.contains("xml") || syntax.contains("html");
     }
     let name = doc.title().to_ascii_lowercase();
-    let bare = doc.remote.is_none()
+    let bare = !doc.is_remote()
         && doc
             .path
             .as_ref()
@@ -99,7 +99,7 @@ pub fn supports(doc: &Document) -> bool {
 
 impl Visual {
     pub fn new(doc: &Document) -> Visual {
-        let text = doc.rope.to_string();
+        let text = doc.text();
         let html = parse(&text);
         let mut visual = Visual {
             paras: html.paras(),
@@ -146,7 +146,7 @@ impl Visual {
 
     fn commit(&mut self, doc: &mut Document, kind: EditKind) {
         let new = serialize(&self.html);
-        let old = doc.rope.to_string();
+        let old = doc.text();
         if new == old {
             self.version = doc.version;
             return;
@@ -296,7 +296,7 @@ impl Visual {
         focus: bool,
         search: Option<&mut SearchState>,
     ) {
-        if doc.rope.len_bytes() > LIMIT {
+        if doc.len_bytes() > LIMIT {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new(tr!("Файл слишком большой для визуального режима (больше 3 МБ).")).color(pal.subtext));

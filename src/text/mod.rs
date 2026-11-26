@@ -6,3 +6,5 @@ pub mod marks;
 pub mod search;
 pub mod complete;
 pub mod recover;
+pub mod view;
+pub mod file;

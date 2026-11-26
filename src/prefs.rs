@@ -480,8 +480,9 @@ impl Settings {
             .collect();
         self.active = active;
         for doc in docs {
-            if let Some(path) = &doc.path {
-                self.remember_view(path.clone(), doc.marks.iter().copied().collect(), doc.folds.clone());
+            if let Some(path) = doc.path.clone() {
+                let (marks, folds) = doc.view_state();
+                self.remember_view(path, marks, folds);
             }
         }
     }

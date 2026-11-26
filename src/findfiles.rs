@@ -220,7 +220,7 @@ fn text_of(path: &Path) -> Option<String> {
     }
     match String::from_utf8(bytes) {
         Ok(text) => Some(text),
-        Err(_) => Document::open(0, path).ok().map(|d| d.rope.to_string()),
+        Err(_) => Document::open(0, path).ok().map(|d| d.text()),
     }
 }
 
@@ -275,7 +275,7 @@ pub fn search_text(text: &str, path: &Path, doc: Option<u64>, re: &Regex, out: &
 
 pub fn replace_file(path: &Path, re: &Regex, with: &str, literal: bool) -> Result<usize, String> {
     let mut doc = Document::open(0, path)?;
-    let text = doc.rope.to_string();
+    let text = doc.text();
     let count = re.find_iter(&text).count();
     if count == 0 {
         return Ok(0);
@@ -363,7 +363,7 @@ impl FindFiles {
                 .clone()
                 .unwrap_or_else(|| PathBuf::from(doc.title()));
             search_text(
-                &doc.rope.to_string(),
+                &doc.text(),
                 &path,
                 Some(doc.id),
                 &re,

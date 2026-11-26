@@ -81,7 +81,7 @@ pub fn run() -> i32 {
         300.0,
         time(1, || {
             let middle = edit.len() / 2;
-            edit.sel = (middle, middle);
+            edit.select(middle, middle);
             for _ in 0..10_000 {
                 edit.insert_text("x");
             }

@@ -535,6 +535,7 @@ impl Document {
         self.rope.len_chars()
     }
 
+
     pub fn line_count(&self) -> usize {
         self.rope.len_lines()
     }

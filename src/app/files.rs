@@ -29,17 +29,20 @@ impl TrorApp {
                     {
                         Some(index) => index,
                         None => {
-                            let mut doc = Document::empty(self.next_id, entry.untitled.max(1));
+                            let mut doc = Document::recovered(
+                                self.next_id,
+                                entry.untitled.max(1),
+                                entry.path.clone(),
+                                entry.remote.clone(),
+                                entry.name.clone(),
+                            );
                             self.next_id += 1;
-                            doc.path = entry.path.clone();
-                            doc.remote = entry.remote.clone();
-                            doc.name = entry.name.clone();
                             let name = entry
                                 .path
                                 .clone()
                                 .or_else(|| entry.remote.as_ref().map(|r| PathBuf::from(&r.1)))
                                 .or_else(|| entry.name.as_ref().map(PathBuf::from));
-                            doc.syntax = self.syntaxes.detect(name.as_deref(), &text);
+                            doc.set_syntax(self.syntaxes.detect(name.as_deref(), &text));
                             self.docs.push(doc);
                             fresh = true;
                             self.docs.len() - 1
@@ -118,8 +121,7 @@ impl TrorApp {
                         .file_stem()
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "document".into());
-                    doc.name = Some(format!("{stem}.html"));
-                    doc.syntax = "HTML".into();
+                    doc.present_as(format!("{stem}.html"), "HTML".into());
                     let editor = crate::visual::Visual::new(doc);
                     self.visual.insert(doc.id, editor);
                     self.notify(
@@ -145,17 +147,17 @@ impl TrorApp {
         match Document::open(self.next_id, path) {
             Ok(mut doc) => {
                 self.next_id += 1;
-                doc.syntax = self.syntaxes.detect(Some(path), &doc.first_line());
+                doc.set_syntax(self.syntaxes.detect(Some(path), &doc.first_line()));
                 if self.perf.is_some() {
                     eprintln!(
                         "открыт {} ({}) за {:.0} мс",
                         path.display(),
-                        size_label(doc.rope.len_bytes()),
+                        size_label(doc.len_bytes()),
                         started.elapsed().as_secs_f64() * 1000.0
                     );
                 }
                 let replace_blank = self.docs.len() == 1
-                    && self.docs[0].path.is_none()
+                    && !self.docs[0].has_path()
                     && !self.docs[0].dirty()
                     && self.docs[0].len() == 0;
                 if replace_blank {
@@ -188,13 +190,8 @@ impl TrorApp {
         };
         if self.checked != (doc.id, focused) {
             self.checked = (doc.id, focused);
-            if focused && let Some(path) = &doc.path {
-                if path.exists() {
-                    doc.missing = false;
-                    doc.missing_ack = false;
-                } else {
-                    doc.missing = true;
-                }
+            if focused {
+                doc.check_on_disk();
             }
         }
         if doc.missing
@@ -241,22 +238,15 @@ impl TrorApp {
                 .unwrap_or(0);
             let panel = &mut self.remotes[index];
             let data = doc.encoded();
-            doc.pending_hash = Some(crate::text::document::content_hash(&data));
-            let result = panel.upload(
-                &ctx,
-                &profile,
-                &path,
-                data,
-                (doc.id, doc.version),
-                doc.server_hash,
-            );
+            let expect = doc.begin_upload(&data);
+            let result = panel.upload(&ctx, &profile, &path, data, (doc.id, doc.version), expect);
             match result {
                 Ok(text) => self.notify(text, now),
                 Err(e) => self.notify(tf!("Не сохранено: {e}", "Not saved: {e}"), now),
             }
             return false;
         }
-        if doc.path.is_none() {
+        if !doc.has_path() {
             return self.save_as(index, now);
         }
         match doc.save() {
@@ -297,10 +287,9 @@ impl TrorApp {
             return false;
         };
         let doc = &mut self.docs[index];
-        let previous = doc.path.replace(path.clone());
-        match doc.save() {
+        match doc.save_as_path(path.clone()) {
             Ok(()) => {
-                doc.syntax = self.syntaxes.detect(Some(&path), &doc.first_line());
+                doc.set_syntax(self.syntaxes.detect(Some(&path), &doc.first_line()));
                 self.preview.touch();
                 self.remember(&path);
                 self.notify(tf!("Сохранено: {}", "Saved: {}", path.display()), now);
@@ -308,7 +297,6 @@ impl TrorApp {
                 true
             }
             Err(e) => {
-                self.docs[index].path = previous;
                 self.notify(tf!("Ошибка сохранения: {e}", "Save error: {e}"), now);
                 false
             }
@@ -329,11 +317,11 @@ impl TrorApp {
             return;
         }
         let doc = self.docs.remove(index);
-        if let Some(path) = &doc.path {
-            self.settings
-                .remember_view(path.clone(), doc.marks.iter().copied().collect(), doc.folds.clone());
+        if let Some(path) = doc.path.clone() {
+            let (marks, folds) = doc.view_state();
+            self.settings.remember_view(path, marks, folds);
         }
-        if doc.path.is_some() || doc.remote.is_some() {
+        if !doc.is_new() {
             let entry = (doc.path.clone(), doc.remote.clone());
             self.closed.retain(|c| *c != entry);
             self.closed.push(entry);

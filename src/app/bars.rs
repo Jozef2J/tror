@@ -201,10 +201,8 @@ impl TrorApp {
         let Some(doc) = self.docs.get_mut(self.active) else {
             return;
         };
-        if let Some(sel) = self.search.results(ui, pal, doc) {
-            doc.sel = sel;
-            doc.goal_x = None;
-            doc.reveal = true;
+        if let Some((start, end)) = self.search.results(ui, pal, doc) {
+            doc.jump_to(start, end);
         }
     }
 
@@ -240,16 +238,16 @@ impl TrorApp {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let small = |text: String| RichText::new(text).small().color(pal.subtext);
 
-                ui.menu_button(small(doc.eol.label().into()), |ui| {
+                let eol = doc.eol;
+                ui.menu_button(small(eol.label().into()), |ui| {
                     for eol in [Eol::Lf, Eol::Crlf, Eol::Cr] {
                         let name = match eol {
                             Eol::Lf => "LF — Unix",
                             Eol::Crlf => "CRLF — Windows",
                             Eol::Cr => tr!("CR — классический Mac"),
                         };
-                        if ui.selectable_label(doc.eol == eol, name).clicked() && doc.eol != eol {
-                            doc.eol = eol;
-                            doc.mark_modified();
+                        if ui.selectable_label(doc.eol == eol, name).clicked() {
+                            doc.set_eol(eol);
                         }
                     }
                 });
@@ -258,13 +256,11 @@ impl TrorApp {
                     ui.weak(tr!("Сохранять в кодировке"));
                     for (name, encoding, bom) in ENCODINGS {
                         let selected = doc.encoding == *encoding && doc.bom == *bom;
-                        if ui.selectable_label(selected, *name).clicked() && !selected {
-                            doc.encoding = encoding;
-                            doc.bom = *bom;
-                            doc.mark_modified();
+                        if ui.selectable_label(selected, *name).clicked() {
+                            doc.set_encoding(encoding, *bom);
                         }
                     }
-                    if doc.path.is_some() {
+                    if doc.has_path() {
                         ui.separator();
                         ui.menu_button(tr!("Переоткрыть как"), |ui| {
                             for (name, encoding, bom) in ENCODINGS {
@@ -301,7 +297,7 @@ impl TrorApp {
                                 }
                                 let selected = *name == doc.syntax;
                                 if ui.selectable_label(selected, name.as_str()).clicked() {
-                                    doc.syntax = name.clone();
+                                    doc.set_syntax(name.clone());
                                     self.lang_filter.clear();
                                     ui.close();
                                 }
@@ -315,7 +311,7 @@ impl TrorApp {
                     "Стр {line}, Стлб {col}   ·   строк: {}   ·   {}",
                     "Ln {line}, Col {col}   ·   lines: {}   ·   {}",
                     doc.line_count(),
-                    size_label(doc.rope.len_bytes())
+                    size_label(doc.len_bytes())
                 )));
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.add(egui::Label::new(small(left)).truncate());

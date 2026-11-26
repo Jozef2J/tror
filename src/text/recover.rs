@@ -28,7 +28,7 @@ pub struct Recovery {
 }
 
 pub fn fits(doc: &Document) -> bool {
-    doc.rope.len_bytes() <= LIMIT
+    doc.len_bytes() <= LIMIT
 }
 
 pub fn dir() -> Option<PathBuf> {
@@ -39,7 +39,7 @@ impl Recovery {
     pub fn snapshot(&mut self, dir: &Path, docs: &[Document]) -> Result<(), String> {
         let dirty: Vec<&Document> = docs
             .iter()
-            .filter(|d| d.dirty() && d.rope.len_bytes() <= LIMIT)
+            .filter(|d| d.dirty() && d.len_bytes() <= LIMIT)
             .collect();
         if dirty.is_empty() && self.listed.is_empty() {
             return Ok(());
@@ -52,7 +52,7 @@ impl Recovery {
             let file = dir.join(format!("{}.txt", doc.id));
             let part = dir.join(format!("{}.part", doc.id));
             let out = std::fs::File::create(&part).map_err(|e| e.to_string())?;
-            doc.rope
+            doc.rope()
                 .write_to(std::io::BufWriter::new(out))
                 .map_err(|e| e.to_string())?;
             std::fs::rename(&part, &file).map_err(|e| e.to_string())?;

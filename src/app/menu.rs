@@ -56,7 +56,7 @@ impl TrorApp {
                 ui.separator();
                 let current = self.docs.get(self.active);
                 let savable =
-                    current.is_some_and(|d| d.dirty() || d.path.is_none() && d.remote.is_none());
+                    current.is_some_and(|d| d.dirty() || d.is_new());
                 if item(ui, tr!("Сохранить"), &key("save"), savable) {
                     actions.push(Action::Save);
                 }
@@ -113,9 +113,9 @@ impl TrorApp {
                 let doc = self.docs.get(self.active);
                 let selected = doc.is_some_and(|d| d.has_selection());
                 let filled = doc.is_some_and(|d| d.len() > 0);
-                let line = doc.map_or(0, |d| d.rope.char_to_line(d.sel.1.min(d.len())));
+                let line = doc.map_or(0, |d| d.cursor_line());
                 let last = doc.map_or(0, |d| d.line_count().saturating_sub(1));
-                let marked = doc.is_some_and(|d| !d.marks.is_empty());
+                let marked = doc.is_some_and(|d| d.has_marks());
                 let cmd = if cfg!(target_os = "macos") {
                     "⌘"
                 } else {
@@ -226,7 +226,7 @@ impl TrorApp {
                         ui,
                         tr!("Убрать все"),
                         "",
-                        doc.is_some_and(|d| !d.marks.is_empty()),
+                        doc.is_some_and(|d| d.has_marks()),
                         "bookmark_clear",
                     );
                 });
@@ -252,12 +252,12 @@ impl TrorApp {
                 }
                 ui.separator();
                 let doc = self.docs.get(self.active);
-                let line = doc.map_or(0, |d| d.rope.char_to_line(d.sel.1.min(d.len())));
+                let line = doc.map_or(0, |d| d.cursor_line());
                 let foldable =
                     doc.is_some_and(|d| d.block_around(line).is_some_and(|(h, _)| !d.is_folded(h)));
                 let unfoldable =
-                    doc.is_some_and(|d| d.folds.iter().any(|f| f.0 <= line && f.1 >= line));
-                let any_folds = doc.is_some_and(|d| !d.folds.is_empty());
+                    doc.is_some_and(|d| d.folded_at(line));
+                let any_folds = doc.is_some_and(|d| d.has_folds());
                 let blocks = doc.is_some_and(|d| d.has_blocks());
                 for (kind, label, id, enabled) in [
                     (0, tr!("Свернуть блок"), "fold", foldable),

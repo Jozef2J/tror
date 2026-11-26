@@ -60,7 +60,7 @@ impl TrorApp {
                     self.settings.set_tab_color(key, color);
                 }
             }
-            TabCmd::Pin => self.docs[index].pinned = !self.docs[index].pinned,
+            TabCmd::Pin => self.docs[index].toggle_pin(),
             TabCmd::NewGroup(split) => {
                 if let Some(path) = self.dock.find_tab(&Pane::Doc(id)) {
                     let count = self.leaf_docs(id).len();

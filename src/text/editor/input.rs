@@ -24,12 +24,12 @@ pub(super) fn url_at(doc: &Document, pos: usize) -> Option<String> {
     if pos > doc.len() {
         return None;
     }
-    let line = doc.rope.char_to_line(pos);
-    let start = doc.rope.line_to_char(line);
+    let line = doc.char_to_line(pos);
+    let start = doc.line_to_char(line);
     if doc.line_len(line) > 4000 {
         return None;
     }
-    let text: String = doc.rope.line(line).chars().collect();
+    let text: String = doc.line(line).chars().collect();
     let col = pos - start;
     let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
     let found = re.find_iter(&text).find(|m| m.start() <= byte && byte < m.end())?;
@@ -43,8 +43,8 @@ pub(super) fn url_at(doc: &Document, pos: usize) -> Option<String> {
 
 pub(super) fn line_span(doc: &Document, a: usize, b: usize) -> (usize, usize) {
     let (lo, hi) = (a.min(b), a.max(b));
-    let start = doc.rope.line_to_char(lo);
-    let end = doc.rope.line_to_char(hi) + doc.line_len(hi);
+    let start = doc.line_to_char(lo);
+    let end = doc.line_to_char(hi) + doc.line_len(hi);
     if b < a { (end, start) } else { (start, end) }
 }
 
@@ -92,10 +92,8 @@ pub(super) fn process_events(ui: &Ui, doc: &mut Document, m: &Metrics, events: V
                 doc.select_next_match();
                 continue;
             }
-            if key == Key::Escape && (doc.multi() || doc.block.is_some()) {
-                let sel = doc.sel;
-                doc.clear_extra();
-                doc.sel = sel;
+            if key == Key::Escape && (doc.multi() || doc.has_block()) {
+                doc.collapse_to_primary();
                 continue;
             }
             if doc.multi() {
@@ -177,7 +175,7 @@ pub(super) fn process_events(ui: &Ui, doc: &mut Document, m: &Metrics, events: V
                         doc.insert_text("");
                     }
                     doc.block_paste_at(top, col, &lines);
-                    doc.block = None;
+                    doc.clear_block();
                 } else if !text.is_empty() {
                     if !doc.multi() && is_block_clip(&text) {
                         if doc.has_selection() {
@@ -193,7 +191,7 @@ pub(super) fn process_events(ui: &Ui, doc: &mut Document, m: &Metrics, events: V
                 let cut = matches!(event, Event::Cut);
                 if doc.multi() {
                     let text = doc.texts().join("\n");
-                    remember_block((doc.block.is_some() || doc.multi()).then(|| text.clone()));
+                    remember_block((doc.has_block() || doc.multi()).then(|| text.clone()));
                     ui.ctx().copy_text(text);
                     if cut {
                         doc.insert_text("");
@@ -237,8 +235,8 @@ pub(super) fn process_events(ui: &Ui, doc: &mut Document, m: &Metrics, events: V
                         };
                         doc.move_to(pos, shift);
                     }
-                    Key::ArrowUp if cmd => doc.scroll_y -= m.row_h as f64,
-                    Key::ArrowDown if cmd => doc.scroll_y += m.row_h as f64,
+                    Key::ArrowUp if cmd => doc.scroll_by(0.0, -(m.row_h as f64)),
+                    Key::ArrowDown if cmd => doc.scroll_by(0.0, m.row_h as f64),
                     Key::ArrowUp => move_vertical(ui, doc, m, -1, shift),
                     Key::ArrowDown => move_vertical(ui, doc, m, 1, shift),
                     Key::PageUp => move_vertical(ui, doc, m, -(m.rows.max(2) as isize - 1), shift),

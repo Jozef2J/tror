@@ -237,9 +237,9 @@ impl TrorApp {
                         let panel = self.remotes.iter().position(|r| r.serves(&profile));
                         match panel {
                             Some(p) => {
-                                self.remotes[p].rename_file(&profile, &from, &to).map(|()| {
-                                    self.docs[index].remote = Some((profile, to));
-                                })
+                                self.remotes[p]
+                                    .rename_file(&profile, &from, &to)
+                                    .map(|()| self.docs[index].rename_remote(to))
                             }
                             None => Err(tf!(
                                 "сначала подключитесь к «{profile}»",
@@ -256,18 +256,16 @@ impl TrorApp {
                                 .map_err(|e| e.to_string())
                                 .map(|()| {
                                     let first = self.docs[index].first_line();
-                                    self.docs[index].syntax =
-                                        self.syntaxes.detect(Some(&to), &first);
-                                    self.docs[index].path = Some(to.clone());
+                                    let syntax = self.syntaxes.detect(Some(&to), &first);
+                                    self.docs[index].rename_path(to.clone(), syntax);
                                     self.remember(&to);
                                 })
                         }
                     }
                     (None, None) => {
                         let first = self.docs[index].first_line();
-                        self.docs[index].syntax =
-                            self.syntaxes.detect(Some(Path::new(&name)), &first);
-                        self.docs[index].name = Some(name.clone());
+                        let syntax = self.syntaxes.detect(Some(Path::new(&name)), &first);
+                        self.docs[index].present_as(name.clone(), syntax);
                         Ok(())
                     }
                 };
@@ -443,7 +441,7 @@ impl TrorApp {
                     "Файл «{}» больше не существует {}. Оставить вкладку открытой?",
                     "File \"{}\" no longer exists {}. Keep the tab open?",
                     doc.title(),
-                    if doc.remote.is_some() {
+                    if doc.is_remote() {
                         tr!("на сервере")
                     } else {
                         tr!("на диске")
@@ -502,7 +500,7 @@ impl TrorApp {
                     if choice == 1 {
                         self.remove_doc(i);
                     } else {
-                        self.docs[i].missing_ack = true;
+                        self.docs[i].ack_missing();
                     }
                 }
             }
@@ -567,7 +565,7 @@ impl TrorApp {
                 now,
             ),
             1 => {
-                self.docs[index].server_hash = None;
+                self.docs[index].forget_server_copy();
                 self.save(index, now);
             }
             _ => self.notify(tr!("Сохранение отменено"), now),
@@ -586,9 +584,10 @@ impl TrorApp {
         match Document::open_remote(self.next_id, profile, path, server) {
             Ok(mut server) => {
                 self.next_id += 1;
-                server.remote = None;
-                server.name = Some(tf!("{name} (сервер)", "{name} (server)"));
-                server.syntax = self.docs[index].syntax.clone();
+                server.present_as(
+                    tf!("{name} (сервер)", "{name} (server)"),
+                    self.docs[index].syntax.clone(),
+                );
                 let local = self.docs[index].id;
                 let id = server.id;
                 self.diff.left = Some(id);

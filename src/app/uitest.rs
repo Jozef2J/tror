@@ -262,7 +262,7 @@ fn ui_find_and_replace_in_document() {
     harness.run_steps(3);
     let state = harness.state();
     assert_eq!(
-        state.docs[state.active].rope.to_string(),
+        state.docs[state.active].text(),
         "cost2 cost2 cost"
     );
 }
@@ -350,7 +350,7 @@ fn ui_tab_indents_selected_lines() {
     harness.run_steps(3);
     let text = |harness: &Harness<'_, TrorApp>| {
         let state = harness.state();
-        state.docs[state.active].rope.to_string()
+        state.docs[state.active].text()
     };
     harness.key_press(egui::Key::ArrowDown);
     harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowDown);

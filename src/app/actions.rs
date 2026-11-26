@@ -65,7 +65,7 @@ impl TrorApp {
                 let title = doc.title();
                 let html = self
                     .syntaxes
-                    .print_html(&doc.rope.to_string(), &doc.syntax, &title);
+                    .print_html(&doc.text(), &doc.syntax, &title);
                 let file = std::env::temp_dir().join(format!("trorpad-print-{}.html", doc.id));
                 let result = std::fs::write(&file, html)
                     .map_err(|e| e.to_string())
@@ -94,9 +94,7 @@ impl TrorApp {
                     self.focus_editor = true;
                 } else {
                     let index = self.active;
-                    if self.docs[index].syntax == "Plain Text" {
-                        self.docs[index].syntax = "HTML".into();
-                    }
+                    self.docs[index].prefer_html();
                     let editor = crate::visual::Visual::new(&self.docs[index]);
                     self.visual.insert(id, editor);
                 }
@@ -249,7 +247,7 @@ impl TrorApp {
                                 );
                             }
                         }
-                        "bookmark_clear" => doc.marks.clear(),
+                        "bookmark_clear" => doc.clear_marks(),
                         _ => {}
                     }
                 }
@@ -267,7 +265,7 @@ impl TrorApp {
                         2 => doc.fold_all(),
                         _ => doc.unfold_all(),
                     }
-                    doc.reveal = true;
+                    doc.request_reveal();
                 }
                 self.focus_editor = true;
             }

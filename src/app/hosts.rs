@@ -119,21 +119,13 @@ impl TrorApp {
                             && crate::remote::parent(path) == dir
                         {
                             let exists = names.iter().any(|n| n == crate::remote::file_name(path));
-                            if exists {
-                                doc.missing = false;
-                                doc.missing_ack = false;
-                            } else {
-                                doc.missing = true;
-                            }
+                            doc.set_missing(!exists);
                         }
                     }
                 }
                 PanelEvent::Uploaded { doc, path } => {
                     if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc.0) {
-                        d.mark_saved(doc.1);
-                        if d.pending_hash.is_some() {
-                            d.server_hash = d.pending_hash.take();
-                        }
+                        d.finish_upload(doc.1);
                     }
                     self.notify(
                         tf!(
@@ -164,9 +156,7 @@ impl TrorApp {
                     match Document::open_remote(self.next_id, &profile, &path, data) {
                         Ok(mut doc) => {
                             self.next_id += 1;
-                            doc.syntax = self
-                                .syntaxes
-                                .detect(Some(Path::new(&path)), &doc.first_line());
+                            doc.set_syntax(self.syntaxes.detect(Some(Path::new(&path)), &doc.first_line()));
                             if let Some(line) = line {
                                 doc.goto_line(line);
                             }

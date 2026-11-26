@@ -329,7 +329,7 @@ impl eframe::App for TrorApp {
             Some(crate::findfiles::Out::ReplaceTabs(re, with, literal)) => {
                 let mut total = 0;
                 for doc in &mut self.docs {
-                    let text = doc.rope.to_string();
+                    let text = doc.text();
                     let count = re.find_iter(&text).filter(|m| !m.is_empty()).count();
                     if count == 0 {
                         continue;
@@ -352,9 +352,9 @@ impl eframe::App for TrorApp {
                 for doc in self
                     .docs
                     .iter_mut()
-                    .filter(|d| !d.dirty() && d.path.is_some())
+                    .filter(|d| !d.dirty() && d.has_path())
                 {
-                    let _ = doc.reopen_as(doc.encoding);
+                    let _ = doc.reload();
                 }
             }
             None => {}
@@ -907,19 +907,7 @@ impl TrorApp {
 
     fn relocate(&mut self, moved: &[(PathBuf, PathBuf)]) {
         for doc in &mut self.docs {
-            let Some(path) = doc.path.clone() else {
-                continue;
-            };
-            for (from, to) in moved {
-                if let Ok(rest) = path.strip_prefix(from) {
-                    doc.path = Some(if rest.as_os_str().is_empty() {
-                        to.clone()
-                    } else {
-                        to.join(rest)
-                    });
-                    break;
-                }
-            }
+            doc.move_path(moved);
         }
     }
 

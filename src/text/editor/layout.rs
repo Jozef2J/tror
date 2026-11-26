@@ -56,9 +56,9 @@ pub(super) fn plain_job(text: String, m: &Metrics, color: egui::Color32, wrap_wi
 
 pub(super) fn layout_line(ui: &Ui, doc: &Document, line: usize, m: &Metrics) -> LineLayout {
     let len = doc.line_len(line);
-    let start = doc.rope.line_to_char(line);
+    let start = doc.line_to_char(line);
     if m.wrap && len > LONG_LINE {
-        let empty = plain_job(String::new(), m, doc.hl.default_color, f32::INFINITY);
+        let empty = plain_job(String::new(), m, doc.text_color(), f32::INFINITY);
         return LineLayout {
             galley: ui.fonts_mut(|f| f.layout_job(empty)),
             x0: 0.0,
@@ -78,16 +78,16 @@ pub(super) fn layout_line(ui: &Ui, doc: &Document, line: usize, m: &Metrics) -> 
     } else {
         (0, len)
     };
-    let text = String::from(doc.rope.slice(start + c0..start + c1));
+    let text = String::from(doc.slice(start + c0..start + c1));
     let format = |color| TextFormat {
         line_height: Some(m.row_h),
         ..TextFormat::simple(m.font.clone(), color)
     };
-    let default = doc.hl.default_color;
+    let default = doc.text_color();
     let mut sections = Vec::new();
     if c0 == 0 && c1 == len {
         let mut offset = 0;
-        for span in doc.hl.spans(line) {
+        for span in doc.spans(line) {
             let end = (offset + span.len as usize).min(text.len());
             if !text.is_char_boundary(end) {
                 sections.clear();
@@ -154,8 +154,8 @@ pub(super) fn grid_row(
     m: &Metrics,
 ) -> Arc<Galley> {
     let (start, end) = layout.row_range(row);
-    let text = String::from(doc.rope.slice(line_start + start..line_start + end));
-    let job = plain_job(text, m, doc.hl.default_color, f32::INFINITY);
+    let text = String::from(doc.slice(line_start + start..line_start + end));
+    let job = plain_job(text, m, doc.text_color(), f32::INFINITY);
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
@@ -196,8 +196,8 @@ pub(super) fn visible_lines(ui: &Ui, doc: &Document, m: &Metrics, view_h: f32) -
 }
 
 pub(super) fn wrapped_step(ui: &Ui, doc: &Document, m: &Metrics, pos: usize, goal: f64, down: bool) -> usize {
-    let line = doc.rope.char_to_line(pos);
-    let start = doc.rope.line_to_char(line);
+    let line = doc.char_to_line(pos);
+    let start = doc.line_to_char(line);
     let layout = layout_line(ui, doc, line, m);
     let (_, row) = layout.place(pos - start, m.char_w);
     if down {
@@ -205,7 +205,7 @@ pub(super) fn wrapped_step(ui: &Ui, doc: &Document, m: &Metrics, pos: usize, goa
             start + layout.col_at_row(goal, row + 1, m.char_w)
         } else if let Some(below) = doc.next_shown(line) {
             let next = layout_line(ui, doc, below, m);
-            doc.rope.line_to_char(below) + next.col_at_row(goal, 0, m.char_w)
+            doc.line_to_char(below) + next.col_at_row(goal, 0, m.char_w)
         } else {
             doc.len()
         }
@@ -213,7 +213,7 @@ pub(super) fn wrapped_step(ui: &Ui, doc: &Document, m: &Metrics, pos: usize, goa
         start + layout.col_at_row(goal, row - 1, m.char_w)
     } else if let Some(above) = doc.prev_shown(line) {
         let prev = layout_line(ui, doc, above, m);
-        doc.rope.line_to_char(above) + prev.col_at_row(goal, prev.rows() - 1, m.char_w)
+        doc.line_to_char(above) + prev.col_at_row(goal, prev.rows() - 1, m.char_w)
     } else {
         0
     }
@@ -221,12 +221,11 @@ pub(super) fn wrapped_step(ui: &Ui, doc: &Document, m: &Metrics, pos: usize, goa
 
 pub(super) fn move_vertical(ui: &Ui, doc: &mut Document, m: &Metrics, delta: isize, extend: bool) {
     let head = doc.sel.1;
-    let line = doc.rope.char_to_line(head);
-    let col = head - doc.rope.line_to_char(line);
+    let line = doc.char_to_line(head);
+    let col = head - doc.line_to_char(line);
     if m.wrap {
-        let goal = doc
-            .goal_x
-            .unwrap_or_else(|| layout_line(ui, doc, line, m).place(col, m.char_w).0);
+        let goal = doc.goal_x;
+        let goal = goal.unwrap_or_else(|| layout_line(ui, doc, line, m).place(col, m.char_w).0);
         let mut pos = head;
         for _ in 0..delta.unsigned_abs() {
             let next = wrapped_step(ui, doc, m, pos, goal, delta > 0);
@@ -235,13 +234,11 @@ pub(super) fn move_vertical(ui: &Ui, doc: &mut Document, m: &Metrics, delta: isi
             }
             pos = next;
         }
-        doc.move_to(pos, extend);
-        doc.goal_x = Some(goal);
+        doc.move_to_goal(pos, extend, goal);
         return;
     }
-    let goal = doc
-        .goal_x
-        .unwrap_or_else(|| layout_line(ui, doc, line, m).x_of(col, m.char_w));
+    let goal = doc.goal_x;
+    let goal = goal.unwrap_or_else(|| layout_line(ui, doc, line, m).x_of(col, m.char_w));
     let visual = (doc.to_visual(line) as isize + delta).clamp(0, doc.shown_count() as isize - 1);
     let target = doc.line_of_visual(visual as usize);
     let pos = if target == line && delta < 0 {
@@ -249,8 +246,7 @@ pub(super) fn move_vertical(ui: &Ui, doc: &mut Document, m: &Metrics, delta: isi
     } else if target == line {
         doc.len()
     } else {
-        doc.rope.line_to_char(target) + layout_line(ui, doc, target, m).col_at(goal)
+        doc.line_to_char(target) + layout_line(ui, doc, target, m).col_at(goal)
     };
-    doc.move_to(pos, extend);
-    doc.goal_x = Some(goal);
+    doc.move_to_goal(pos, extend, goal);
 }

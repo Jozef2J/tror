@@ -398,7 +398,8 @@ impl SearchState {
         }
         ui.add_space(6.0);
         ui.separator();
-        let current = matches.partition_point(|m| m.0 < doc.sel.0.min(doc.sel.1));
+        let start = doc.selection().start;
+        let current = matches.partition_point(|m| m.0 < start);
         let row_h = crate::widgets::RESULT_ROW;
         let mut pick = None;
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -411,9 +412,9 @@ impl SearchState {
             .show_rows(ui, row_h, matches.len(), |ui, rows| {
                 for index in rows {
                     let (start, end) = matches[index];
-                    let line = doc.rope.char_to_line(start.min(doc.len()));
+                    let line = doc.char_to_line(start.min(doc.len()));
                     let text: String = doc
-                        .rope
+                        
                         .line(line)
                         .chars()
                         .take(300)
@@ -529,9 +530,9 @@ impl SearchState {
         self.re = Some(re.clone());
         let cancel = Arc::new(AtomicBool::new(false));
         match ctx {
-            Some(ctx) if doc.rope.len_bytes() > SYNC_LIMIT => {
+            Some(ctx) if doc.len_bytes() > SYNC_LIMIT => {
                 let (tx, rx) = channel();
-                let rope = doc.rope.clone();
+                let rope = doc.rope();
                 let flag = cancel.clone();
                 let ctx = ctx.clone();
                 std::thread::spawn(move || {
@@ -543,7 +544,7 @@ impl SearchState {
                 self.job = Some(Job { rx, cancel });
             }
             _ => {
-                if let Some(found) = find_all(&doc.rope, &re, &cancel) {
+                if let Some(found) = find_all(&doc.rope(), &re, &cancel) {
                     self.matches = found.matches;
                     self.truncated = found.truncated;
                 }
@@ -587,7 +588,7 @@ impl SearchState {
             Pending::DeleteAll => {
                 self.pending = None;
                 if let Some(re) = &self.re {
-                    let text = String::from(&doc.rope);
+                    let text = doc.text();
                     let mut out = String::with_capacity(text.len());
                     let mut last = 0;
                     let mut count = 0;
@@ -618,7 +619,7 @@ impl SearchState {
             Pending::ReplaceAll => {
                 self.pending = None;
                 if let Some(re) = &self.re {
-                    let text = String::from(&doc.rope);
+                    let text = doc.text();
                     let mut count = 0;
                     let replacement_text = self.replacement_text();
                     let replacement = replacement_text.as_str();
@@ -670,9 +671,7 @@ impl SearchState {
                     }
                 };
                 let (start, end) = self.matches[index];
-                doc.sel = (start, end);
-                doc.goal_x = None;
-                doc.reveal = true;
+                doc.jump_to(start, end);
             }
         }
     }
