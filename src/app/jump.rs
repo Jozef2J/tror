@@ -90,7 +90,7 @@ impl TrorApp {
         let query = self.jump.query.trim_start();
         let mut rows = Vec::new();
         if let Some(command) = query.strip_prefix('>') {
-            let keys = crate::keys::Keys::new(&self.settings.keys);
+            let keys = self.settings.shortcuts();
             for (index, (_, label, _, _)) in crate::keys::COMMANDS.iter().enumerate() {
                 let name = tr!(label).to_owned();
                 if let Some((score, hits)) = score(command.trim(), &name) {

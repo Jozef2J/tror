@@ -23,15 +23,13 @@ impl TrorApp {
             Action::OpenFolder => {
                 if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                     self.project.set_root(dir);
-                    if !self.settings.detached.contains(&Pane::Project) {
-                        dock::show(&mut self.dock, Pane::Project, &self.settings.floats);
-                    }
+                    self.settings.show_attached(&mut self.dock, Pane::Project);
                 }
             }
             Action::OpenSecondFolder => {
                 if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                     self.project2.set_root(dir);
-                    dock::show(&mut self.dock, Pane::Project2, &self.settings.floats);
+                    self.settings.show(&mut self.dock, Pane::Project2);
                 }
             }
             Action::AddHosts => {
@@ -47,8 +45,8 @@ impl TrorApp {
                     None => None,
                 };
                 if let Some(index) = index {
-                    self.settings.hosts = self.remotes.len();
-                    dock::show(&mut self.dock, Pane::hosts(index), &self.settings.floats);
+                    self.settings.remember_hosts(self.remotes.len());
+                    self.settings.show(&mut self.dock, Pane::hosts(index));
                 }
             }
             Action::OpenPath(path) => self.open_path(&path, now),
@@ -106,7 +104,7 @@ impl TrorApp {
             Action::OpenProject(path) => {
                 if path.is_dir() {
                     self.project.set_root(path);
-                    dock::show(&mut self.dock, Pane::Project, &self.settings.floats);
+                    self.settings.show(&mut self.dock, Pane::Project);
                 } else {
                     self.notify(
                         tf!(
@@ -154,11 +152,7 @@ impl TrorApp {
                                     now,
                                 );
                             } else if !self.host_shown(index) {
-                                dock::show(
-                                    &mut self.dock,
-                                    Pane::hosts(index),
-                                    &self.settings.floats,
-                                );
+                                self.settings.show(&mut self.dock, Pane::hosts(index));
                             }
                         }
                         None => {
@@ -277,32 +271,28 @@ impl TrorApp {
                 }
                 self.focus_editor = true;
             }
-            Action::ToggleTheme => self.settings.look.dark = !self.settings.look.dark,
-            Action::ToggleWrap => self.settings.wrap = !self.settings.wrap,
+            Action::ToggleTheme => self.settings.toggle_theme(),
+            Action::ToggleWrap => self.settings.toggle_wrap(),
             Action::Toggle(pane) => {
-                if self.settings.detached.contains(&pane) {
-                    self.settings.detached.retain(|p| *p != pane);
+                if self.settings.is_detached(pane) {
+                    self.settings.attach(pane);
                 } else {
-                    dock::toggle(&mut self.dock, pane, &self.settings.floats);
+                    self.settings.toggle(&mut self.dock, pane);
                 }
             }
             Action::Attach(pane) => {
-                self.settings.detached.retain(|p| *p != pane);
+                self.settings.attach(pane);
                 if !matches!(pane, Pane::Doc(_)) {
-                    dock::show(&mut self.dock, pane, &self.settings.floats);
+                    self.settings.show(&mut self.dock, pane);
                 }
             }
             Action::Show(pane) => {
-                if !self.settings.detached.contains(&pane) {
-                    dock::show(&mut self.dock, pane, &self.settings.floats);
-                }
+                self.settings.show_attached(&mut self.dock, pane);
             }
             Action::ResetLayout => {
                 self.dock = dock::new();
                 self.sizes = Default::default();
-                self.settings.panel_sizes.clear();
-                self.settings.homes.clear();
-                dock::set_homes(Vec::new());
+                self.settings.reset_layout();
                 self.focus_editor = true;
             }
             Action::Preview => {
@@ -385,8 +375,8 @@ impl TrorApp {
                 }
             }
             Action::MacroLoad(index, run) => {
-                if let Some((name, events)) = self.settings.macros.get(index) {
-                    self.macros.events = events.clone();
+                if let Some((name, events)) = self.settings.macro_at(index) {
+                    self.macros.events = events.to_vec();
                     if run {
                         self.macros.play += 1;
                     } else {
@@ -396,9 +386,7 @@ impl TrorApp {
                 }
             }
             Action::MacroDelete(index) => {
-                if index < self.settings.macros.len() {
-                    self.settings.macros.remove(index);
-                }
+                self.settings.remove_macro(index);
             }
             Action::Compare => {
                 if let Some(doc) = self.docs.get(self.active) {
@@ -414,7 +402,7 @@ impl TrorApp {
                             .map(|d| d.id);
                     }
                 }
-                dock::show(&mut self.dock, Pane::Diff, &self.settings.floats);
+                self.settings.show(&mut self.dock, Pane::Diff);
             }
             Action::Plugin(index) => self.run_plugin(index, ctx),
             Action::PluginCommand(plugin, command) => self.plugin_command(plugin, command),

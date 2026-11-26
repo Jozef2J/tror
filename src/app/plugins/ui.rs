@@ -388,7 +388,7 @@ impl TrorApp {
             .copied()
             .filter(|key| {
                 dock::has(&self.dock, Pane::Plugin(*key))
-                    || self.settings.detached.contains(&Pane::Plugin(*key))
+                    || self.settings.is_detached(Pane::Plugin(*key))
             })
             .collect();
         for key in open {
@@ -415,7 +415,7 @@ impl TrorApp {
         let key = dock::plugin_key(&worker.manifest.id, &def.id);
         let pane = Pane::Plugin(key);
         let shown = dock::has(&self.dock, pane);
-        dock::show(&mut self.dock, pane, &self.settings.floats);
+        self.settings.show(&mut self.dock, pane);
         if !shown {
             self.plugin_panel_opened(key);
         }
@@ -500,11 +500,8 @@ impl TrorApp {
                 }
             }
             Effect::ShowPanel(id) => {
-                dock::show(
-                    &mut self.dock,
-                    Pane::Plugin(dock::plugin_key(&plugin_id, &id)),
-                    &self.settings.floats,
-                );
+                self.settings
+                    .show(&mut self.dock, Pane::Plugin(dock::plugin_key(&plugin_id, &id)));
             }
             _ => {}
         }

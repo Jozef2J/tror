@@ -273,10 +273,8 @@ impl TrorApp {
                 };
                 match result {
                     Ok(()) => {
-                        if let (Some(old), Some(new)) = (old_key, self.docs[index].location())
-                            && let Some(color) = self.settings.tab_colors.remove(&old)
-                        {
-                            self.settings.tab_colors.insert(new, color);
+                        if let (Some(old), Some(new)) = (old_key, self.docs[index].location()) {
+                            self.settings.move_tab_color(&old, new);
                         }
                         self.notify(tf!("Переименовано в {name}", "Renamed to {name}"), now);
                     }
@@ -356,10 +354,7 @@ impl TrorApp {
                     let name = name.trim().to_owned();
                     if !name.is_empty() {
                         let events = self.macros.events.clone();
-                        match self.settings.macros.iter_mut().find(|m| m.0 == name) {
-                            Some(slot) => slot.1 = events,
-                            None => self.settings.macros.push((name, events)),
-                        }
+                        self.settings.save_macro(name, events);
                         done = true;
                     }
                 }
@@ -599,8 +594,8 @@ impl TrorApp {
                 self.diff.left = Some(id);
                 self.diff.right = Some(local);
                 self.docs.push(server);
-                dock::show(&mut self.dock, Pane::Doc(id), &self.settings.floats);
-                dock::show(&mut self.dock, Pane::Diff, &self.settings.floats);
+                self.settings.show(&mut self.dock, Pane::Doc(id));
+                self.settings.show(&mut self.dock, Pane::Diff);
             }
             Err(e) => self.notify(
                 tf!(

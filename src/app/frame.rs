@@ -45,7 +45,7 @@ impl eframe::App for TrorApp {
             let kept = self.recovery.snapshot(&dir, &self.docs);
             if let Err(e) = kept {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-                self.settings.keep_session = false;
+                self.settings.end_session();
                 let now = ctx.input(|i| i.time);
                 self.notify(
                     tf!(
@@ -69,16 +69,14 @@ impl eframe::App for TrorApp {
             self.recovery = Default::default();
             self.recovery.last = f64::INFINITY;
         }
-        let detached = self.settings.detached.clone();
         let labels: Vec<Option<String>> = self.remotes.iter().map(|r| r.peer_label()).collect();
         for (index, panel) in self.remotes.iter_mut().enumerate() {
             let pane = Pane::hosts(index);
-            let shown = dock::has(&self.dock, pane) || detached.contains(&pane);
+            let shown = dock::has(&self.dock, pane) || self.settings.is_detached(pane);
             panel.arrange(shown, self.settings.remote_tree, &labels, index);
         }
         self.project.tree = self.settings.project_tree;
         self.project.upload_target = self.remotes.iter().find_map(|r| r.peer_label());
-        crate::text::complete::set_custom(&self.settings.dictionaries);
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -226,17 +224,16 @@ impl eframe::App for TrorApp {
             zoom -= 1.0;
         }
         if reset {
-            self.settings.look.font_size = crate::prefs::Look::default().font_size;
+            self.settings.reset_zoom();
             let now = ctx.input(|i| i.time);
             self.notify(tr!("Размер шрифта редактора по умолчанию").to_owned(), now);
         }
         if zoom != 0.0 {
-            let size = &mut self.settings.look.font_size;
-            *size = (*size + zoom).clamp(7.0, 48.0);
+            let size = self.settings.zoom(zoom);
             let text = tf!(
                 "Размер шрифта редактора: {}",
                 "Editor font size: {}",
-                *size as i32
+                size as i32
             );
             let now = ctx.input(|i| i.time);
             self.notify(text, now);
@@ -284,15 +281,15 @@ impl eframe::App for TrorApp {
             }
         }
         if self.project.root.is_none() {
-            self.settings.project = None;
+            self.settings.forget_project(false);
         }
         if self.project2.root.is_none() {
-            self.settings.project2 = None;
+            self.settings.forget_project(true);
         }
         self.project.show_size = self.settings.project_size;
         self.project.show_date = self.settings.project_date;
-        self.settings.columns = crate::widgets::columns();
-        crate::text::document::set_indent(self.settings.edit.unit());
+        self.settings.remember_widths();
+        self.settings.apply_editing();
         crate::console::terminal::SCROLLBACK.store(
             self.settings.scrollback as usize,
             std::sync::atomic::Ordering::Relaxed,
@@ -325,7 +322,7 @@ impl eframe::App for TrorApp {
             Some(crate::findfiles::Out::OpenDoc(id, line)) => {
                 if let Some(index) = self.docs.iter().position(|d| d.id == id) {
                     self.active = index;
-                    dock::show(&mut self.dock, Pane::Doc(id), &self.settings.floats);
+                    self.settings.show(&mut self.dock, Pane::Doc(id));
                     self.docs[index].goto_line(line);
                 }
             }
@@ -396,15 +393,16 @@ impl eframe::App for TrorApp {
             .show_separator_line(true)
             .show(ui, |ui| self.status_bar(ui, &pal));
 
-        self.settings.detached.retain(|pane| match pane {
-            Pane::Doc(id) => self.docs.iter().any(|d| d.id == *id),
+        let docs = &self.docs;
+        self.settings.keep_detached(|pane| match pane {
+            Pane::Doc(id) => docs.iter().any(|d| d.id == *id),
             _ => true,
         });
         let ids: Vec<u64> = self
             .docs
             .iter()
             .map(|d| d.id)
-            .filter(|id| !self.settings.detached.contains(&Pane::Doc(*id)))
+            .filter(|id| !self.settings.is_detached(Pane::Doc(*id)))
             .collect();
         dock::sync_with(&mut self.dock, &ids, self.docs.is_empty());
         if self.focus_editor
@@ -455,7 +453,7 @@ impl eframe::App for TrorApp {
         let pressed = ctx.input(|i| i.pointer.any_down());
         dock::keep_sizes(&mut dock, &mut self.sizes, pressed);
         if std::mem::take(&mut self.sizes.changed) {
-            self.settings.panel_sizes = self.sizes.known.clone();
+            self.settings.remember_sizes(&self.sizes);
         }
         if !pressed {
             dock::enforce_min(&mut dock);
@@ -472,26 +470,21 @@ impl eframe::App for TrorApp {
                 .collect();
             for (pane, rect) in floating {
                 dock::hide(&mut dock, pane);
-                if !self.settings.detached.contains(&pane) {
-                    self.settings.detached.push(pane);
-                }
-                if rect.is_finite() && rect.width() > 40.0 {
-                    let min = origin + rect.min.to_vec2();
-                    self.settings.floats.retain(|(p, _)| *p != pane);
-                    self.settings
-                        .floats
-                        .push((pane, [min.x, min.y, rect.width(), rect.height()]));
-                }
+                let min = origin + rect.min.to_vec2();
+                let placed = (rect.is_finite() && rect.width() > 40.0)
+                    .then_some([min.x, min.y, rect.width(), rect.height()]);
+                self.settings.detach(pane, placed);
             }
         }
         dock::remember_homes(&dock);
-        self.settings.homes = dock::homes();
+        self.settings.remember_homes();
         self.dock = dock;
         if ctx.input(|i| i.viewport().focused) == Some(true) {
             owner::remember_main();
         }
-        self.floats.prune(&self.settings.detached);
-        for pane in self.settings.detached.clone() {
+        let detached = self.settings.detached_panes();
+        self.floats.prune(&detached);
+        for pane in detached {
             let title = match pane {
                 Pane::Doc(id) => self
                     .docs
@@ -512,9 +505,9 @@ impl eframe::App for TrorApp {
                 .with_inner_size([860.0, 580.0])
                 .with_min_inner_size([min_w + 16.0, min_h + 48.0]);
             if !self.floats.spawn.contains_key(&pane)
-                && let Some((_, rect)) = self.settings.floats.iter().find(|(p, _)| *p == pane)
+                && let Some(rect) = self.settings.float_of(pane)
             {
-                self.floats.spawn.insert(pane, *rect);
+                self.floats.spawn.insert(pane, rect);
             }
             if let Some([x, y, w, h]) = self.floats.spawn.get(&pane) {
                 builder = builder
@@ -672,8 +665,7 @@ impl eframe::App for TrorApp {
             if let Some(rect) = placed
                 && rect.iter().all(|v| v.is_finite())
             {
-                self.settings.floats.retain(|(p, _)| *p != pane);
-                self.settings.floats.push((pane, rect));
+                self.settings.remember_float(pane, rect);
             }
             if closed {
                 actions.push(Action::Attach(pane));
@@ -748,7 +740,7 @@ impl eframe::App for TrorApp {
         let mut panes = self.hosts_panes();
         panes.extend([Pane::Console, Pane::Db, Pane::Project]);
         for pane in panes {
-            if !self.settings.detached.contains(&pane) {
+            if !self.settings.is_detached(pane) {
                 self.pane_dialogs(pane, &ctx, &pal);
             }
         }
@@ -779,21 +771,7 @@ impl eframe::App for TrorApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        self.settings.open = self
-            .docs
-            .iter()
-            .filter_map(|d| Some((d.id, d.path.clone()?)))
-            .collect();
-        self.settings.pinned = self
-            .docs
-            .iter()
-            .filter(|d| d.pinned)
-            .filter_map(|d| d.path.clone())
-            .collect();
-        self.settings.active = self.active;
-        for doc in &self.docs {
-            Self::remember_view(&mut self.settings, doc);
-        }
+        self.settings.remember_open(&self.docs, self.active);
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);
         eframe::set_value(storage, DOCK_KEY, &self.dock);
     }
@@ -830,16 +808,11 @@ impl TrorApp {
             }
             ProjectEvent::Toast(text) => self.notify(text, now),
             ProjectEvent::Opened(path) => {
-                self.settings.recent_projects.retain(|p| *p != path);
-                self.settings.recent_projects.insert(0, path.clone());
-                self.settings.recent_projects.truncate(MAX_RECENT);
-                if second {
-                    self.settings.project2 = Some(path);
-                } else {
-                    self.settings.project = Some(path);
-                }
+                self.settings.remember_project(path, second);
             }
-            ProjectEvent::View(tree) => self.settings.project_tree = tree,
+            ProjectEvent::View(tree) => {
+                self.settings.view_as_tree(false, tree);
+            }
             ProjectEvent::Transfer(paths, keep) => {
                 self.move_between_projects(paths, second, keep, now)
             }
@@ -954,10 +927,10 @@ impl TrorApp {
         theme::commit_term_fonts();
         let wanted_fonts = self.console.fonts();
         let fonts_changed = self.term_fonts.as_ref() != Some(&wanted_fonts);
-        if self.applied.as_ref() == Some(&self.settings.look) && !fonts_changed {
+        if self.settings.same_look(self.applied.as_ref()) && !fonts_changed {
             return;
         }
-        let look = self.settings.look.clone();
+        let look = self.settings.look();
         let old = self.applied.take();
         let fonts = |l: &Look| (l.ui_font.clone(), l.code_font.clone(), l.tab_width);
         if (old.as_ref().map(fonts) != Some(fonts(&look)) || fonts_changed)

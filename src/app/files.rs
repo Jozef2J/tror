@@ -70,7 +70,7 @@ impl TrorApp {
         }
         if path.is_dir() {
             self.project.set_root(path);
-            dock::show(&mut self.dock, Pane::Project, &self.settings.floats);
+            self.settings.show(&mut self.dock, Pane::Project);
         } else {
             self.open_path(&path, 0.0);
         }
@@ -161,8 +161,8 @@ impl TrorApp {
                 if replace_blank {
                     self.docs.clear();
                 }
-                if let Some((_, marks, folds)) = self.settings.views.iter().find(|v| v.0 == path) {
-                    doc.restore_view(marks, folds);
+                if let Some((_, marks, folds)) = self.settings.view_of(path) {
+                    doc.restore_view(&marks, &folds);
                 }
                 self.docs.push(doc);
                 self.active = self.docs.len() - 1;
@@ -208,9 +208,7 @@ impl TrorApp {
     }
 
     pub(super) fn remember(&mut self, path: &Path) {
-        self.settings.recent.retain(|p| p != path);
-        self.settings.recent.insert(0, path.to_path_buf());
-        self.settings.recent.truncate(MAX_RECENT);
+        self.settings.remember_file(path);
     }
 
     pub(super) fn open_dialog(&mut self, now: f64) {
@@ -326,28 +324,15 @@ impl TrorApp {
         true
     }
 
-    pub(super) fn remember_view(settings: &mut Settings, doc: &Document) {
-        let Some(path) = &doc.path else {
-            return;
-        };
-        settings.views.retain(|v| &v.0 != path);
-        if !doc.marks.is_empty() || !doc.folds.is_empty() {
-            settings.views.push((
-                path.clone(),
-                doc.marks.iter().copied().collect(),
-                doc.folds.clone(),
-            ));
-        }
-        let extra = settings.views.len().saturating_sub(300);
-        settings.views.drain(..extra);
-    }
-
     pub(super) fn remove_doc(&mut self, index: usize) {
         if index >= self.docs.len() {
             return;
         }
         let doc = self.docs.remove(index);
-        Self::remember_view(&mut self.settings, &doc);
+        if let Some(path) = &doc.path {
+            self.settings
+                .remember_view(path.clone(), doc.marks.iter().copied().collect(), doc.folds.clone());
+        }
         if doc.path.is_some() || doc.remote.is_some() {
             let entry = (doc.path.clone(), doc.remote.clone());
             self.closed.retain(|c| *c != entry);

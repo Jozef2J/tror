@@ -5,7 +5,7 @@ impl TrorApp {
         if self.capturing.is_some() {
             return;
         }
-        let keys = crate::keys::Keys::new(&self.settings.keys);
+        let keys = self.settings.shortcuts();
         let weight = crate::keys::weight;
         let mut extra: Vec<(egui::KeyboardShortcut, Action)> = Vec::new();
         for (index, plugin) in self.plugins.list.iter().enumerate() {

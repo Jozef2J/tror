@@ -14,7 +14,7 @@ use crate::db::DbPanel;
 use crate::diff::DiffPanel;
 use crate::dock::{self, Pane};
 use crate::files::ProjectPanel;
-use crate::prefs::{self, Look, Settings};
+use crate::prefs::{Look, Settings};
 use crate::preview::{self, Preview};
 use crate::remote::panel::{PanelEvent, RemotePanel};
 use crate::text::complete::Completion;
@@ -47,7 +47,6 @@ use crate::widgets::{
 
 const SETTINGS_KEY: &str = "tror";
 const DOCK_KEY: &str = "tror_dock";
-const MAX_RECENT: usize = 12;
 
 const ENCODINGS: &[(&str, &Encoding, bool)] = &[
     ("UTF-8", encoding_rs::UTF_8, false),
@@ -311,9 +310,7 @@ impl TrorApp {
             .storage
             .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
             .unwrap_or_default();
-        settings.migrate();
-        let plugins_off = settings.plugins_off.clone();
-        let panel_sizes = settings.panel_sizes.clone();
+        let start = settings.startup();
         crate::i18n::set_english(match settings.language.as_str() {
             "ru" => false,
             "en" => true,
@@ -327,26 +324,22 @@ impl TrorApp {
         dock::translate(&mut dock);
         dock::hide(&mut dock, Pane::Preview);
         dock::hide(&mut dock, Pane::ServerSearch);
-        dock::set_homes(settings.homes.clone());
-        settings
-            .detached
-            .retain(|p| !matches!(p, Pane::Preview | Pane::ServerSearch));
         crate::preview::forget_webview();
         crate::trace::install();
-        let hosts = settings
+        let hosts = start
             .hosts
             .max(2)
             .max(
                 dock.iter_all_tabs()
                     .filter_map(|(_, tab)| tab.host_index())
-                    .chain(settings.detached.iter().filter_map(|p| p.host_index()))
                     .map(|i| i + 1)
                     .max()
                     .unwrap_or(0),
             )
             .min(16);
-        let project = ProjectPanel::new(settings.project.clone());
-        let project2 = ProjectPanel::new(settings.project2.clone());
+        let [first, second] = start.projects;
+        let project = ProjectPanel::new(first);
+        let project2 = ProjectPanel::new(second);
         let mut app = Self {
             perf: std::env::var_os("TROR_PERF").map(|_| Perf::default()),
             title: String::new(),
@@ -361,7 +354,7 @@ impl TrorApp {
             project,
             project2,
             sizes: dock::Sizes {
-                known: panel_sizes,
+                known: start.panel_sizes,
                 ..Default::default()
             },
             zoom_acc: 0.0,
@@ -379,7 +372,7 @@ impl TrorApp {
             preview: Preview::default(),
             plugins: crate::plugins::Plugins::new(
                 eframe::storage_dir("Tror").map(|dir| dir.join("plugins")),
-                plugins_off,
+                start.plugins_off,
             ),
             console_shown: false,
             settings_shown: false,
@@ -426,16 +419,13 @@ impl TrorApp {
             applied: None,
             capturing: None,
         };
-        let open = std::mem::take(&mut app.settings.open);
-        let active = app.settings.active;
+        let (open, pinned, active) = app.settings.take_session();
         let mut top = 1;
-        let restore = app.settings.restore;
-        for (id, path) in open.iter().filter(|(_, p)| restore && p.is_file()) {
+        for (id, path) in &open {
             app.next_id = *id;
             app.open_path(path, 0.0);
             top = top.max(id + 1);
         }
-        let pinned = std::mem::take(&mut app.settings.pinned);
         for doc in &mut app.docs {
             doc.pinned = doc.path.as_ref().is_some_and(|p| pinned.contains(p));
         }
@@ -537,6 +527,6 @@ impl TrorApp {
     }
 
     fn palette(&self) -> Palette {
-        self.settings.look.palette()
+        self.settings.palette()
     }
 }

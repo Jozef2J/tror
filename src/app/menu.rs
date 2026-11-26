@@ -7,7 +7,7 @@ impl TrorApp {
             ui.add_enabled(enabled, Button::new(label).shortcut_text(shortcut))
                 .clicked()
         };
-        let keys = crate::keys::Keys::new(&self.settings.keys);
+        let keys = self.settings.shortcuts();
         let key = |id: &str| keys.label(id);
         MenuBar::new().ui(ui, |ui| {
             if let Some(logo) = &self.logo {
@@ -32,18 +32,20 @@ impl TrorApp {
                     actions.push(Action::OpenSecondFolder);
                 }
                 ui.menu_button(tr!("Недавние"), |ui| {
-                    if self.settings.recent.is_empty() {
+                    let recent = self.settings.recent_files();
+                    if recent.is_empty() {
                         ui.weak(tr!("пусто"));
                     }
-                    for path in &self.settings.recent {
+                    for path in &recent {
                         if ui.button(path.display().to_string()).clicked() {
                             actions.push(Action::OpenPath(path.clone()));
                         }
                     }
                 });
-                if !self.settings.recent_projects.is_empty() {
+                let folders = self.settings.recent_projects();
+                if !folders.is_empty() {
                     ui.menu_button(tr!("Недавние папки"), |ui| {
-                        for path in self.settings.recent_projects.clone() {
+                        for path in folders {
                             if ui.button(path.display().to_string()).clicked() && path.is_dir() {
                                 self.project.set_root(path);
                                 actions.push(Action::Show(Pane::Project));
@@ -326,7 +328,7 @@ impl TrorApp {
                     .collect();
                 for (pane, show, hide) in &extra {
                     let label =
-                        if dock::has(&self.dock, *pane) || self.settings.detached.contains(pane) {
+                        if dock::has(&self.dock, *pane) || self.settings.is_detached(*pane) {
                             hide
                         } else {
                             show
@@ -381,7 +383,7 @@ impl TrorApp {
                 ];
                 for (pane, show, hide, shortcut) in panes {
                     let label =
-                        if dock::has(&self.dock, pane) || self.settings.detached.contains(&pane) {
+                        if dock::has(&self.dock, pane) || self.settings.is_detached(pane) {
                             hide
                         } else {
                             show
@@ -437,10 +439,11 @@ impl TrorApp {
                 if item(ui, tr!("Сохранить макрос…"), "", ready) {
                     actions.push(Action::MacroDialog(true));
                 }
-                if !self.settings.macros.is_empty() {
+                let saved = self.settings.macro_names();
+                if !saved.is_empty() {
                     ui.menu_button(tr!("Сохранённые макросы"), |ui| {
                         ui.set_min_width(220.0);
-                        for (index, (name, _)) in self.settings.macros.iter().enumerate() {
+                        for (index, name) in saved.iter().enumerate() {
                             ui.menu_button(name, |ui| {
                                 ui.set_min_width(180.0);
                                 if item(ui, tr!("Выполнить"), "", has_doc) {

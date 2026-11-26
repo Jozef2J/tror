@@ -25,7 +25,7 @@ impl TrorApp {
 
     pub(super) fn host_shown(&self, index: usize) -> bool {
         let pane = Pane::hosts(index);
-        dock::has(&self.dock, pane) || self.settings.detached.contains(&pane)
+        dock::has(&self.dock, pane) || self.settings.is_detached(pane)
     }
 
     pub(super) fn trim_hosts(&mut self) {
@@ -36,14 +36,16 @@ impl TrorApp {
             }
             self.remotes.pop();
         }
-        self.settings.hosts = self.remotes.len();
+        self.settings.remember_hosts(self.remotes.len());
     }
 
     pub(super) fn remote_events(&mut self, ctx: &egui::Context, from: usize, events: Vec<PanelEvent>) {
         let now = ctx.input(|i| i.time);
         for event in events {
             match event {
-                PanelEvent::Tree(tree) => self.settings.remote_tree = tree,
+                PanelEvent::Tree(tree) => {
+                    self.settings.view_as_tree(true, tree);
+                }
                 PanelEvent::FindFiles => self.queued.push(Action::SearchServer(from)),
                 PanelEvent::Send { target, files } => {
                     if let Some(dir) = self
@@ -104,7 +106,7 @@ impl TrorApp {
                 }
                 PanelEvent::Console(profile) => {
                     self.console.open(*profile, ctx);
-                    dock::show(&mut self.dock, Pane::Console, &self.settings.floats);
+                    self.settings.show(&mut self.dock, Pane::Console);
                 }
                 PanelEvent::Listed {
                     profile,

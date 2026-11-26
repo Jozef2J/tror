@@ -3,7 +3,7 @@ use super::*;
 impl TrorApp {
     pub(super) fn doc_color(&self, doc: &Document) -> Option<Color32> {
         let key = doc.location()?;
-        self.settings.tab_colors.get(&key).map(|c| tab_color(*c))
+        self.settings.tab_color(&key).map(tab_color)
     }
 
     pub(super) fn leaf_docs(&self, id: u64) -> Vec<u64> {
@@ -57,14 +57,7 @@ impl TrorApp {
             TabCmd::Rename => self.rename = Some((id, self.docs[index].title())),
             TabCmd::Color(color) => {
                 if let Some(key) = self.docs[index].location() {
-                    match color {
-                        Some(c) => {
-                            self.settings.tab_colors.insert(key, c);
-                        }
-                        None => {
-                            self.settings.tab_colors.remove(&key);
-                        }
-                    }
+                    self.settings.set_tab_color(key, color);
                 }
             }
             TabCmd::Pin => self.docs[index].pinned = !self.docs[index].pinned,
@@ -174,7 +167,7 @@ impl TrorApp {
             self.search.leave_visual();
         }
         let pane = ui.available_rect_before_wrap();
-        let look = &self.settings.look;
+        let look = self.settings.look();
         let (wrap, font_size, line_spacing) =
             (self.settings.wrap, look.font_size, look.line_spacing);
         if active {
@@ -266,7 +259,7 @@ impl TrorApp {
         let rect = ui.available_rect_before_wrap();
         ui.painter().rect_filled(rect, 0.0, pal.base);
         let font = FontId::monospace(12.5);
-        let [server, client, error, info] = self.settings.look.log_colors();
+        let [server, client, error, info] = self.settings.log_colors();
         let mut job = egui::text::LayoutJob::default();
         for (index, (text, kind)) in self.log.iter().enumerate() {
             let color = match kind {
@@ -328,7 +321,7 @@ impl Viewer<'_> {
             return;
         };
         ui.set_min_width(250.0);
-        let keys = crate::keys::Keys::new(&self.app.settings.keys);
+        let keys = self.app.settings.shortcuts();
         let key = |name: &str| keys.label(name);
         let order = self.app.leaf_docs(id);
         let at = order.iter().position(|d| *d == id).unwrap_or(0);
@@ -337,8 +330,7 @@ impl Viewer<'_> {
         let remote = doc.remote.clone();
         let color = location
             .as_ref()
-            .and_then(|k| self.app.settings.tab_colors.get(k))
-            .copied();
+            .and_then(|k| self.app.settings.tab_color(k));
         let pinned = doc.pinned;
         let mut cmd = None;
         let row = |ui: &mut Ui, text: &str, shortcut: String, enabled: bool| {
@@ -542,7 +534,7 @@ impl TabViewer for Viewer<'_> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Pane) {
         let pal = self.pal;
         let app = &mut *self.app;
-        let look = &app.settings.look;
+        let look = app.settings.look();
         let (dark, font_size) = (look.dark, look.font_size);
         let side = Frame::new().inner_margin(Margin::symmetric(8, 0));
         let pane = *tab;
@@ -558,7 +550,7 @@ impl TabViewer for Viewer<'_> {
                 }
             }
             Pane::Project | Pane::Project2 => {
-                let recent = app.settings.recent_projects.clone();
+                let recent = app.settings.recent_projects();
                 let second = pane == Pane::Project2;
                 let (panel, other) = if second {
                     (&mut app.project2, &app.project)
@@ -573,8 +565,7 @@ impl TabViewer for Viewer<'_> {
                 panel.show_size = app.settings.project_size;
                 panel.show_date = app.settings.project_date;
                 side.show(ui, |ui| panel.ui(ui, &pal, &recent));
-                app.settings.project_size = panel.show_size;
-                app.settings.project_date = panel.show_date;
+                app.settings.remember_project_columns(panel.show_size, panel.show_date);
             }
             Pane::Console => {
                 app.console_shown = true;
@@ -586,7 +577,7 @@ impl TabViewer for Viewer<'_> {
             }
             Pane::Settings => {
                 app.settings_shown = true;
-                let note = prefs::ui(ui, &pal, &mut app.settings, &mut app.capturing);
+                let note = app.settings.ui(ui, &pal, &mut app.capturing);
                 if let Some(text) = note {
                     let now = ui.input(|i| i.time);
                     app.notify(text, now);

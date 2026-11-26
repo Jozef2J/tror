@@ -333,14 +333,8 @@ impl TrorApp {
     pub(super) fn welcome(&self, ui: &mut Ui, pal: &Palette, actions: &mut Vec<Action>) {
         let rect = ui.available_rect_before_wrap();
         ui.painter().rect_filled(rect, 0.0, pal.base);
-        let files: Vec<PathBuf> = self.settings.recent.iter().take(6).cloned().collect();
-        let folders: Vec<PathBuf> = self
-            .settings
-            .recent_projects
-            .iter()
-            .take(4)
-            .cloned()
-            .collect();
+        let files: Vec<PathBuf> = self.settings.recent_files().into_iter().take(6).collect();
+        let folders: Vec<PathBuf> = self.settings.recent_projects().into_iter().take(4).collect();
         let logo = rect.height() >= 460.0;
         let list_rows = files.len() + folders.len();
         let lists = list_rows as f32 * 26.0

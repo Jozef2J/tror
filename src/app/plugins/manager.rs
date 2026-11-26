@@ -282,11 +282,7 @@ impl TrorApp {
             }
         }
         if let Some((id, on)) = toggle {
-            self.settings.plugins_off.retain(|x| *x != id);
-            if !on {
-                self.settings.plugins_off.push(id);
-            }
-            self.plugins.off = self.settings.plugins_off.clone();
+            self.plugins.off = self.settings.switch_plugin(id, on);
             reload = true;
         }
         if reload {

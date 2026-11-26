@@ -4,6 +4,9 @@ use std::path::PathBuf;
 use eframe::egui::{self, Button, Color32, ComboBox, RichText, ScrollArea, Sense, Stroke, Ui};
 use serde::{Deserialize, Serialize};
 
+use egui_stack::DockState;
+
+use crate::dock::Pane;
 use crate::text::editor::Edit;
 use crate::text::highlight::{self, SYNTAX_PARTS};
 use crate::theme::{self, PARTS, Palette};
@@ -107,6 +110,17 @@ impl Look {
 }
 
 pub type View = (PathBuf, Vec<usize>, Vec<(usize, usize)>);
+
+pub const MAX_RECENT: usize = 12;
+
+pub type Session = (Vec<(u64, PathBuf)>, Vec<PathBuf>, usize);
+
+pub struct Startup {
+    pub plugins_off: Vec<String>,
+    pub panel_sizes: Vec<(Pane, bool, f32)>,
+    pub projects: [Option<PathBuf>; 2],
+    pub hosts: usize,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -219,6 +233,283 @@ impl Settings {
         self.scrollback = self.scrollback.clamp(500, 100_000);
         self.db_rows = self.db_rows.clamp(100, 100_000);
         self.edit.indent = self.edit.indent.clamp(1, 8);
+    }
+
+    pub fn startup(&mut self) -> Startup {
+        self.migrate();
+        crate::dock::set_homes(self.homes.clone());
+        self.detached
+            .retain(|p| !matches!(p, Pane::Preview | Pane::ServerSearch));
+        Startup {
+            plugins_off: self.plugins_off.clone(),
+            panel_sizes: self.panel_sizes.clone(),
+            projects: [self.project.clone(), self.project2.clone()],
+            hosts: self.hosts.max(
+                self.detached
+                    .iter()
+                    .filter_map(|p| p.host_index())
+                    .map(|i| i + 1)
+                    .max()
+                    .unwrap_or(0),
+            ),
+        }
+    }
+
+    pub fn remember_hosts(&mut self, count: usize) {
+        self.hosts = count.max(1);
+    }
+
+    pub fn view_as_tree(&mut self, remote: bool, tree: bool) -> bool {
+        let slot = if remote {
+            &mut self.remote_tree
+        } else {
+            &mut self.project_tree
+        };
+        let changed = *slot != tree;
+        *slot = tree;
+        changed
+    }
+
+    pub fn remember_project_columns(&mut self, size: bool, date: bool) {
+        if (size, date) != (self.project_size, self.project_date) {
+            self.project_size = size;
+            self.project_date = date;
+        }
+    }
+
+    pub fn remember_widths(&mut self) {
+        self.columns = crate::widgets::columns();
+    }
+
+    pub fn is_detached(&self, pane: Pane) -> bool {
+        self.detached.contains(&pane)
+    }
+
+    pub fn detached_panes(&self) -> Vec<Pane> {
+        self.detached.clone()
+    }
+
+    pub fn detach(&mut self, pane: Pane, rect: Option<[f32; 4]>) {
+        if !self.detached.contains(&pane) {
+            self.detached.push(pane);
+        }
+        if let Some(rect) = rect {
+            self.remember_float(pane, rect);
+        }
+    }
+
+    pub fn attach(&mut self, pane: Pane) {
+        self.detached.retain(|p| *p != pane);
+    }
+
+    pub fn keep_detached(&mut self, keep: impl Fn(&Pane) -> bool) {
+        self.detached.retain(keep);
+    }
+
+    pub fn show(&self, dock: &mut DockState<Pane>, pane: Pane) {
+        crate::dock::show(dock, pane, &self.floats);
+    }
+
+    pub fn show_attached(&self, dock: &mut DockState<Pane>, pane: Pane) {
+        if !self.is_detached(pane) {
+            self.show(dock, pane);
+        }
+    }
+
+    pub fn toggle(&mut self, dock: &mut DockState<Pane>, pane: Pane) {
+        if self.is_detached(pane) {
+            self.attach(pane);
+        } else {
+            crate::dock::toggle(dock, pane, &self.floats);
+        }
+    }
+
+    pub fn float_of(&self, pane: Pane) -> Option<[f32; 4]> {
+        self.floats.iter().find(|(p, _)| *p == pane).map(|(_, rect)| *rect)
+    }
+
+    pub fn remember_float(&mut self, pane: Pane, rect: [f32; 4]) {
+        self.floats.retain(|(p, _)| *p != pane);
+        self.floats.push((pane, rect));
+    }
+
+    pub fn reset_layout(&mut self) {
+        self.panel_sizes.clear();
+        self.homes.clear();
+        crate::dock::set_homes(Vec::new());
+    }
+
+    pub fn remember_sizes(&mut self, sizes: &crate::dock::Sizes) {
+        self.panel_sizes = sizes.known.clone();
+    }
+
+    pub fn remember_homes(&mut self) {
+        self.homes = crate::dock::homes();
+    }
+
+    pub fn macro_at(&self, index: usize) -> Option<(&str, &[egui::Event])> {
+        self.macros.get(index).map(|(name, events)| (name.as_str(), events.as_slice()))
+    }
+
+    pub fn macro_names(&self) -> Vec<String> {
+        self.macros.iter().map(|(name, _)| name.clone()).collect()
+    }
+
+    pub fn save_macro(&mut self, name: String, events: Vec<egui::Event>) {
+        match self.macros.iter_mut().find(|m| m.0 == name) {
+            Some(slot) => slot.1 = events,
+            None => self.macros.push((name, events)),
+        }
+    }
+
+    pub fn remove_macro(&mut self, index: usize) {
+        if index < self.macros.len() {
+            self.macros.remove(index);
+        }
+    }
+
+    pub fn recent_files(&self) -> Vec<PathBuf> {
+        self.recent.clone()
+    }
+
+    pub fn remember_file(&mut self, path: &std::path::Path) {
+        self.recent.retain(|p| p != path);
+        self.recent.insert(0, path.to_path_buf());
+        self.recent.truncate(MAX_RECENT);
+    }
+
+    pub fn recent_projects(&self) -> Vec<PathBuf> {
+        self.recent_projects.clone()
+    }
+
+    pub fn remember_project(&mut self, path: PathBuf, second: bool) {
+        self.recent_projects.retain(|p| *p != path);
+        self.recent_projects.insert(0, path.clone());
+        self.recent_projects.truncate(MAX_RECENT);
+        if second {
+            self.project2 = Some(path);
+        } else {
+            self.project = Some(path);
+        }
+    }
+
+    pub fn forget_project(&mut self, second: bool) {
+        if second {
+            self.project2 = None;
+        } else {
+            self.project = None;
+        }
+    }
+
+    pub fn view_of(&self, path: &std::path::Path) -> Option<View> {
+        self.views.iter().find(|v| v.0 == path).cloned()
+    }
+
+    pub fn remember_view(&mut self, path: PathBuf, marks: Vec<usize>, folds: Vec<(usize, usize)>) {
+        self.views.retain(|v| v.0 != path);
+        if !marks.is_empty() || !folds.is_empty() {
+            self.views.push((path, marks, folds));
+        }
+        let extra = self.views.len().saturating_sub(300);
+        self.views.drain(..extra);
+    }
+
+    pub fn tab_color(&self, key: &str) -> Option<u8> {
+        self.tab_colors.get(key).copied()
+    }
+
+    pub fn set_tab_color(&mut self, key: String, color: Option<u8>) {
+        match color {
+            Some(color) => self.tab_colors.insert(key, color),
+            None => self.tab_colors.remove(&key),
+        };
+    }
+
+    pub fn move_tab_color(&mut self, old: &str, new: String) {
+        if let Some(color) = self.tab_colors.remove(old) {
+            self.tab_colors.insert(new, color);
+        }
+    }
+
+    pub fn shortcuts(&self) -> crate::keys::Keys {
+        crate::keys::Keys::new(&self.keys)
+    }
+
+    pub fn look(&self) -> Look {
+        self.look.clone()
+    }
+
+    pub fn same_look(&self, other: Option<&Look>) -> bool {
+        other == Some(&self.look)
+    }
+
+    pub fn log_colors(&self) -> [Color32; 4] {
+        self.look.log_colors()
+    }
+
+    pub fn palette(&self) -> Palette {
+        self.look.palette()
+    }
+
+    pub fn toggle_theme(&mut self) {
+        self.look.dark = !self.look.dark;
+    }
+
+    pub fn toggle_wrap(&mut self) {
+        self.wrap = !self.wrap;
+    }
+
+    pub fn reset_zoom(&mut self) {
+        self.look.font_size = Look::default().font_size;
+    }
+
+    pub fn zoom(&mut self, step: f32) -> f32 {
+        self.look.font_size = (self.look.font_size + step).clamp(7.0, 48.0);
+        self.look.font_size
+    }
+
+    pub fn remember_open(&mut self, docs: &[crate::text::document::Document], active: usize) {
+        self.open = docs
+            .iter()
+            .filter_map(|d| Some((d.id, d.path.clone()?)))
+            .collect();
+        self.pinned = docs
+            .iter()
+            .filter(|d| d.pinned)
+            .filter_map(|d| d.path.clone())
+            .collect();
+        self.active = active;
+        for doc in docs {
+            if let Some(path) = &doc.path {
+                self.remember_view(path.clone(), doc.marks.iter().copied().collect(), doc.folds.clone());
+            }
+        }
+    }
+
+    pub fn apply_editing(&self) {
+        crate::text::complete::set_custom(&self.dictionaries);
+        crate::text::document::set_indent(self.edit.unit());
+    }
+
+    pub fn take_session(&mut self) -> Session {
+        let restore = self.restore;
+        let open = std::mem::take(&mut self.open)
+            .into_iter()
+            .filter(|(_, path)| restore && path.is_file())
+            .collect();
+        (open, std::mem::take(&mut self.pinned), self.active)
+    }
+
+    pub fn end_session(&mut self) {
+        self.keep_session = false;
+    }
+
+    pub fn switch_plugin(&mut self, id: String, on: bool) -> Vec<String> {
+        self.plugins_off.retain(|x| *x != id);
+        if !on {
+            self.plugins_off.push(id);
+        }
+        self.plugins_off.clone()
     }
 }
 
@@ -360,121 +651,430 @@ fn matches_query(index: usize, query: &str) -> bool {
         })
 }
 
-pub fn ui(
-    ui: &mut Ui,
-    pal: &Palette,
-    settings: &mut Settings,
-    capturing: &mut Option<usize>,
-) -> Option<String> {
-    let mut note = None;
-    let ctx = ui.ctx().clone();
-    settings.section = settings.section.min(SECTIONS.len() - 1);
-    let query_id = egui::Id::unique("tror_prefs_query");
-    let mut query: String = ctx.data_mut(|d| d.get_temp(query_id)).unwrap_or_default();
-    let shown: Vec<usize> = (0..SECTIONS.len())
-        .filter(|i| matches_query(*i, &query))
-        .collect();
-    if !shown.is_empty() && !shown.contains(&settings.section) {
-        settings.section = shown[0];
-    }
-    let wide = ui.available_width() >= 560.0;
-    let mut page = |ui: &mut Ui, settings: &mut Settings| {
-        ScrollArea::vertical()
-            .id_salt(("tror_prefs", settings.section))
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(22, 4))
-                    .show(ui, |ui| {
-                        ui.set_max_width(ui.available_width().min(680.0));
-                        match settings.section {
-                            0..=2 => body(
-                                ui,
-                                pal,
-                                settings.section,
-                                &mut settings.look,
-                                &ctx,
-                                &mut note,
-                            ),
-                            3 => editor_section(ui, pal, settings),
-                            4 => tabs_section(ui, pal, settings),
-                            5 => files_section(ui, pal, settings),
-                            6 => {
-                                console_section(ui, pal, settings);
-                                log_section(ui, pal, &mut settings.look);
+impl Settings {
+    pub fn ui(
+        &mut self,
+        ui: &mut Ui,
+        pal: &Palette,
+        capturing: &mut Option<usize>,
+    ) -> Option<String> {
+        let mut note = None;
+        let ctx = ui.ctx().clone();
+        self.section = self.section.min(SECTIONS.len() - 1);
+        let query_id = egui::Id::unique("tror_prefs_query");
+        let mut query: String = ctx.data_mut(|d| d.get_temp(query_id)).unwrap_or_default();
+        let shown: Vec<usize> = (0..SECTIONS.len())
+            .filter(|i| matches_query(*i, &query))
+            .collect();
+        if !shown.is_empty() && !shown.contains(&self.section) {
+            self.section = shown[0];
+        }
+        let wide = ui.available_width() >= 560.0;
+        let mut page = |ui: &mut Ui, this: &mut Settings| {
+            ScrollArea::vertical()
+                .id_salt(("tror_prefs", this.section))
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin::symmetric(22, 4))
+                        .show(ui, |ui| {
+                            ui.set_max_width(ui.available_width().min(680.0));
+                            match this.section {
+                                0..=2 => body(
+                                    ui,
+                                    pal,
+                                    this.section,
+                                    &mut this.look,
+                                    &ctx,
+                                    &mut note,
+                                ),
+                                3 => this.editor_section(ui, pal),
+                                4 => this.tabs_section(ui, pal),
+                                5 => this.files_section(ui, pal),
+                                6 => {
+                                    this.console_section(ui, pal);
+                                    log_section(ui, pal, &mut this.look);
+                                }
+                                7 => this.db_section(ui, pal),
+                                _ => keys_section(
+                                    ui,
+                                    pal,
+                                    KeysEdit {
+                                        custom: &mut this.keys,
+                                        capturing,
+                                    },
+                                    &mut note,
+                                ),
                             }
-                            7 => db_section(ui, pal, settings),
-                            _ => keys_section(
-                                ui,
-                                pal,
-                                KeysEdit {
-                                    custom: &mut settings.keys,
-                                    capturing,
-                                },
-                                &mut note,
-                            ),
-                        }
-                        ui.add_space(24.0);
-                    });
-            });
-    };
-    if wide {
-        ui.horizontal_top(|ui| {
-            ui.add_space(8.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(190.0, ui.available_height()),
-                egui::Layout::top_down_justified(egui::Align::Min),
-                |ui| {
-                    ui.add_space(14.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut query)
-                            .hint_text(tr!("Поиск настроек"))
-                            .margin(egui::Margin::symmetric(8, 5)),
-                    );
-                    ui.add_space(8.0);
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.spacing_mut().button_padding = egui::vec2(12.0, 6.0);
-                    for &index in &shown {
-                        let on = settings.section == index;
-                        let text = RichText::new(tr!(SECTIONS[index]))
-                            .color(if on { pal.text } else { pal.subtext });
-                        let mut button = Button::new(text).frame_when_inactive(on);
-                        if on {
-                            button = button.fill(pal.surface);
-                        }
-                        if ui.add(button).clicked() {
-                            settings.section = index;
-                        }
-                    }
-                    if shown.is_empty() {
-                        ui.label(RichText::new(tr!("Ничего не найдено")).color(pal.subtext));
-                    }
-                },
-            );
-            ui.vertical(|ui| page(ui, settings));
-        });
-    } else {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_space(22.0);
-            ComboBox::from_id_salt("tror_prefs_section")
-                .width(220.0)
-                .selected_text(tr!(SECTIONS[settings.section]))
-                .show_ui(ui, |ui| {
-                    for &index in &shown {
-                        ui.selectable_value(&mut settings.section, index, tr!(SECTIONS[index]));
-                    }
+                            ui.add_space(24.0);
+                        });
                 });
-            ui.add(
-                egui::TextEdit::singleline(&mut query)
-                    .hint_text(tr!("Поиск настроек"))
-                    .desired_width(180.0),
-            );
-        });
-        page(ui, settings);
+        };
+        if wide {
+            ui.horizontal_top(|ui| {
+                ui.add_space(8.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(190.0, ui.available_height()),
+                    egui::Layout::top_down_justified(egui::Align::Min),
+                    |ui| {
+                        ui.add_space(14.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut query)
+                                .hint_text(tr!("Поиск настроек"))
+                                .margin(egui::Margin::symmetric(8, 5)),
+                        );
+                        ui.add_space(8.0);
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.spacing_mut().button_padding = egui::vec2(12.0, 6.0);
+                        for &index in &shown {
+                            let on = self.section == index;
+                            let text = RichText::new(tr!(SECTIONS[index]))
+                                .color(if on { pal.text } else { pal.subtext });
+                            let mut button = Button::new(text).frame_when_inactive(on);
+                            if on {
+                                button = button.fill(pal.surface);
+                            }
+                            if ui.add(button).clicked() {
+                                self.section = index;
+                            }
+                        }
+                        if shown.is_empty() {
+                            ui.label(RichText::new(tr!("Ничего не найдено")).color(pal.subtext));
+                        }
+                    },
+                );
+                ui.vertical(|ui| page(ui, self));
+            });
+        } else {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.add_space(22.0);
+                ComboBox::from_id_salt("tror_prefs_section")
+                    .width(220.0)
+                    .selected_text(tr!(SECTIONS[self.section]))
+                    .show_ui(ui, |ui| {
+                        for &index in &shown {
+                            ui.selectable_value(&mut self.section, index, tr!(SECTIONS[index]));
+                        }
+                    });
+                ui.add(
+                    egui::TextEdit::singleline(&mut query)
+                        .hint_text(tr!("Поиск настроек"))
+                        .desired_width(180.0),
+                );
+            });
+            page(ui, self);
+        }
+        ctx.data_mut(|d| d.insert_temp(query_id, query));
+        note
     }
-    ctx.data_mut(|d| d.insert_temp(query_id, query));
-    note
+
+    fn editor_section(&mut self, ui: &mut Ui, pal: &Palette) {
+        heading(ui, pal, tr!("Редактор"), "");
+        toggle_row(
+            ui,
+            pal,
+            &mut self.wrap,
+            tr!("Переносить длинные строки (Alt+Z)"),
+            "",
+        );
+        toggle_row(ui, pal, &mut self.edit.line_numbers, tr!("Номера строк"), "");
+        toggle_row(
+            ui,
+            pal,
+            &mut self.edit.current_line,
+            tr!("Подсвечивать строку с курсором"),
+            "",
+        );
+        toggle_row(
+            ui,
+            pal,
+            &mut self.edit.blink,
+            tr!("Мигающий курсор"),
+            tr!("Без мигания окно в покое не перерисовывается совсем."),
+        );
+        toggle_row(
+            ui,
+            pal,
+            &mut self.edit.brackets,
+            tr!("Подсвечивать парную скобку"),
+            "",
+        );
+        toggle_row(
+            ui,
+            pal,
+            &mut self.edit.whitespace,
+            tr!("Показывать пробелы и табуляции"),
+            tr!("Пробел — точка, табуляция — стрелка."),
+        );
+        heading(ui, pal, tr!("Отступы"), "");
+        ui.horizontal(|ui| {
+            ui.label(tr!("Ширина табуляции, в пробелах"));
+            let mut value = self.look.tab_width as f32;
+            if crate::widgets::stepper(ui, pal, "tab_width", &mut value, (1.0, 16.0), 1.0, "") {
+                self.look.tab_width = value as u8;
+            }
+        });
+        ui.add_space(4.0);
+        toggle_row(
+            ui,
+            pal,
+            &mut self.edit.spaces,
+            tr!("Клавиша Tab вставляет пробелы"),
+            tr!("Иначе вставляется символ табуляции."),
+        );
+        if self.edit.spaces {
+            ui.horizontal(|ui| {
+                ui.label(tr!("Пробелов в отступе"));
+                let mut value = self.edit.indent as f32;
+                if crate::widgets::stepper(ui, pal, "indent", &mut value, (1.0, 8.0), 1.0, "") {
+                    self.edit.indent = value as u8;
+                }
+            });
+        }
+        heading(ui, pal, tr!("Подсказки"), "");
+        toggle_row(
+            ui,
+            pal,
+            &mut self.edit.suggest,
+            tr!("Автодополнение при наборе"),
+            "",
+        );
+        toggle_row(
+            ui,
+            pal,
+            &mut self.edit.hints,
+            tr!("Подсказка параметров функции"),
+            tr!("Появляется после открывающей скобки."),
+        );
+        dictionaries_section(ui, pal, &mut self.dictionaries);
+    }
+
+    fn tabs_section(&mut self, ui: &mut Ui, pal: &Palette) {
+        heading(ui, pal, "Язык интерфейса · Interface language", "");
+        let options = [("", tr!("Как в системе")), ("ru", "Русский"), ("en", "English")];
+        let current = options
+            .iter()
+            .find(|(code, _)| *code == self.language)
+            .map_or(options[0].1, |(_, label)| *label);
+        ComboBox::from_id_salt("tror_language")
+            .width(220.0)
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                for (code, label) in options {
+                    if ui.selectable_label(self.language == code, label).clicked() {
+                        self.language = code.to_owned();
+                        crate::i18n::set_english(match code {
+                            "ru" => false,
+                            "en" => true,
+                            _ => crate::i18n::system_english(),
+                        });
+                    }
+                }
+            });
+        ui.label(
+            RichText::new(tr!("Меню, окна и сообщения переключаются сразу; заголовки уже открытых окон — после перезапуска."))
+                .small()
+                .color(pal.faint),
+        );
+        heading(ui, pal, tr!("Вкладки"), "");
+        toggle_row(
+            ui,
+            pal,
+            &mut self.restore,
+            tr!("Открывать при запуске файлы прошлого сеанса"),
+            tr!("Закреплённые вкладки и их порядок тоже восстанавливаются."),
+        );
+        toggle_row(
+            ui,
+            pal,
+            &mut self.autosave,
+            tr!("Сохранять несохранённые правки для восстановления после сбоя"),
+            tr!("Раз в 10 секунд, в служебную папку программы. Сами файлы при этом не перезаписываются."),
+        );
+        toggle_row(
+            ui,
+            pal,
+            &mut self.keep_session,
+            tr!("Не спрашивать о сохранении при выходе — запоминать правки"),
+            tr!("Несохранённые изменения всех вкладок сохраняются при закрытии программы и открываются при следующем запуске. Сами файлы не перезаписываются."),
+        );
+        toggle_row(
+            ui,
+            pal,
+            &mut self.updates,
+            tr!("Проверять обновления при запуске"),
+            &tf!(
+                "Один запрос к github.com о последнем выпуске. Ничего не скачивается без вашего согласия. Установлена версия {}.",
+                "One request to github.com about the latest release. Nothing is downloaded without your consent. Installed version: {}.",
+                env!("CARGO_PKG_VERSION")
+            ),
+        );
+        ui.label(
+            RichText::new(
+                tr!("Вкладку можно перетащить по панели вкладок — соседние сразу расступаются. \
+                 Закреплённые вкладки стоят в начале и меняются местами только между собой. \
+                 Закрепить, покрасить или вынести вкладку в новую область можно из её меню по правому щелчку."),
+            )
+            .small()
+            .color(pal.faint),
+        );
+        heading(
+            ui,
+            pal,
+            tr!("Панели"),
+            tr!("Любую панель можно перетащить за заголовок: к краю окна или другой панели — она прилипнет и разделит место, \
+             на заголовок — станет соседней вкладкой, в сторону — превратится в отдельное окно. Расположение запоминается."),
+        );
+    }
+
+    fn console_section(&mut self, ui: &mut Ui, pal: &Palette) {
+        heading(
+            ui,
+            pal,
+            tr!("Консоль"),
+            tr!("Цветовая схема и шрифт задаются в профиле подключения и в меню сеанса «⋯ → Оформление сеанса»."),
+        );
+        ui.horizontal(|ui| {
+            ui.label(tr!("Строк истории в сеансе"));
+            let mut value = self.scrollback as f32;
+            if crate::widgets::stepper(
+                ui,
+                pal,
+                "scrollback",
+                &mut value,
+                (500.0, 100_000.0),
+                500.0,
+                "",
+            ) {
+                self.scrollback = value as u32;
+            }
+        });
+        ui.label(
+            RichText::new(tr!("Действует для сеансов, открытых после изменения."))
+                .small()
+                .color(pal.faint),
+        );
+    }
+
+    fn db_section(&mut self, ui: &mut Ui, pal: &Palette) {
+        heading(
+            ui,
+            pal,
+            tr!("База данных"),
+            tr!("Сколько строк результата запроса загружать в таблицу. Чем больше, тем больше памяти."),
+        );
+        ui.horizontal(|ui| {
+            ui.label(tr!("Строк результата"));
+            let mut value = self.db_rows as f32;
+            if crate::widgets::stepper(
+                ui,
+                pal,
+                "db_rows",
+                &mut value,
+                (100.0, 100_000.0),
+                100.0,
+                "",
+            ) {
+                self.db_rows = value as u32;
+            }
+        });
+    }
+
+    fn files_section(&mut self, ui: &mut Ui, pal: &Palette) {
+        heading(
+            ui,
+            pal,
+            tr!("Структура файлов"),
+            tr!("Как показывать папки: деревом с раскрывающимися папками или списком одной папки, как в обычном файловом менеджере."),
+        );
+        egui::Grid::new("tror_prefs_files")
+            .num_columns(2)
+            .spacing([22.0, 8.0])
+            .show(ui, |ui| {
+                for (label, value) in [
+                    (tr!("Папка проекта"), &mut self.project_tree),
+                    (tr!("Удалённые хосты"), &mut self.remote_tree),
+                ] {
+                    ui.label(label);
+                    ui.horizontal(|ui| {
+                        for (tree, text) in [(true, tr!("Дерево")), (false, tr!("Список"))] {
+                            let mut button = Button::new(text);
+                            if *value == tree {
+                                button = button.fill(pal.selection);
+                            }
+                            if ui.add(button).clicked() {
+                                *value = tree;
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+        heading(
+            ui,
+            pal,
+            tr!("Колонки"),
+            tr!("Ширину колонки меняют перетаскиванием границы в заголовке списка; двойной щелчок по границе возвращает исходную. Колонки удалённых хостов включаются в меню панели (кнопка с тремя точками)."),
+        );
+        toggle_row(
+            ui,
+            pal,
+            &mut self.project_size,
+            tr!("Проект: показывать размер"),
+            "",
+        );
+        toggle_row(
+            ui,
+            pal,
+            &mut self.project_date,
+            tr!("Проект: показывать дату изменения"),
+            "",
+        );
+        if self.columns != crate::widgets::COLUMN_DEFAULTS
+            && ui
+                .add(Button::new(tr!("Сбросить ширину колонок")))
+                .clicked()
+        {
+            self.columns = crate::widgets::COLUMN_DEFAULTS;
+            crate::widgets::set_columns(self.columns);
+        }
+        heading(
+            ui,
+            pal,
+            tr!("Пароли подключений"),
+            tr!("Пароли хостов, консоли и баз хранятся в системном хранилище: Диспетчер учётных данных Windows, Связка ключей macOS, Secret Service в Linux. В файле настроек остаются только адреса и имена."),
+        );
+        let mut in_file = self.passwords_in_file;
+        toggle_row(
+            ui,
+            pal,
+            &mut in_file,
+            tr!("Хранить пароли в файле настроек"),
+            tr!("Для переносной версии на флешке. Пароли в файле замаскированы, но не зашифрованы."),
+        );
+        if in_file != self.passwords_in_file {
+            let path = eframe::storage_dir("Tror").map(|dir| dir.join("connections.json"));
+            match crate::remote::Store::switch_vault(path, in_file) {
+                Ok(()) => self.passwords_in_file = in_file,
+                Err(e) => {
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("tror_vault_note"), e));
+                }
+            }
+        }
+        let problem = ui
+            .ctx()
+            .data(|d| d.get_temp::<String>(egui::Id::unique("tror_vault_note")))
+            .or_else(|| (!self.passwords_in_file).then(crate::remote::vault::last_error).flatten());
+        if let Some(problem) = problem {
+            ui.label(
+                RichText::new(tf!("Системное хранилище недоступно, пароли остаются в файле: {problem}", "The system store is not available, passwords stay in the file: {problem}"
+                ))
+                .small()
+                .color(pal.warn),
+            );
+        }
+    }
 }
 
 fn toggle_row(ui: &mut Ui, pal: &Palette, value: &mut bool, label: &str, hint: &str) {
@@ -490,313 +1090,6 @@ fn toggle_row(ui: &mut Ui, pal: &Palette, value: &mut bool, label: &str, hint: &
             });
     }
     ui.add_space(4.0);
-}
-
-fn editor_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
-    heading(ui, pal, tr!("Редактор"), "");
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.wrap,
-        tr!("Переносить длинные строки (Alt+Z)"),
-        "",
-    );
-    toggle_row(ui, pal, &mut settings.edit.line_numbers, tr!("Номера строк"), "");
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.edit.current_line,
-        tr!("Подсвечивать строку с курсором"),
-        "",
-    );
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.edit.blink,
-        tr!("Мигающий курсор"),
-        tr!("Без мигания окно в покое не перерисовывается совсем."),
-    );
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.edit.brackets,
-        tr!("Подсвечивать парную скобку"),
-        "",
-    );
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.edit.whitespace,
-        tr!("Показывать пробелы и табуляции"),
-        tr!("Пробел — точка, табуляция — стрелка."),
-    );
-    heading(ui, pal, tr!("Отступы"), "");
-    ui.horizontal(|ui| {
-        ui.label(tr!("Ширина табуляции, в пробелах"));
-        let mut value = settings.look.tab_width as f32;
-        if crate::widgets::stepper(ui, pal, "tab_width", &mut value, (1.0, 16.0), 1.0, "") {
-            settings.look.tab_width = value as u8;
-        }
-    });
-    ui.add_space(4.0);
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.edit.spaces,
-        tr!("Клавиша Tab вставляет пробелы"),
-        tr!("Иначе вставляется символ табуляции."),
-    );
-    if settings.edit.spaces {
-        ui.horizontal(|ui| {
-            ui.label(tr!("Пробелов в отступе"));
-            let mut value = settings.edit.indent as f32;
-            if crate::widgets::stepper(ui, pal, "indent", &mut value, (1.0, 8.0), 1.0, "") {
-                settings.edit.indent = value as u8;
-            }
-        });
-    }
-    heading(ui, pal, tr!("Подсказки"), "");
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.edit.suggest,
-        tr!("Автодополнение при наборе"),
-        "",
-    );
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.edit.hints,
-        tr!("Подсказка параметров функции"),
-        tr!("Появляется после открывающей скобки."),
-    );
-    dictionaries_section(ui, pal, &mut settings.dictionaries);
-}
-
-fn tabs_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
-    heading(ui, pal, "Язык интерфейса · Interface language", "");
-    let options = [("", tr!("Как в системе")), ("ru", "Русский"), ("en", "English")];
-    let current = options
-        .iter()
-        .find(|(code, _)| *code == settings.language)
-        .map_or(options[0].1, |(_, label)| *label);
-    ComboBox::from_id_salt("tror_language")
-        .width(220.0)
-        .selected_text(current)
-        .show_ui(ui, |ui| {
-            for (code, label) in options {
-                if ui.selectable_label(settings.language == code, label).clicked() {
-                    settings.language = code.to_owned();
-                    crate::i18n::set_english(match code {
-                        "ru" => false,
-                        "en" => true,
-                        _ => crate::i18n::system_english(),
-                    });
-                }
-            }
-        });
-    ui.label(
-        RichText::new(tr!("Меню, окна и сообщения переключаются сразу; заголовки уже открытых окон — после перезапуска."))
-            .small()
-            .color(pal.faint),
-    );
-    heading(ui, pal, tr!("Вкладки"), "");
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.restore,
-        tr!("Открывать при запуске файлы прошлого сеанса"),
-        tr!("Закреплённые вкладки и их порядок тоже восстанавливаются."),
-    );
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.autosave,
-        tr!("Сохранять несохранённые правки для восстановления после сбоя"),
-        tr!("Раз в 10 секунд, в служебную папку программы. Сами файлы при этом не перезаписываются."),
-    );
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.keep_session,
-        tr!("Не спрашивать о сохранении при выходе — запоминать правки"),
-        tr!("Несохранённые изменения всех вкладок сохраняются при закрытии программы и открываются при следующем запуске. Сами файлы не перезаписываются."),
-    );
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.updates,
-        tr!("Проверять обновления при запуске"),
-        &tf!(
-            "Один запрос к github.com о последнем выпуске. Ничего не скачивается без вашего согласия. Установлена версия {}.",
-            "One request to github.com about the latest release. Nothing is downloaded without your consent. Installed version: {}.",
-            env!("CARGO_PKG_VERSION")
-        ),
-    );
-    ui.label(
-        RichText::new(
-            tr!("Вкладку можно перетащить по панели вкладок — соседние сразу расступаются. \
-             Закреплённые вкладки стоят в начале и меняются местами только между собой. \
-             Закрепить, покрасить или вынести вкладку в новую область можно из её меню по правому щелчку."),
-        )
-        .small()
-        .color(pal.faint),
-    );
-    heading(
-        ui,
-        pal,
-        tr!("Панели"),
-        tr!("Любую панель можно перетащить за заголовок: к краю окна или другой панели — она прилипнет и разделит место, \
-         на заголовок — станет соседней вкладкой, в сторону — превратится в отдельное окно. Расположение запоминается."),
-    );
-}
-
-fn console_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
-    heading(
-        ui,
-        pal,
-        tr!("Консоль"),
-        tr!("Цветовая схема и шрифт задаются в профиле подключения и в меню сеанса «⋯ → Оформление сеанса»."),
-    );
-    ui.horizontal(|ui| {
-        ui.label(tr!("Строк истории в сеансе"));
-        let mut value = settings.scrollback as f32;
-        if crate::widgets::stepper(
-            ui,
-            pal,
-            "scrollback",
-            &mut value,
-            (500.0, 100_000.0),
-            500.0,
-            "",
-        ) {
-            settings.scrollback = value as u32;
-        }
-    });
-    ui.label(
-        RichText::new(tr!("Действует для сеансов, открытых после изменения."))
-            .small()
-            .color(pal.faint),
-    );
-}
-
-fn db_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
-    heading(
-        ui,
-        pal,
-        tr!("База данных"),
-        tr!("Сколько строк результата запроса загружать в таблицу. Чем больше, тем больше памяти."),
-    );
-    ui.horizontal(|ui| {
-        ui.label(tr!("Строк результата"));
-        let mut value = settings.db_rows as f32;
-        if crate::widgets::stepper(
-            ui,
-            pal,
-            "db_rows",
-            &mut value,
-            (100.0, 100_000.0),
-            100.0,
-            "",
-        ) {
-            settings.db_rows = value as u32;
-        }
-    });
-}
-
-fn files_section(ui: &mut Ui, pal: &Palette, settings: &mut Settings) {
-    heading(
-        ui,
-        pal,
-        tr!("Структура файлов"),
-        tr!("Как показывать папки: деревом с раскрывающимися папками или списком одной папки, как в обычном файловом менеджере."),
-    );
-    egui::Grid::new("tror_prefs_files")
-        .num_columns(2)
-        .spacing([22.0, 8.0])
-        .show(ui, |ui| {
-            for (label, value) in [
-                (tr!("Папка проекта"), &mut settings.project_tree),
-                (tr!("Удалённые хосты"), &mut settings.remote_tree),
-            ] {
-                ui.label(label);
-                ui.horizontal(|ui| {
-                    for (tree, text) in [(true, tr!("Дерево")), (false, tr!("Список"))] {
-                        let mut button = Button::new(text);
-                        if *value == tree {
-                            button = button.fill(pal.selection);
-                        }
-                        if ui.add(button).clicked() {
-                            *value = tree;
-                        }
-                    }
-                });
-                ui.end_row();
-            }
-        });
-    heading(
-        ui,
-        pal,
-        tr!("Колонки"),
-        tr!("Ширину колонки меняют перетаскиванием границы в заголовке списка; двойной щелчок по границе возвращает исходную. Колонки удалённых хостов включаются в меню панели (кнопка с тремя точками)."),
-    );
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.project_size,
-        tr!("Проект: показывать размер"),
-        "",
-    );
-    toggle_row(
-        ui,
-        pal,
-        &mut settings.project_date,
-        tr!("Проект: показывать дату изменения"),
-        "",
-    );
-    if settings.columns != crate::widgets::COLUMN_DEFAULTS
-        && ui
-            .add(Button::new(tr!("Сбросить ширину колонок")))
-            .clicked()
-    {
-        settings.columns = crate::widgets::COLUMN_DEFAULTS;
-        crate::widgets::set_columns(settings.columns);
-    }
-    heading(
-        ui,
-        pal,
-        tr!("Пароли подключений"),
-        tr!("Пароли хостов, консоли и баз хранятся в системном хранилище: Диспетчер учётных данных Windows, Связка ключей macOS, Secret Service в Linux. В файле настроек остаются только адреса и имена."),
-    );
-    let mut in_file = settings.passwords_in_file;
-    toggle_row(
-        ui,
-        pal,
-        &mut in_file,
-        tr!("Хранить пароли в файле настроек"),
-        tr!("Для переносной версии на флешке. Пароли в файле замаскированы, но не зашифрованы."),
-    );
-    if in_file != settings.passwords_in_file {
-        let path = eframe::storage_dir("Tror").map(|dir| dir.join("connections.json"));
-        match crate::remote::Store::switch_vault(path, in_file) {
-            Ok(()) => settings.passwords_in_file = in_file,
-            Err(e) => {
-                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("tror_vault_note"), e));
-            }
-        }
-    }
-    let problem = ui
-        .ctx()
-        .data(|d| d.get_temp::<String>(egui::Id::unique("tror_vault_note")))
-        .or_else(|| (!settings.passwords_in_file).then(crate::remote::vault::last_error).flatten());
-    if let Some(problem) = problem {
-        ui.label(
-            RichText::new(tf!("Системное хранилище недоступно, пароли остаются в файле: {problem}", "The system store is not available, passwords stay in the file: {problem}"
-            ))
-            .small()
-            .color(pal.warn),
-        );
-    }
 }
 
 fn log_section(ui: &mut Ui, pal: &Palette, look: &mut Look) {
