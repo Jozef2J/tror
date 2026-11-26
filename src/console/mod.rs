@@ -7,11 +7,11 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use eframe::egui::{
-    self, Button, Color32, ComboBox, FontId, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit,
+    self, Button, Color32, FontId, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit,
     Ui,
 };
 
-use crate::app::{dialog, dialog_button, port_field};
+use crate::widgets::{dialog, dialog_button, port_field};
 use crate::remote::{self, Shell, ShellCmd, ShellEvent, Store, TermProfile, TermProtocol};
 use terminal::Screen;
 use crate::theme::Palette;
@@ -94,16 +94,6 @@ pub struct ConsolePanel {
     pub cwd: Option<std::path::PathBuf>,
 }
 
-pub fn probe<F>(job: F) -> Receiver<Result<String, String>>
-where
-    F: FnOnce() -> Result<String, String> + Send + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(job());
-    });
-    rx
-}
 
 fn split_icon(ui: &mut Ui, pal: &Palette, split: Split, hint: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), Sense::click());
@@ -643,7 +633,7 @@ impl ConsolePanel {
                                     {
                                         look = Some((String::new(), size));
                                     }
-                                    for scheme in terminal::SCHEMES {
+                                    for scheme in crate::theme::SCHEMES {
                                         if ui
                                             .selectable_label(current == scheme.name, tr!(scheme.name))
                                             .clicked()
@@ -758,7 +748,7 @@ impl ConsolePanel {
                 break;
             };
             let session = &mut self.sessions[*index];
-            let colors = terminal::colors(&session.profile.theme, pal, dark);
+            let colors = crate::theme::colors(&session.profile.theme, pal, dark);
             let size = if session.profile.font_size > 0.0 {
                 session.profile.font_size
             } else {
@@ -1198,7 +1188,7 @@ impl ConsolePanel {
                                     }
                                 });
                                 ui.end_row();
-                                appearance_rows(ui, pal, &mut p.theme, &mut p.font, &mut p.font_size, wide);
+                                crate::widgets::appearance_rows(ui, pal, &mut p.theme, &mut p.font, &mut p.font_size, wide);
                             });
                         ui.add_space(4.0);
                         let note = match p.protocol {
@@ -1232,7 +1222,7 @@ impl ConsolePanel {
         {
             let known = self.store.known_hosts.get(&profile.address()).cloned();
             editor.result = None;
-            editor.probe = Some(probe(move || remote::test_terminal(&profile, known)));
+            editor.probe = Some(remote::probe(move || test_terminal(&profile, known)));
         }
         if save
             && let Some(editor) = &mut self.editor
@@ -1265,86 +1255,6 @@ impl ConsolePanel {
     }
 }
 
-pub fn appearance_rows(
-    ui: &mut Ui,
-    pal: &Palette,
-    theme: &mut String,
-    font: &mut String,
-    font_size: &mut f32,
-    wide: f32,
-) {
-    ui.label(tr!("Цветовая схема"));
-    ComboBox::from_id_salt("tror_term_theme")
-        .width(wide)
-        .selected_text(if theme.is_empty() {
-            tr!("Как в редакторе")
-        } else {
-            terminal::SCHEMES
-                .iter()
-                .find(|s| s.name == theme.as_str())
-                .map_or(theme.as_str(), |s| tr!(s.name))
-        })
-        .show_ui(ui, |ui| {
-            ui.selectable_value(theme, String::new(), tr!("Как в редакторе"));
-            for scheme in terminal::SCHEMES {
-                ui.selectable_value(theme, scheme.name.to_owned(), tr!(scheme.name));
-            }
-        });
-    ui.end_row();
-    ui.label("");
-    let colors = terminal::colors(theme, pal, true);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(wide, 22.0), Sense::hover());
-    ui.painter().rect_filled(rect, 4.0, colors.bg);
-    for (i, color) in colors.ansi.iter().take(8).enumerate() {
-        ui.painter().circle_filled(
-            egui::pos2(rect.left() + 14.0 + i as f32 * 18.0, rect.center().y),
-            5.5,
-            *color,
-        );
-    }
-    ui.painter().text(
-        egui::pos2(rect.left() + 162.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "user@host:~$ ls",
-        FontId::monospace(12.0),
-        colors.fg,
-    );
-    ui.end_row();
-    ui.label(tr!("Шрифт"));
-    ui.horizontal(|ui| {
-        let name = if font.trim().is_empty() {
-            tr!("как в редакторе").to_owned()
-        } else {
-            std::path::Path::new(font.trim())
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| font.clone())
-        };
-        ui.label(RichText::new(name).color(pal.subtext));
-        if ui.button(tr!("Выбрать…")).clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter(tr!("Шрифты"), &["ttf", "otf", "ttc"])
-                .pick_file()
-        {
-            *font = path.display().to_string();
-        }
-        if !font.is_empty() && ui.button(tr!("Сбросить")).clicked() {
-            font.clear();
-        }
-    });
-    ui.end_row();
-    ui.label(tr!("Размер шрифта"));
-    ui.horizontal(|ui| {
-        let mut custom = *font_size > 0.0;
-        if ui.checkbox(&mut custom, tr!("свой")).changed() {
-            *font_size = if custom { 14.0 } else { 0.0 };
-        }
-        if custom {
-            crate::widgets::stepper(ui, pal, "term_font", font_size, (8.0, 28.0), 1.0, "px");
-        }
-    });
-    ui.end_row();
-}
 
 fn layout(rect: Rect, split: Split, count: usize) -> Vec<Rect> {
     let gap = 2.0;
@@ -1394,6 +1304,77 @@ fn layout(rect: Rect, split: Split, count: usize) -> Vec<Rect> {
                 .collect()
         }
     }
+}
+
+pub fn test_terminal(profile: &TermProfile, known: Option<String>) -> Result<String, String> {
+    use std::io::Read;
+    use std::net::ToSocketAddrs;
+    let started = std::time::Instant::now();
+    crate::trace::client(format!(
+        "[TEST] {} {} as {}",
+        profile.protocol.label(),
+        profile.address(),
+        profile.user.trim()
+    ));
+    let result = match profile.protocol {
+        TermProtocol::Local => Ok(local::program()),
+        TermProtocol::Telnet => (|| {
+            let address = profile
+                .address()
+                .to_socket_addrs()
+                .map_err(|e| tf!("не удалось найти хост: {e}", "could not resolve the host: {e}"))?
+                .next()
+                .ok_or(tr!("не удалось найти хост"))?;
+            let mut stream = std::net::TcpStream::connect_timeout(&address, remote::CONNECT_TIMEOUT)
+                .map_err(|e| tf!("нет соединения: {e}", "no connection: {e}"))?;
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(1500)))
+                .ok();
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let text: String = String::from_utf8_lossy(&buf[..n])
+                .chars()
+                .filter(|c| !c.is_control() || *c == '\n')
+                .collect();
+            let line = text
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && l.chars().all(|c| (c as u32) < 0xfffd))
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect::<String>();
+            Ok(if line.is_empty() {
+                tr!("порт открыт, сервер принял соединение").to_owned()
+            } else {
+                tf!("порт открыт, сервер ответил: «{line}»", "port open, the server replied: \"{line}\"")
+            })
+        })(),
+        TermProtocol::Ssh => remote::ssh_probe(&profile.ssh(), known.as_deref())
+            .map(|(_, note)| tf!("вход выполнен{note}", "logged in{note}")),
+        TermProtocol::Mosh => remote::ssh_probe(&profile.ssh(), known.as_deref()).and_then(|(session, note)| {
+            let server = if profile.mosh_server.trim().is_empty() {
+                "mosh-server"
+            } else {
+                profile.mosh_server.trim()
+            };
+            let mut channel = session.channel_session().map_err(|e| e.to_string())?;
+            channel
+                .exec(&format!("command -v {server} || which {server}"))
+                .map_err(|e| e.to_string())?;
+            let mut out = String::new();
+            let _ = channel.read_to_string(&mut out);
+            let _ = channel.wait_close();
+            let path = out.lines().next().unwrap_or("").trim().to_owned();
+            if path.is_empty() {
+                Err(tf!("вход по SSH выполнен, но {server} на сервере не найден — установите пакет mosh", "logged in over SSH, but {server} was not found on the server — install the mosh package"
+                ))
+            } else {
+                Ok(tf!("вход выполнен, найден {path}{note}", "logged in, found {path}{note}"))
+            }
+        }),
+    };
+    remote::timed(started, result)
 }
 
 #[cfg(test)]

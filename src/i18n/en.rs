@@ -778,7 +778,6 @@ pub const EN: &[(&str, &str)] = &[
     ("недопустимый id плагина", "invalid plugin id"),
     ("неизвестное разрешение", "unknown permission"),
     ("неизвестный формат архива", "unknown archive format"),
-    ("некорректное регулярное выражение", "invalid regular expression"),
     ("необязательно", "optional"),
     ("непонятное имя файла", "unclear file name"),
     ("нет каталога настроек", "no settings folder"),

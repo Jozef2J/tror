@@ -412,7 +412,7 @@ pub fn tunnel(
     Ok(Tunnel { port: local, stop })
 }
 
-pub(super) fn ssh_probe(profile: &Profile, known: Option<&str>) -> Result<(ssh2::Session, String), String> {
+pub(crate) fn ssh_probe(profile: &Profile, known: Option<&str>) -> Result<(ssh2::Session, String), String> {
     let changed_key = std::cell::Cell::new(false);
     let confirm = |_: &str, changed: bool| {
         changed_key.set(changed);

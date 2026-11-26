@@ -272,8 +272,8 @@ pub fn install_fonts(
             }
         })
         .collect();
-    fonts.families.insert(crate::text::editor::code_family(), code);
-    crate::text::editor::TAB.store(tab_width.max(1), std::sync::atomic::Ordering::Relaxed);
+    fonts.families.insert(code_family(), code);
+    TAB.store(tab_width.max(1), std::sync::atomic::Ordering::Relaxed);
     ctx.set_fonts(fonts);
     if let Ok(mut list) = TERM_FONTS.lock() {
         list.clear();
@@ -372,4 +372,207 @@ pub fn apply(ctx: &egui::Context, p: &Palette, dark: bool, radius: u8, ui_size: 
             s.text_styles.insert(style, egui::FontId::new(size, family));
         }
     });
+}
+
+pub static TAB: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(4);
+
+pub fn code_family() -> egui::FontFamily {
+    egui::FontFamily::Name("code-tabs".into())
+}
+
+const DARK: [u32; 16] = [
+    0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, 0x585b70,
+    0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xcdd6f4,
+];
+const LIGHT: [u32; 16] = [
+    0x5c5f77, 0xd20f39, 0x40a02b, 0xb8860b, 0x1e66f5, 0xea76cb, 0x179299, 0x7c7f93, 0x6c6f85,
+    0xd20f39, 0x40a02b, 0xb8860b, 0x1e66f5, 0xea76cb, 0x179299, 0x4c4f69,
+];
+
+pub struct Scheme {
+    pub name: &'static str,
+    pub bg: u32,
+    pub fg: u32,
+    pub cursor: u32,
+    pub selection: u32,
+    pub ansi: [u32; 16],
+}
+
+pub const SCHEMES: &[Scheme] = &[
+    Scheme {
+        name: "Termius Dark",
+        bg: 0x141729,
+        fg: 0xd4d7e3,
+        cursor: 0x21b568,
+        selection: 0x2f3a5c,
+        ansi: [
+            0x343851, 0xf24e50, 0x21b568, 0xfdb200, 0x2d8bff, 0xbb6ffc, 0x00d0d6, 0xd4d7e3,
+            0x6c7086, 0xff6567, 0x2ed47e, 0xffcd47, 0x56a2ff, 0xcb8cff, 0x3fe9ef, 0xffffff,
+        ],
+    },
+    Scheme {
+        name: "Termius Light",
+        bg: 0xffffff,
+        fg: 0x32364a,
+        cursor: 0x1d9e5a,
+        selection: 0xc9dcff,
+        ansi: [
+            0x32364a, 0xd5373d, 0x1d9e5a, 0xc98a00, 0x2672e8, 0x9a52da, 0x0a9ea3, 0x8b8fa3,
+            0x5b6077, 0xf24e50, 0x21b568, 0xe5a100, 0x2d8bff, 0xbb6ffc, 0x00b8bd, 0xb7bacb,
+        ],
+    },
+    Scheme {
+        name: "Dracula",
+        bg: 0x282a36,
+        fg: 0xf8f8f2,
+        cursor: 0xf8f8f2,
+        selection: 0x44475a,
+        ansi: [
+            0x21222c, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xf8f8f2,
+            0x6272a4, 0xff6e6e, 0x69ff94, 0xffffa5, 0xd6acff, 0xff92df, 0xa4ffff, 0xffffff,
+        ],
+    },
+    Scheme {
+        name: "Monokai",
+        bg: 0x272822,
+        fg: 0xf8f8f2,
+        cursor: 0xf8f8f0,
+        selection: 0x49483e,
+        ansi: [
+            0x272822, 0xf92672, 0xa6e22e, 0xf4bf75, 0x66d9ef, 0xae81ff, 0xa1efe4, 0xf8f8f2,
+            0x75715e, 0xf92672, 0xa6e22e, 0xf4bf75, 0x66d9ef, 0xae81ff, 0xa1efe4, 0xf9f8f5,
+        ],
+    },
+    Scheme {
+        name: "Nord",
+        bg: 0x2e3440,
+        fg: 0xd8dee9,
+        cursor: 0xd8dee9,
+        selection: 0x434c5e,
+        ansi: [
+            0x3b4252, 0xbf616a, 0xa3be8c, 0xebcb8b, 0x81a1c1, 0xb48ead, 0x88c0d0, 0xe5e9f0,
+            0x4c566a, 0xbf616a, 0xa3be8c, 0xebcb8b, 0x81a1c1, 0xb48ead, 0x8fbcbb, 0xeceff4,
+        ],
+    },
+    Scheme {
+        name: "Solarized Dark",
+        bg: 0x002b36,
+        fg: 0x839496,
+        cursor: 0x93a1a1,
+        selection: 0x073642,
+        ansi: [
+            0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
+            0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
+        ],
+    },
+    Scheme {
+        name: "Solarized Light",
+        bg: 0xfdf6e3,
+        fg: 0x657b83,
+        cursor: 0x586e75,
+        selection: 0xeee8d5,
+        ansi: [
+            0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
+            0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
+        ],
+    },
+    Scheme {
+        name: "Gruvbox Dark",
+        bg: 0x282828,
+        fg: 0xebdbb2,
+        cursor: 0xebdbb2,
+        selection: 0x504945,
+        ansi: [
+            0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,
+            0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
+        ],
+    },
+    Scheme {
+        name: "One Dark",
+        bg: 0x282c34,
+        fg: 0xabb2bf,
+        cursor: 0x528bff,
+        selection: 0x3e4451,
+        ansi: [
+            0x282c34, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf,
+            0x5c6370, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xffffff,
+        ],
+    },
+    Scheme {
+        name: "Tomorrow Night",
+        bg: 0x1d1f21,
+        fg: 0xc5c8c6,
+        cursor: 0xc5c8c6,
+        selection: 0x373b41,
+        ansi: [
+            0x1d1f21, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6,
+            0x969896, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xffffff,
+        ],
+    },
+    Scheme {
+        name: "Material",
+        bg: 0x263238,
+        fg: 0xeeffff,
+        cursor: 0xffcc00,
+        selection: 0x37474f,
+        ansi: [
+            0x000000, 0xff5370, 0xc3e88d, 0xffcb6b, 0x82aaff, 0xc792ea, 0x89ddff, 0xffffff,
+            0x546e7a, 0xff5370, 0xc3e88d, 0xffcb6b, 0x82aaff, 0xc792ea, 0x89ddff, 0xffffff,
+        ],
+    },
+    Scheme {
+        name: "Catppuccin Mocha",
+        bg: 0x1e1e2e,
+        fg: 0xcdd6f4,
+        cursor: 0xf5e0dc,
+        selection: 0x45475a,
+        ansi: DARK,
+    },
+    Scheme {
+        name: "Catppuccin Latte",
+        bg: 0xeff1f5,
+        fg: 0x4c4f69,
+        cursor: 0xdc8a78,
+        selection: 0xccd0da,
+        ansi: LIGHT,
+    },
+    Scheme {
+        name: "Зелёный монитор",
+        bg: 0x0a0f0a,
+        fg: 0x33ff66,
+        cursor: 0x33ff66,
+        selection: 0x14421f,
+        ansi: [
+            0x0a0f0a, 0x2fd35a, 0x33ff66, 0x7dff9a, 0x1fb84a, 0x52ff7e, 0x8affa8, 0x33ff66,
+            0x1c5a2b, 0x5aff82, 0x8affa8, 0xb3ffc5, 0x4dff79, 0x7dff9a, 0xc9ffd6, 0xe6fff0,
+        ],
+    },
+];
+
+#[derive(Clone, Copy)]
+pub struct Colors {
+    pub bg: Color32,
+    pub fg: Color32,
+    pub cursor: Color32,
+    pub selection: Color32,
+    pub ansi: [Color32; 16],
+}
+
+pub fn colors(name: &str, pal: &Palette, dark: bool) -> Colors {
+    match SCHEMES.iter().find(|s| s.name == name) {
+        Some(s) => Colors {
+            bg: rgb(s.bg),
+            fg: rgb(s.fg),
+            cursor: rgb(s.cursor),
+            selection: rgb(s.selection),
+            ansi: s.ansi.map(rgb),
+        },
+        None => Colors {
+            bg: pal.base,
+            fg: pal.text,
+            cursor: pal.accent,
+            selection: pal.selection,
+            ansi: if dark { DARK } else { LIGHT }.map(rgb),
+        },
+    }
 }

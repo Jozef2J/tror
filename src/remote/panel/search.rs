@@ -65,7 +65,7 @@ impl RemotePanel {
             if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 start = true;
             }
-            if crate::app::icon_button(ui, pal, crate::app::Icon::Close)
+            if crate::widgets::icon_button(ui, pal, crate::widgets::Icon::Close)
                 .on_hover_text(tr!("Очистить поиск"))
                 .clicked()
             {

@@ -319,7 +319,7 @@ impl RemotePanel {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 let ok = if action == tr!("Удалить") {
-                    crate::app::danger_button(ui, pal, action)
+                    crate::widgets::danger_button(ui, pal, action)
                 } else {
                     dialog_button(ui, pal, action, true)
                 };
@@ -653,7 +653,7 @@ impl RemotePanel {
                                     ui.label("");
                                     ui.label(RichText::new(tr!("Консоль по этому профилю")).color(pal.subtext).small());
                                     ui.end_row();
-                                    crate::console::appearance_rows(
+                                    crate::widgets::appearance_rows(
                                         ui,
                                         pal,
                                         &mut p.term_theme,
@@ -712,7 +712,7 @@ impl RemotePanel {
             let key = format!("{}:{}", profile.host.trim(), profile.port);
             let known = self.store.known_hosts.get(&key).cloned();
             editor.result = None;
-            editor.probe = Some(crate::console::probe(move || remote::test(&profile, known)));
+            editor.probe = Some(remote::probe(move || remote::test(&profile, known)));
         }
         if save
             && let Some(editor) = &mut self.editor

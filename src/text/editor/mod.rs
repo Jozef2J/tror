@@ -17,10 +17,11 @@ mod input;
 mod layout;
 
 pub use input::copy_selection;
-pub use layout::{TAB, code_family};
+use crate::theme::code_family;
 use block::*;
 use input::*;
 use layout::*;
+use serde::{Deserialize, Serialize};
 
 struct Metrics {
     font: FontId,
@@ -148,10 +149,10 @@ pub struct View<'a> {
     pub wrap: bool,
     pub font_size: f32,
     pub line_spacing: f32,
-    pub edit: crate::prefs::Edit,
+    pub edit: Edit,
     pub macros: &'a mut Macro,
     pub complete: &'a mut Completion,
-    pub decos: &'a [crate::plugins::wasm::Decoration],
+    pub decos: &'a [Decoration],
 }
 
 #[derive(Default)]
@@ -870,7 +871,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             }
         }
         for deco in decos {
-            use crate::plugins::wasm::DecoKind;
+            
             let color = deco
                 .color
                 .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b))
@@ -1460,6 +1461,62 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 });
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[serde(default)]
+pub struct Edit {
+    pub spaces: bool,
+    pub indent: u8,
+    pub line_numbers: bool,
+    pub current_line: bool,
+    pub blink: bool,
+    pub suggest: bool,
+    pub hints: bool,
+    pub whitespace: bool,
+    pub brackets: bool,
+}
+
+impl Default for Edit {
+    fn default() -> Self {
+        Self {
+            spaces: false,
+            indent: 4,
+            line_numbers: true,
+            current_line: true,
+            blink: true,
+            suggest: true,
+            hints: true,
+            whitespace: false,
+            brackets: true,
+        }
+    }
+}
+
+impl Edit {
+    pub fn unit(&self) -> String {
+        if self.spaces {
+            " ".repeat(self.indent.clamp(1, 8) as usize)
+        } else {
+            "\t".to_owned()
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Decoration {
+    pub kind: DecoKind,
+    pub start: usize,
+    pub end: usize,
+    pub color: Option<[u8; 3]>,
+    pub message: String,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum DecoKind {
+    Highlight,
+    Underline,
+    Gutter,
 }
 
 #[cfg(test)]

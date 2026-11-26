@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{
-    self, Align, Button, CentralPanel, Color32, FontId, Frame, Key, Layout, Margin, MenuBar, Modal,
+    self, Align, Button, CentralPanel, Color32, FontId, Frame, Key, Layout, Margin, MenuBar,
     Modifiers, Panel, PopupCloseBehavior, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui,
     ViewportCommand,
     containers::menu::{MenuButton, MenuConfig},
@@ -34,27 +34,16 @@ mod input;
 mod jump;
 mod menu;
 mod modals;
-pub(crate) mod owner;
+mod owner;
+
 mod plugins;
 mod tabs;
 #[cfg(test)]
 mod uitest;
 
-static VIEW_REQUEST: std::sync::Mutex<(Option<bool>, Option<bool>)> =
-    std::sync::Mutex::new((None, None));
-
-pub(crate) fn request_view(remote: Option<bool>, project: Option<bool>) {
-    if let Ok(mut request) = VIEW_REQUEST.lock() {
-        if remote.is_some() {
-            request.0 = remote;
-        }
-        if project.is_some() {
-            request.1 = project;
-        }
-    }
-}
-
-pub(crate) use crate::widgets::port_field;
+use crate::widgets::{
+    Icon, dialog, dialog_button, icon_button, size_label, window_header,
+};
 
 const SETTINGS_KEY: &str = "tror";
 const DOCK_KEY: &str = "tror_dock";
@@ -185,133 +174,23 @@ struct Conflict {
     server: Vec<u8>,
 }
 
-pub(crate) fn size_label(bytes: usize) -> String {
-    if bytes < 1024 {
-        tf!("{bytes} Б", "{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        tf!("{:.1} КБ", "{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        tf!("{:.1} МБ", "{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+#[derive(Default)]
+pub(super) struct Floats {
+    pub spawn: std::collections::HashMap<Pane, [f32; 4]>,
+    pub owned: std::collections::HashSet<Pane>,
+}
+
+impl Floats {
+    pub fn prune(&mut self, detached: &[Pane]) {
+        self.spawn.retain(|p, _| detached.contains(p));
+        self.owned.retain(|p| detached.contains(p));
     }
 }
 
-pub(crate) fn danger_button(ui: &mut Ui, pal: &Palette, text: &str) -> bool {
-    let response = ui.add(crate::widgets::danger(text, pal).min_size(crate::widgets::ACTION));
-    crate::widgets::Lit::lit(response, ui).clicked()
-}
-
-pub(crate) fn dialog_button(ui: &mut Ui, pal: &Palette, text: &str, primary: bool) -> bool {
-    let button = if primary {
-        crate::widgets::primary(text, pal)
-    } else {
-        crate::widgets::secondary(text, pal)
-    };
-    let response = ui.add(button.min_size(crate::widgets::ACTION));
-    if primary {
-        crate::widgets::Lit::lit(response, ui).clicked()
-    } else {
-        response.clicked()
-    }
-}
-
-pub(crate) fn window_header(ui: &mut Ui, pal: &Palette, title: &str, closable: bool) -> bool {
-    let mut close = false;
-    ui.horizontal(|ui| {
-        crate::widgets::title(ui, pal, title);
-        if closable {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                close = icon_button(ui, pal, Icon::Close).clicked();
-            });
-        }
-    });
-    ui.add_space(4.0);
-    close
-}
 
 enum MacroDialog {
     Save(String),
     Run(u32, bool),
-}
-
-pub(crate) fn dialog(id: impl std::hash::Hash + std::fmt::Debug, pal: &Palette) -> Modal {
-    Modal::new(egui::Id::unique(id)).frame(crate::widgets::window_frame(pal))
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum Icon {
-    Up,
-    Down,
-    Close,
-    Dock,
-}
-
-pub(crate) fn icon_button(ui: &mut Ui, pal: &Palette, icon: Icon) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), Sense::click());
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::Role::Button,
-            true,
-            match icon {
-                Icon::Up => tr!("Вверх"),
-                Icon::Down => tr!("Вниз"),
-                Icon::Close => tr!("Закрыть"),
-                Icon::Dock => tr!("Закрепить"),
-            },
-        )
-    });
-    if response.hovered() {
-        ui.painter().rect_filled(
-            rect,
-            6.0,
-            if response.is_pointer_button_down_on() {
-                pal.surface_hover
-            } else {
-                pal.surface
-            },
-        );
-    }
-    let color = if response.hovered() {
-        pal.text
-    } else {
-        pal.subtext
-    };
-    let stroke = Stroke::new(1.5, color);
-    let c = rect.center();
-    let d = 4.0;
-    if matches!(icon, Icon::Dock) {
-        let frame = Rect::from_center_size(c, egui::vec2(11.0, 9.0));
-        ui.painter().rect_stroke(
-            frame,
-            1.5,
-            Stroke::new(1.2, color),
-            egui::StrokeKind::Inside,
-        );
-        ui.painter().rect_filled(
-            Rect::from_min_max(frame.min, egui::pos2(frame.min.x + 4.0, frame.max.y)),
-            1.5,
-            color,
-        );
-        return response;
-    }
-    let lines = match icon {
-        Icon::Up => [
-            [c + egui::vec2(-d, 2.0), c + egui::vec2(0.0, -2.5)],
-            [c + egui::vec2(0.0, -2.5), c + egui::vec2(d, 2.0)],
-        ],
-        Icon::Down => [
-            [c + egui::vec2(-d, -2.0), c + egui::vec2(0.0, 2.5)],
-            [c + egui::vec2(0.0, 2.5), c + egui::vec2(d, -2.0)],
-        ],
-        Icon::Close | Icon::Dock => [
-            [c + egui::vec2(-d, -d), c + egui::vec2(d, d)],
-            [c + egui::vec2(d, -d), c + egui::vec2(-d, d)],
-        ],
-    };
-    for line in lines {
-        ui.painter().line_segment(line, stroke);
-    }
-    response
 }
 
 #[derive(Clone, Copy)]
@@ -402,13 +281,13 @@ pub struct TrorApp {
     macros: editor::Macro,
     macro_dialog: Option<MacroDialog>,
     find: find::FindWindow,
-    floats: owner::Floats,
+    floats: Floats,
     manager: Option<plugins::Manager>,
     plugin_active: Option<u64>,
     plugin_seen: std::collections::HashMap<u64, u64>,
-    decorations: std::collections::HashMap<u64, Vec<crate::plugins::wasm::Decoration>>,
+    decorations: std::collections::HashMap<u64, Vec<crate::text::editor::Decoration>>,
     plugin_decos:
-        std::collections::HashMap<(u64, usize, String), Vec<crate::plugins::wasm::Decoration>>,
+        std::collections::HashMap<(u64, usize, String), Vec<crate::text::editor::Decoration>>,
     visual: std::collections::HashMap<u64, crate::visual::Visual>,
     drop_hint: Option<Option<(usize, String)>>,
     scale: f32,

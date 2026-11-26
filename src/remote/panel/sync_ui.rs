@@ -18,7 +18,7 @@ impl RemotePanel {
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
-                crate::app::window_header(ui, pal, tr!("Синхронизация папки"), false);
+                crate::widgets::window_header(ui, pal, tr!("Синхронизация папки"), false);
                 egui::Grid::new("tror_sync_roots").num_columns(2).show(ui, |ui| {
                     ui.label(RichText::new(tr!("На компьютере")).color(pal.subtext));
                     ui.label(dialog.local_root.display().to_string());
@@ -193,7 +193,7 @@ impl RemotePanel {
                             crate::widgets::primary(label, pal).min_size(crate::widgets::ACTION),
                         ).lit(ui)
                         .clicked();
-                    close = crate::app::dialog_button(ui, pal, tr!("Отмена"), false);
+                    close = crate::widgets::dialog_button(ui, pal, tr!("Отмена"), false);
                 });
             });
         if go {

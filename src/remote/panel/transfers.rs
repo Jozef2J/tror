@@ -198,13 +198,10 @@ impl RemotePanel {
             self.batch_placed = true;
         }
         let mut used = height;
-        let mut owned = self.batch_owned;
+        self.batch_title = Some(title);
         let paused = self.paused;
         ctx.show_viewport_immediate(id, builder, |ui, _class| {
             let ctx = ui.ctx().clone();
-            if !owned {
-                owned = crate::app::owner::adopt(title);
-            }
             if ctx.input(|i| i.viewport().close_requested()) {
                 open = false;
             }
@@ -227,7 +224,7 @@ impl RemotePanel {
                     let content = ui
                         .scope(|ui| {
                             ui.set_width(380.0);
-                            if crate::app::window_header(ui, pal, title, true) {
+                            if crate::widgets::window_header(ui, pal, title, true) {
                                 open = false;
                             }
                             ui.add_space(2.0);
@@ -325,7 +322,6 @@ impl RemotePanel {
                     used = (content.height() + 24.0).round();
                 });
         });
-        self.batch_owned = owned;
         if (used - self.batch_height).abs() > 0.5 {
             self.batch_height = used;
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::InnerSize(egui::vec2(408.0, used)));

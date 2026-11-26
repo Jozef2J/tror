@@ -9,8 +9,9 @@ use std::{
 
 use crate::widgets::Lit;
 use eframe::egui::{self, Button, RichText, ScrollArea, Sense, Ui};
-use regex::{Regex, RegexBuilder};
+use regex::Regex;
 
+use crate::text::search::pattern;
 use crate::{text::document::Document, theme::Palette};
 
 const MAX_FILE: u64 = 8 * 1024 * 1024;
@@ -140,22 +141,6 @@ pub struct FindFiles {
     pub all_files: bool,
     pub in_tabs: bool,
     undo: Vec<(PathBuf, PathBuf)>,
-}
-
-pub fn pattern(query: &str, regex: bool, case: bool, word: bool) -> Result<Regex, String> {
-    let mut source = if regex {
-        query.to_owned()
-    } else {
-        regex::escape(query)
-    };
-    if word {
-        source = format!(r"\b(?:{source})\b");
-    }
-    RegexBuilder::new(&source)
-        .case_insensitive(!case)
-        .multi_line(true)
-        .build()
-        .map_err(|e| tf!("Ошибка в выражении: {e}", "Error in the expression: {e}"))
 }
 
 fn wanted(name: &str, masks: &[String]) -> bool {
@@ -594,7 +579,7 @@ impl FindFiles {
                 query.request_focus();
             }
             go |= query.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if crate::app::icon_button(ui, pal, crate::app::Icon::Close)
+            if crate::widgets::icon_button(ui, pal, crate::widgets::Icon::Close)
                 .on_hover_text(tr!("Очистить поиск"))
                 .clicked()
             {

@@ -243,7 +243,7 @@ impl TrorApp {
                 .unwrap_or(0);
             let panel = &mut self.remotes[index];
             let data = doc.encoded();
-            doc.pending_hash = Some(crate::remote::content_hash(&data));
+            doc.pending_hash = Some(crate::text::document::content_hash(&data));
             let result = panel.upload(
                 &ctx,
                 &profile,

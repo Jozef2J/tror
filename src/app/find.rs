@@ -36,7 +36,7 @@ impl TrorApp {
             self.find.height = 0.0;
             return;
         }
-        if !super::owner::OWNED && self.find.on_top != Some(app_focused) {
+        if !owner::OWNED && self.find.on_top != Some(app_focused) {
             self.find.on_top = Some(app_focused);
             let level = if app_focused {
                 egui::WindowLevel::AlwaysOnTop
@@ -64,7 +64,7 @@ impl TrorApp {
             .with_resizable(false)
             .with_taskbar(false)
             .with_inner_size([width, self.find.height.max(120.0)])
-            .with_window_level(if super::owner::OWNED {
+            .with_window_level(if owner::OWNED {
                 egui::WindowLevel::Normal
             } else {
                 egui::WindowLevel::AlwaysOnTop
@@ -77,7 +77,7 @@ impl TrorApp {
             let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
             self.find.focused = focused;
             if !self.find.owned {
-                self.find.owned = super::owner::adopt(tr!(TITLE));
+                self.find.owned = owner::adopt(tr!(TITLE));
             }
             if std::mem::take(&mut self.find.focus) {
                 self.find.tries = 30;

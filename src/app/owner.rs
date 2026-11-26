@@ -1,20 +1,3 @@
-use std::collections::{HashMap, HashSet};
-
-use super::Pane;
-
-#[derive(Default)]
-pub(super) struct Floats {
-    pub spawn: HashMap<Pane, [f32; 4]>,
-    pub owned: HashSet<Pane>,
-}
-
-impl Floats {
-    pub fn prune(&mut self, detached: &[Pane]) {
-        self.spawn.retain(|p, _| detached.contains(p));
-        self.owned.retain(|p| detached.contains(p));
-    }
-}
-
 #[cfg(windows)]
 mod imp {
     use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -220,6 +203,6 @@ mod imp {
 }
 
 pub(crate) use imp::adopt;
-pub(super) use imp::{button_down, cursor, remember_main};
+pub(crate) use imp::{button_down, cursor, remember_main};
 
-pub(super) const OWNED: bool = cfg!(windows);
+pub(crate) const OWNED: bool = cfg!(windows);

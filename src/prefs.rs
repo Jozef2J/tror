@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use eframe::egui::{self, Button, Color32, ComboBox, RichText, ScrollArea, Sense, Stroke, Ui};
 use serde::{Deserialize, Serialize};
 
+use crate::text::editor::Edit;
 use crate::text::highlight::{self, SYNTAX_PARTS};
 use crate::theme::{self, PARTS, Palette};
 
@@ -102,46 +103,6 @@ impl Look {
         self.radius = self.radius.min(16);
         self.tab_width = self.tab_width.clamp(1, 16);
         self.accent = self.accent.min(theme::ACCENTS.len() - 1);
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
-#[serde(default)]
-pub struct Edit {
-    pub spaces: bool,
-    pub indent: u8,
-    pub line_numbers: bool,
-    pub current_line: bool,
-    pub blink: bool,
-    pub suggest: bool,
-    pub hints: bool,
-    pub whitespace: bool,
-    pub brackets: bool,
-}
-
-impl Default for Edit {
-    fn default() -> Self {
-        Self {
-            spaces: false,
-            indent: 4,
-            line_numbers: true,
-            current_line: true,
-            blink: true,
-            suggest: true,
-            hints: true,
-            whitespace: false,
-            brackets: true,
-        }
-    }
-}
-
-impl Edit {
-    pub fn unit(&self) -> String {
-        if self.spaces {
-            " ".repeat(self.indent.clamp(1, 8) as usize)
-        } else {
-            "\t".to_owned()
-        }
     }
 }
 

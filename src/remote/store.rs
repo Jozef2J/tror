@@ -120,7 +120,7 @@ pub struct Store {
     pub hide_size: bool,
     pub show_date: bool,
     pub search_excludes: Option<String>,
-    pub databases: Vec<crate::db::DbProfile>,
+    pub databases: Vec<DbProfile>,
     pub terminals: Vec<TermProfile>,
     pub show_perm: bool,
     #[serde(skip)]

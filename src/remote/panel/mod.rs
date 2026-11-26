@@ -5,7 +5,7 @@ use std::sync::mpsc::Receiver;
 
 use eframe::egui::{self, Button, ComboBox, Key, Rect, RichText, ScrollArea, Sense, TextEdit, Ui};
 
-use crate::app::{dialog, dialog_button, size_label};
+use crate::widgets::{dialog, dialog_button, size_label};
 use crate::remote::{self, Attrs, Cmd, Connection, Entry, Event, Profile, Protocol, Store};
 use crate::theme::Palette;
 mod dialogs;
@@ -39,6 +39,7 @@ pub enum PanelEvent {
         names: Vec<String>,
     },
     Toast(String),
+    Tree(bool),
     Compare {
         profile: String,
         path: String,
@@ -250,6 +251,7 @@ pub struct RemotePanel {
     batch_height: f32,
     batch_placed: bool,
     batch_owned: bool,
+    batch_title: Option<&'static str>,
     drop_zone: Option<Rect>,
     drop_dirs: Vec<(Rect, String)>,
     pub external_hover: Option<String>,
@@ -339,6 +341,7 @@ impl RemotePanel {
             batch_height: 0.0,
             batch_placed: false,
             batch_owned: false,
+            batch_title: None,
             drop_zone: None,
             drop_dirs: Vec::new(),
             external_hover: None,
@@ -405,6 +408,14 @@ impl RemotePanel {
 
     pub fn connected(&self) -> bool {
         self.connected
+    }
+
+    pub fn adopt_window(&mut self, adopt: impl Fn(&str) -> bool) {
+        if let Some(title) = self.batch_title.take()
+            && !self.batch_owned
+        {
+            self.batch_owned = adopt(title);
+        }
     }
 
     pub fn in_use(&self) -> bool {
@@ -1665,7 +1676,7 @@ impl RemotePanel {
                         }
                     });
                     if tree != self.tree {
-                        crate::app::request_view(Some(tree), None);
+                        self.notes.push(PanelEvent::Tree(tree));
                     }
                     let mut size = !self.store.hide_size;
                     if ui.checkbox(&mut size, tr!("Показывать размер")).changed() {

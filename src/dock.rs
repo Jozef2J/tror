@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::theme::{self, Palette};
 
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum Pane {
     Welcome,

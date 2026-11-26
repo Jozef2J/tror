@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Button, Key, Rect, RichText, ScrollArea, Sense, TextEdit, Ui};
 
-use crate::app::{dialog, dialog_button, size_label};
+use crate::widgets::{dialog, dialog_button, size_label};
 use crate::theme::Palette;
 use crate::widgets::{self, chevron, date_label, dots_button, paint_icon, refresh_button};
 
@@ -1157,7 +1157,7 @@ impl ProjectPanel {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 let ok = if action == tr!("Удалить") {
-                    crate::app::danger_button(ui, pal, action)
+                    crate::widgets::danger_button(ui, pal, action)
                 } else {
                     dialog_button(ui, pal, action, true)
                 };

@@ -1,6 +1,7 @@
-use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, TextEdit, Ui};
+use eframe::egui::{self, Align, Color32, ComboBox, FontId, Layout, Modal, Pos2, Rect, RichText, Sense, Stroke, TextEdit, Ui};
 
 use crate::theme::Palette;
+
 
 pub fn primary(text: impl Into<String>, pal: &Palette) -> egui::Button<'static> {
     egui::Button::new(RichText::new(text.into()).color(pal.base)).fill(pal.accent)
@@ -333,7 +334,7 @@ pub fn chevron(painter: &egui::Painter, center: Pos2, open: bool, color: Color32
     painter.add(egui::Shape::line(points, Stroke::new(1.3, color)));
 }
 
-pub fn kind_color(name: &str, pal: &Palette) -> Color32 {
+fn kind_color(name: &str, pal: &Palette) -> Color32 {
     let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
         "php" | "phtml" | "twig" | "tpl" => Color32::from_rgb(0x9d, 0x8c, 0xf2),
@@ -473,7 +474,7 @@ pub fn parse_date(text: &str) -> Option<u64> {
     None
 }
 
-pub fn parse_mode(text: &str) -> Option<u32> {
+fn parse_mode(text: &str) -> Option<u32> {
     let text = text.trim();
     if text.is_empty() || text.len() > 4 || !text.chars().all(|c| ('0'..='7').contains(&c)) {
         return None;
@@ -530,12 +531,105 @@ pub fn perm_grid(ui: &mut Ui, pal: &Palette, mode: &mut u32, octal: &mut String)
             changed = true;
         }
         ui.label(
-            RichText::new(crate::remote::perm_string(*mode, false)[1..].to_owned())
+            RichText::new(perm_string(*mode, false)[1..].to_owned())
                 .monospace()
                 .color(pal.subtext),
         );
     });
     changed
+}
+
+fn perm_string(mode: u32, is_dir: bool) -> String {
+    let mut out = String::with_capacity(10);
+    out.push(if is_dir { 'd' } else { '-' });
+    for shift in [6, 3, 0] {
+        let bits = (mode >> shift) & 7;
+        out.push(if bits & 4 != 0 { 'r' } else { '-' });
+        out.push(if bits & 2 != 0 { 'w' } else { '-' });
+        out.push(if bits & 1 != 0 { 'x' } else { '-' });
+    }
+    out
+}
+
+pub fn appearance_rows(
+    ui: &mut Ui,
+    pal: &Palette,
+    theme: &mut String,
+    font: &mut String,
+    font_size: &mut f32,
+    wide: f32,
+) {
+    ui.label(tr!("Цветовая схема"));
+    ComboBox::from_id_salt("tror_term_theme")
+        .width(wide)
+        .selected_text(if theme.is_empty() {
+            tr!("Как в редакторе")
+        } else {
+            crate::theme::SCHEMES
+                .iter()
+                .find(|s| s.name == theme.as_str())
+                .map_or(theme.as_str(), |s| tr!(s.name))
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(theme, String::new(), tr!("Как в редакторе"));
+            for scheme in crate::theme::SCHEMES {
+                ui.selectable_value(theme, scheme.name.to_owned(), tr!(scheme.name));
+            }
+        });
+    ui.end_row();
+    ui.label("");
+    let colors = crate::theme::colors(theme, pal, true);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(wide, 22.0), Sense::hover());
+    ui.painter().rect_filled(rect, 4.0, colors.bg);
+    for (i, color) in colors.ansi.iter().take(8).enumerate() {
+        ui.painter().circle_filled(
+            egui::pos2(rect.left() + 14.0 + i as f32 * 18.0, rect.center().y),
+            5.5,
+            *color,
+        );
+    }
+    ui.painter().text(
+        egui::pos2(rect.left() + 162.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "user@host:~$ ls",
+        FontId::monospace(12.0),
+        colors.fg,
+    );
+    ui.end_row();
+    ui.label(tr!("Шрифт"));
+    ui.horizontal(|ui| {
+        let name = if font.trim().is_empty() {
+            tr!("как в редакторе").to_owned()
+        } else {
+            std::path::Path::new(font.trim())
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| font.clone())
+        };
+        ui.label(RichText::new(name).color(pal.subtext));
+        if ui.button(tr!("Выбрать…")).clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter(tr!("Шрифты"), &["ttf", "otf", "ttc"])
+                .pick_file()
+        {
+            *font = path.display().to_string();
+        }
+        if !font.is_empty() && ui.button(tr!("Сбросить")).clicked() {
+            font.clear();
+        }
+    });
+    ui.end_row();
+    ui.label(tr!("Размер шрифта"));
+    ui.horizontal(|ui| {
+        let mut custom = *font_size > 0.0;
+        if ui.checkbox(&mut custom, tr!("свой")).changed() {
+            *font_size = if custom { 14.0 } else { 0.0 };
+        }
+        if custom {
+            crate::widgets::stepper(ui, pal, "term_font", font_size, (8.0, 28.0), 1.0, "px");
+        }
+    });
+    ui.end_row();
 }
 
 #[cfg(test)]
@@ -548,7 +642,7 @@ mod tests {
         assert_eq!(parse_mode("0644"), Some(0o644));
         assert_eq!(parse_mode("788"), None);
         assert_eq!(parse_mode(""), None);
-        assert_eq!(crate::remote::perm_string(0o754, true), "drwxr-xr--");
+        assert_eq!(perm_string(0o754, true), "drwxr-xr--");
         let secs = parse_date("02.01.2026 03:04").unwrap();
         assert_eq!(date_label(secs), "02.01.2026 03:04");
         assert!(parse_date("вчера").is_none());
@@ -724,7 +818,7 @@ pub fn set_columns(widths: [f32; 3]) {
 const COLUMN_MIN: [f32; 3] = [40.0, 30.0, 56.0];
 const NAME_MIN: f32 = 110.0;
 
-pub fn fit_columns(width: f32, shown: [bool; 3]) -> [f32; 3] {
+fn fit_columns(width: f32, shown: [bool; 3]) -> [f32; 3] {
     let stored = columns();
     let room = width - 6.0 - NAME_MIN;
     let mut on = shown;
@@ -1326,4 +1420,128 @@ pub fn profile_dialogs(
         ctx.data_mut(|d| d.insert_temp(id.with("ask"), ask));
     }
     action
+}
+
+pub fn size_label(bytes: usize) -> String {
+    if bytes < 1024 {
+        tf!("{bytes} Б", "{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        tf!("{:.1} КБ", "{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        tf!("{:.1} МБ", "{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+pub fn danger_button(ui: &mut Ui, pal: &Palette, text: &str) -> bool {
+    let response = ui.add(danger(text, pal).min_size(ACTION));
+    Lit::lit(response, ui).clicked()
+}
+
+pub fn dialog_button(ui: &mut Ui, pal: &Palette, text: &str, primary: bool) -> bool {
+    let button = if primary {
+        self::primary(text, pal)
+    } else {
+        self::secondary(text, pal)
+    };
+    let response = ui.add(button.min_size(ACTION));
+    if primary {
+        Lit::lit(response, ui).clicked()
+    } else {
+        response.clicked()
+    }
+}
+
+pub fn window_header(ui: &mut Ui, pal: &Palette, title: &str, closable: bool) -> bool {
+    let mut close = false;
+    ui.horizontal(|ui| {
+        self::title(ui, pal, title);
+        if closable {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                close = icon_button(ui, pal, Icon::Close).clicked();
+            });
+        }
+    });
+    ui.add_space(4.0);
+    close
+}
+
+pub fn dialog(id: impl std::hash::Hash + std::fmt::Debug, pal: &Palette) -> Modal {
+    Modal::new(egui::Id::unique(id)).frame(window_frame(pal))
+}
+
+#[derive(Clone, Copy)]
+pub enum Icon {
+    Up,
+    Down,
+    Close,
+    Dock,
+}
+
+pub fn icon_button(ui: &mut Ui, pal: &Palette, icon: Icon) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::Role::Button,
+            true,
+            match icon {
+                Icon::Up => tr!("Вверх"),
+                Icon::Down => tr!("Вниз"),
+                Icon::Close => tr!("Закрыть"),
+                Icon::Dock => tr!("Закрепить"),
+            },
+        )
+    });
+    if response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            6.0,
+            if response.is_pointer_button_down_on() {
+                pal.surface_hover
+            } else {
+                pal.surface
+            },
+        );
+    }
+    let color = if response.hovered() {
+        pal.text
+    } else {
+        pal.subtext
+    };
+    let stroke = Stroke::new(1.5, color);
+    let c = rect.center();
+    let d = 4.0;
+    if matches!(icon, Icon::Dock) {
+        let frame = Rect::from_center_size(c, egui::vec2(11.0, 9.0));
+        ui.painter().rect_stroke(
+            frame,
+            1.5,
+            Stroke::new(1.2, color),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().rect_filled(
+            Rect::from_min_max(frame.min, egui::pos2(frame.min.x + 4.0, frame.max.y)),
+            1.5,
+            color,
+        );
+        return response;
+    }
+    let lines = match icon {
+        Icon::Up => [
+            [c + egui::vec2(-d, 2.0), c + egui::vec2(0.0, -2.5)],
+            [c + egui::vec2(0.0, -2.5), c + egui::vec2(d, 2.0)],
+        ],
+        Icon::Down => [
+            [c + egui::vec2(-d, -2.0), c + egui::vec2(0.0, 2.5)],
+            [c + egui::vec2(0.0, 2.5), c + egui::vec2(d, -2.0)],
+        ],
+        Icon::Close | Icon::Dock => [
+            [c + egui::vec2(-d, -d), c + egui::vec2(d, d)],
+            [c + egui::vec2(d, -d), c + egui::vec2(-d, d)],
+        ],
+    };
+    for line in lines {
+        ui.painter().line_segment(line, stroke);
+    }
+    response
 }

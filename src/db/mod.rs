@@ -8,7 +8,7 @@ use eframe::egui::{
     TextEdit, Ui,
 };
 
-use crate::app::{dialog, dialog_button};
+use crate::widgets::{dialog, dialog_button};
 use crate::remote::{self, Profile, Store};
 use crate::theme::Palette;
 use crate::trace;
@@ -21,7 +21,8 @@ mod history;
 mod sql;
 mod structure;
 
-pub use engine::{DbKind, DbProfile, MAX_ROWS, Source, Table};
+pub use crate::remote::{DbKind, DbProfile};
+pub use engine::{MAX_ROWS, Source, Table};
 use engine::*;
 use history::History;
 use sql::*;

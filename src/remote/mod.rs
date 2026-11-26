@@ -6,6 +6,7 @@ pub mod ppk;
 pub mod vault;
 
 mod backend;
+mod database;
 mod search;
 mod ssh;
 mod store;
@@ -13,6 +14,7 @@ mod store;
 use backend::*;
 pub use search::*;
 pub use ssh::*;
+pub use database::{DbKind, DbProfile};
 pub use store::*;
 
 use std::collections::BTreeMap;
@@ -28,18 +30,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::trace;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
 const IO_TIMEOUT_MS: u32 = 20_000;
 const KEEPALIVE: Duration = Duration::from_secs(25);
 const CHECK_LIMIT: u64 = 8 * 1024 * 1024;
 const KEEP_BACKUPS: usize = 10;
-
-pub fn content_hash(data: &[u8]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    data.hash(&mut hasher);
-    hasher.finish()
-}
 
 pub fn backups_dir() -> Option<PathBuf> {
     eframe::storage_dir("Tror").map(|dir| dir.join("backups"))
@@ -97,18 +92,6 @@ pub struct Attrs {
     pub mtime: Option<u64>,
     pub atime: Option<u64>,
     pub is_dir: bool,
-}
-
-pub fn perm_string(mode: u32, is_dir: bool) -> String {
-    let mut out = String::with_capacity(10);
-    out.push(if is_dir { 'd' } else { '-' });
-    for shift in [6, 3, 0] {
-        let bits = (mode >> shift) & 7;
-        out.push(if bits & 4 != 0 { 'r' } else { '-' });
-        out.push(if bits & 2 != 0 { 'w' } else { '-' });
-        out.push(if bits & 1 != 0 { 'x' } else { '-' });
-    }
-    out
 }
 
 #[derive(Clone)]
@@ -328,7 +311,7 @@ fn execute(
                 trace::client(format!("[SFTP] read {path} (server copy before saving)"));
                 let server = backend.download(path, &|_, _| {})?;
                 if let (Some(expect), Some(doc)) = (expect, doc)
-                    && content_hash(&server) != *expect
+                    && crate::text::document::content_hash(&server) != *expect
                 {
                     return Ok((
                         Event::Conflict {
@@ -770,7 +753,7 @@ pub fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-fn timed(started: std::time::Instant, result: Result<String, String>) -> Result<String, String> {
+pub(crate) fn timed(started: std::time::Instant, result: Result<String, String>) -> Result<String, String> {
     let result = result.map(|text| tf!("{text} ({} мс)", "{text} ({} ms)", started.elapsed().as_millis()));
     match &result {
         Ok(text) => trace::server(format!("[TEST] ok: {text}")),
@@ -816,73 +799,15 @@ pub fn test(profile: &Profile, known: Option<String>) -> Result<String, String> 
     timed(started, result)
 }
 
-pub fn test_terminal(profile: &TermProfile, known: Option<String>) -> Result<String, String> {
-    let started = std::time::Instant::now();
-    trace::client(format!(
-        "[TEST] {} {} as {}",
-        profile.protocol.label(),
-        profile.address(),
-        profile.user.trim()
-    ));
-    let result = match profile.protocol {
-        TermProtocol::Local => Ok(crate::console::local::program()),
-        TermProtocol::Telnet => (|| {
-            let address = profile
-                .address()
-                .to_socket_addrs()
-                .map_err(|e| tf!("не удалось найти хост: {e}", "could not resolve the host: {e}"))?
-                .next()
-                .ok_or(tr!("не удалось найти хост"))?;
-            let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
-                .map_err(|e| tf!("нет соединения: {e}", "no connection: {e}"))?;
-            stream
-                .set_read_timeout(Some(Duration::from_millis(1500)))
-                .ok();
-            let mut buf = [0u8; 2048];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let text: String = String::from_utf8_lossy(&buf[..n])
-                .chars()
-                .filter(|c| !c.is_control() || *c == '\n')
-                .collect();
-            let line = text
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty() && l.chars().all(|c| (c as u32) < 0xfffd))
-                .unwrap_or("")
-                .chars()
-                .take(80)
-                .collect::<String>();
-            Ok(if line.is_empty() {
-                tr!("порт открыт, сервер принял соединение").to_owned()
-            } else {
-                tf!("порт открыт, сервер ответил: «{line}»", "port open, the server replied: \"{line}\"")
-            })
-        })(),
-        TermProtocol::Ssh => ssh_probe(&profile.ssh(), known.as_deref())
-            .map(|(_, note)| tf!("вход выполнен{note}", "logged in{note}")),
-        TermProtocol::Mosh => ssh_probe(&profile.ssh(), known.as_deref()).and_then(|(session, note)| {
-            let server = if profile.mosh_server.trim().is_empty() {
-                "mosh-server"
-            } else {
-                profile.mosh_server.trim()
-            };
-            let mut channel = session.channel_session().map_err(|e| e.to_string())?;
-            channel
-                .exec(&format!("command -v {server} || which {server}"))
-                .map_err(|e| e.to_string())?;
-            let mut out = String::new();
-            let _ = channel.read_to_string(&mut out);
-            let _ = channel.wait_close();
-            let path = out.lines().next().unwrap_or("").trim().to_owned();
-            if path.is_empty() {
-                Err(tf!("вход по SSH выполнен, но {server} на сервере не найден — установите пакет mosh", "logged in over SSH, but {server} was not found on the server — install the mosh package"
-                ))
-            } else {
-                Ok(tf!("вход выполнен, найден {path}{note}", "logged in, found {path}{note}"))
-            }
-        }),
-    };
-    timed(started, result)
+pub fn probe<F>(job: F) -> Receiver<Result<String, String>>
+where
+    F: FnOnce() -> Result<String, String> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(job());
+    });
+    rx
 }
 
 pub enum OneShot {

@@ -207,7 +207,7 @@ impl TrorApp {
                     Effect::Decorate(key, items) => {
                         if let Some((id, _)) = done.doc {
                             self.plugin_decos.insert((id, done.plugin, key), items);
-                            let mut all: Vec<crate::plugins::wasm::Decoration> = self
+                            let mut all: Vec<crate::text::editor::Decoration> = self
                                 .plugin_decos
                                 .iter()
                                 .filter(|((doc, _, _), _)| *doc == id)

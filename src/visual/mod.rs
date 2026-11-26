@@ -988,7 +988,7 @@ impl Visual {
         let mut ok = false;
         let mut cancel = false;
         let base = self.base_dir.clone();
-        let modal = crate::app::dialog("tror_visual_dialog", pal).show(ui.ctx(), |ui| {
+        let modal = crate::widgets::dialog("tror_visual_dialog", pal).show(ui.ctx(), |ui| {
             ui.set_width(420.0);
             let row = |ui: &mut Ui, label: &str, value: &mut String| {
                 ui.horizontal(|ui| {
@@ -1046,10 +1046,10 @@ impl Visual {
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if crate::app::dialog_button(ui, pal, "OK", true) {
+                if crate::widgets::dialog_button(ui, pal, "OK", true) {
                     ok = true;
                 }
-                if crate::app::dialog_button(ui, pal, tr!("Отмена"), false) {
+                if crate::widgets::dialog_button(ui, pal, tr!("Отмена"), false) {
                     cancel = true;
                 }
             });

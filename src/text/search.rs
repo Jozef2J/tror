@@ -167,21 +167,11 @@ impl SearchState {
     }
 
     fn build(&self) -> Result<Regex, String> {
-        let mut pattern = if self.regex {
-            self.query.clone()
-        } else if self.extended {
-            regex::escape(&unescape(&self.query))
+        if self.extended && !self.regex {
+            pattern(&unescape(&self.query), false, self.case, self.word)
         } else {
-            regex::escape(&self.query)
-        };
-        if self.word {
-            pattern = format!(r"\b(?:{pattern})\b");
+            pattern(&self.query, self.regex, self.case, self.word)
         }
-        RegexBuilder::new(&pattern)
-            .case_insensitive(!self.case)
-            .multi_line(true)
-            .build()
-            .map_err(|_| tr!("некорректное регулярное выражение").to_owned())
     }
 
     pub fn update(&mut self, doc: &Document, ctx: Option<&egui::Context>) {
@@ -372,6 +362,22 @@ impl SearchState {
             }
         }
     }
+}
+
+pub fn pattern(query: &str, regex: bool, case: bool, word: bool) -> Result<Regex, String> {
+    let mut source = if regex {
+        query.to_owned()
+    } else {
+        regex::escape(query)
+    };
+    if word {
+        source = format!(r"\b(?:{source})\b");
+    }
+    RegexBuilder::new(&source)
+        .case_insensitive(!case)
+        .multi_line(true)
+        .build()
+        .map_err(|e| tf!("Ошибка в выражении: {e}", "Error in the expression: {e}"))
 }
 
 #[cfg(test)]

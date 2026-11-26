@@ -64,6 +64,7 @@ impl TrorApp {
         let now = ctx.input(|i| i.time);
         for event in events {
             match event {
+                PanelEvent::Tree(tree) => self.settings.remote_tree = tree,
                 PanelEvent::Relay { target, path, data } => {
                     match self
                         .remotes

@@ -1,10 +1,6 @@
 use super::*;
 
-pub static TAB: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(4);
-
-pub fn code_family() -> egui::FontFamily {
-    egui::FontFamily::Name("code-tabs".into())
-}
+use crate::theme::TAB;
 
 pub(super) fn tab_stops(job: &mut LayoutJob, char_w: f32) {
     if !job.text.contains('\t') {

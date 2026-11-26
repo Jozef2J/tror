@@ -231,7 +231,7 @@ pub(super) fn search_walk(
     cancel: &AtomicBool,
     emit: &dyn Fn(SearchEvent),
 ) -> usize {
-    let re = match crate::findfiles::pattern(&params.query, params.regex, params.case, params.word)
+    let re = match crate::text::search::pattern(&params.query, params.regex, params.case, params.word)
     {
         Ok(re) => re,
         Err(e) => {

@@ -1,4 +1,5 @@
-use super::engine::{DbKind, Source, Table};
+use super::DbKind;
+use super::engine::{Source, Table};
 
 pub(super) fn json(table: &Table) -> String {
     let rows: Vec<serde_json::Value> = table

@@ -341,7 +341,7 @@ impl Document {
     }
 
     pub fn open_remote(id: u64, profile: &str, path: &str, bytes: Vec<u8>) -> Result<Self, String> {
-        let hash = crate::remote::content_hash(&bytes);
+        let hash = content_hash(&bytes);
         let decoded = decode(bytes, None)?;
         let mut doc = Self::empty(id, 0);
         doc.server_hash = Some(hash);
@@ -512,7 +512,8 @@ impl Document {
 
     pub fn title(&self) -> String {
         if let Some((_, path)) = &self.remote {
-            return crate::remote::file_name(path).to_owned();
+            let trimmed = path.trim_end_matches('/');
+            return trimmed.rsplit('/').next().unwrap_or(trimmed).to_owned();
         }
         match &self.path {
             Some(p) => p
@@ -1565,6 +1566,13 @@ pub fn write_safely(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
     }
     let _ = std::fs::remove_file(&temp);
     std::fs::write(&target, data)
+}
+
+pub fn content_hash(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(test)]

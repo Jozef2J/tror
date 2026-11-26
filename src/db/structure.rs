@@ -3,7 +3,7 @@ use eframe::egui::{
 };
 
 use super::{Cmd, DbKind, DbPanel, Engine, Source, Table};
-use crate::app::{dialog, dialog_button};
+use crate::widgets::{dialog, dialog_button};
 use crate::theme::Palette;
 use crate::widgets::Lit;
 

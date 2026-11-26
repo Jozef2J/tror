@@ -1,3 +1,4 @@
+use crate::text::editor::{DecoKind, Decoration};
 use std::path::{Path, PathBuf};
 
 use ropey::Rope;
@@ -97,22 +98,6 @@ pub enum Effect {
     Panel(String, Value),
     ShowPanel(String),
     Decorate(String, Vec<Decoration>),
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Decoration {
-    pub kind: DecoKind,
-    pub start: usize,
-    pub end: usize,
-    pub color: Option<[u8; 3]>,
-    pub message: String,
-}
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum DecoKind {
-    Highlight,
-    Underline,
-    Gutter,
 }
 
 fn hex_color(text: &str) -> Option<[u8; 3]> {

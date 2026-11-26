@@ -75,14 +75,6 @@ impl eframe::App for TrorApp {
             panel.visible = dock::has(&self.dock, pane) || detached.contains(&pane);
             panel.tree = self.settings.remote_tree;
         }
-        if let Ok(mut request) = VIEW_REQUEST.lock() {
-            if let Some(tree) = request.0.take() {
-                self.settings.remote_tree = tree;
-            }
-            if let Some(tree) = request.1.take() {
-                self.settings.project_tree = tree;
-            }
-        }
         self.project.tree = self.settings.project_tree;
         self.project.upload_target = self.remotes.iter().find_map(|r| r.peer_label());
         crate::text::complete::set_custom(&self.settings.dictionaries);
@@ -469,6 +461,9 @@ impl eframe::App for TrorApp {
                 .leaf_rigid_size(&dock::leaf_rigid)
                 .show_inside(ui, &mut viewer);
         });
+        for panel in &mut self.remotes {
+            panel.adopt_window(owner::adopt);
+        }
         if let Some((_, Pane::Doc(id))) = dock.find_active_focused()
             && let Some(index) = self.docs.iter().position(|d| d.id == *id)
             && index != self.active
