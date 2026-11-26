@@ -395,8 +395,8 @@ impl DbPanel {
         }
     }
 
-    pub(super) fn open_editor(&mut self, store: &Store, new: bool) {
-        let mut drafts = store.drafts::<DbProfile>();
+    pub(super) fn open_editor(&mut self, new: bool) {
+        let mut drafts = self.store.drafts::<DbProfile>();
         if new || drafts.is_empty() {
             drafts.push(DbProfile {
                 name: tf!("База {}", "Database {}", drafts.len() + 1),

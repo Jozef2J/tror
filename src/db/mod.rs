@@ -374,6 +374,8 @@ enum Mode {
 
 #[derive(Default)]
 pub struct DbPanel {
+    store: Store,
+    store_seen: u64,
     selected: usize,
     conn: Option<Conn>,
     kind: DbKind,
@@ -404,6 +406,22 @@ pub struct DbPanel {
 }
 
 impl DbPanel {
+    pub fn new() -> Self {
+        let path = eframe::storage_dir("Tror").map(|dir| dir.join("connections.json"));
+        Self {
+            store: Store::load(path),
+            store_seen: Store::generation(),
+            ..Default::default()
+        }
+    }
+
+    fn reload(&mut self) {
+        if self.store_seen != Store::generation() {
+            self.store_seen = Store::generation();
+            self.store = Store::load(self.store.path().map(|p| p.to_path_buf()));
+        }
+    }
+
     pub fn modal_open(&self) -> bool {
         self.editor.is_some() || self.edits.confirm.is_some() || self.structure_modal()
     }
@@ -439,7 +457,8 @@ impl DbPanel {
         self.send(Cmd::Query(sql, source));
     }
 
-    fn connect(&mut self, store: &Store, ctx: &egui::Context) {
+    fn connect(&mut self, ctx: &egui::Context) {
+        let store = &self.store;
         let Some(profile) = store.get::<DbProfile>(self.selected).cloned() else {
             return;
         };
@@ -623,25 +642,27 @@ impl DbPanel {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, pal: &Palette, store: &mut Store, font_size: f32) {
+    pub fn ui(&mut self, ui: &mut Ui, pal: &Palette, font_size: f32) {
         let ctx = ui.ctx().clone();
+        self.reload();
         self.poll();
         ui.add_space(8.0);
-        if store.count::<DbProfile>() == 0 {
+        if self.store.count::<DbProfile>() == 0 {
             crate::widgets::wrapped_row(ui, 8.0, |ui| {
                 ui.label(RichText::new(tr!("Подключений к базам пока нет.")).color(pal.subtext));
                 if ui
                     .add(Button::new(tr!("Создать подключение")))
                     .clicked()
                 {
-                    self.open_editor(store, true);
+                    self.open_editor(true);
                 }
             });
             return;
         }
-        self.selected = self.selected.min(store.count::<DbProfile>() - 1);
+        self.selected = self.selected.min(self.store.count::<DbProfile>() - 1);
         let active = self.conn.is_some();
-        let names: Vec<(String, String)> = store
+        let names: Vec<(String, String)> = self
+            .store
             .iter::<DbProfile>()
             .map(|p| (p.name.clone(), p.kind.label().to_owned()))
             .collect();
@@ -688,21 +709,21 @@ impl DbPanel {
             Some(crate::widgets::ProfileAction::Select(i)) => self.selected = i,
             Some(crate::widgets::ProfileAction::Edit(i)) => {
                 self.selected = i;
-                self.open_editor(store, false);
+                self.open_editor(false);
             }
             Some(crate::widgets::ProfileAction::Rename(i, name)) => {
-                let _ = store.rename::<DbProfile>(i, name);
+                let _ = self.store.rename::<DbProfile>(i, name);
             }
             Some(crate::widgets::ProfileAction::Delete(i)) => {
-                if i < store.count::<DbProfile>() && !active {
-                    let _ = store.remove::<DbProfile>(i);
-                    self.selected = self.selected.min(store.count::<DbProfile>().saturating_sub(1));
-                    if store.count::<DbProfile>() == 0 {
+                if i < self.store.count::<DbProfile>() && !active {
+                    let _ = self.store.remove::<DbProfile>(i);
+                    self.selected = self.selected.min(self.store.count::<DbProfile>().saturating_sub(1));
+                    if self.store.count::<DbProfile>() == 0 {
                         return;
                     }
                 }
             }
-            Some(crate::widgets::ProfileAction::Add) => self.open_editor(store, true),
+            Some(crate::widgets::ProfileAction::Add) => self.open_editor(true),
             None => {}
         }
         crate::widgets::wrapped_row(ui, 8.0, |ui| {
@@ -713,7 +734,7 @@ impl DbPanel {
                     self.status = tr!("Отключено").into();
                     self.error = false;
                 } else {
-                    self.connect(store, &ctx);
+                    self.connect(&ctx);
                 }
             }
             if self.busy {

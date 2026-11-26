@@ -70,11 +70,9 @@ pub fn run() -> i32 {
         "Regex search in 25 MB",
         600.0,
         time(3, || {
-            let mut search = SearchState::default();
-            search.query = r"Товар \d+7\b".into();
-            search.regex = true;
+            let mut search = SearchState::new(r"Товар \d+7\b", true);
             search.update(&doc, None);
-            search.matches.len()
+            search.match_count()
         }),
     );
     let mut edit = doc;

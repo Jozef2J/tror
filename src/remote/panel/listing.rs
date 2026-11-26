@@ -441,7 +441,10 @@ impl RemotePanel {
                             }
                             for (peer, label) in self.peers.clone() {
                                 if ui.button(tf!("Передать на «{label}»", "Transfer to \"{label}\"")).clicked() {
-                                    self.outgoing = Some((peer, chosen.clone()));
+                                    self.notes.push(PanelEvent::Send {
+                                        target: peer,
+                                        files: chosen.clone(),
+                                    });
                                 }
                             }
                             ui.separator();
@@ -553,9 +556,10 @@ impl RemotePanel {
                 egui::Stroke::new(1.5, pal.accent),
                 egui::StrokeKind::Inside,
             );
-            if ui.input(|i| i.pointer.any_released()) {
-                self.incoming =
-                    egui::DragAndDrop::take_payload::<Dragged>(ui.ctx()).map(|d| (*d).clone());
+            if ui.input(|i| i.pointer.any_released())
+                && let Some(dragged) = egui::DragAndDrop::take_payload::<Dragged>(ui.ctx())
+            {
+                self.notes.push(PanelEvent::Receive((*dragged).clone()));
             }
         }
         if ui.ctx().dragged_id().is_some()

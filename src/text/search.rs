@@ -160,6 +160,23 @@ impl SearchState {
         }
     }
 
+    pub fn new(query: &str, regex: bool) -> Self {
+        Self {
+            query: query.to_owned(),
+            regex,
+            ..Default::default()
+        }
+    }
+
+    pub fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+
+    pub fn matches_on(&self, start: usize, end: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let from = self.matches.partition_point(|m| m.1 <= start);
+        self.matches[from..].iter().copied().take_while(move |m| m.0 <= end)
+    }
+
     pub fn close(&mut self) {
         self.open = false;
     }

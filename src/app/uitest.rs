@@ -15,6 +15,10 @@ fn sandbox(name: &str) -> PathBuf {
     home
 }
 
+fn stored(state: &TrorApp) -> Option<PathBuf> {
+    state.remotes[0].store.path().map(Path::to_path_buf)
+}
+
 fn app<'a>() -> Harness<'a, TrorApp> {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
@@ -104,12 +108,15 @@ fn ui_database_search_finds_rows() {
     let mut harness = app();
     {
         let state = harness.state_mut();
-        state.remotes[0].store.databases = vec![crate::db::DbProfile {
-            name: "shop".into(),
-            kind: crate::db::DbKind::Sqlite,
-            file: path.to_string_lossy().into_owned(),
-            ..Default::default()
-        }];
+        let mut store = crate::remote::Store::load(stored(state));
+        store
+            .replace(vec![crate::db::DbProfile {
+                name: "shop".into(),
+                kind: crate::db::DbKind::Sqlite,
+                file: path.to_string_lossy().into_owned(),
+                ..Default::default()
+            }])
+            .unwrap();
         let floats = state.settings.floats.clone();
         dock::show(&mut state.dock, Pane::Db, &floats);
     }
@@ -167,7 +174,8 @@ fn ui_database_profiles_add_and_save() {
         dock::show(&mut state.dock, Pane::Db, &floats);
     }
     harness.run_steps(3);
-    let before = harness.state().remotes[0].store.databases.len();
+    let databases = |h: &Harness<'_, TrorApp>| crate::remote::Store::load(stored(h.state())).count::<crate::db::DbProfile>();
+    let before = databases(&harness);
     harness.get_by_label("Создать подключение").click();
     harness.run_steps(3);
     harness.get_by_label("Профили баз данных");
@@ -180,7 +188,7 @@ fn ui_database_profiles_add_and_save() {
     harness.get_by_label("Сохранить").click();
     harness.run_steps(3);
     assert!(harness.query_by_label("Профили баз данных").is_none());
-    assert_eq!(harness.state().remotes[0].store.databases.len(), before + 2);
+    assert_eq!(databases(&harness), before + 2);
 }
 
 #[test]
@@ -382,12 +390,15 @@ fn ui_database_structure_renames_column() {
     let mut harness = app();
     {
         let state = harness.state_mut();
-        state.remotes[0].store.databases = vec![crate::db::DbProfile {
-            name: "shop".into(),
-            kind: crate::db::DbKind::Sqlite,
-            file: path.to_string_lossy().into_owned(),
-            ..Default::default()
-        }];
+        let mut store = crate::remote::Store::load(stored(state));
+        store
+            .replace(vec![crate::db::DbProfile {
+                name: "shop".into(),
+                kind: crate::db::DbKind::Sqlite,
+                file: path.to_string_lossy().into_owned(),
+                ..Default::default()
+            }])
+            .unwrap();
         let floats = state.settings.floats.clone();
         dock::show(&mut state.dock, Pane::Db, &floats);
     }

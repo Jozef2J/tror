@@ -1,7 +1,8 @@
 use super::*;
 
 impl DbPanel {
-    pub fn dialogs(&mut self, ctx: &egui::Context, pal: &Palette, store: &mut Store) {
+    pub fn dialogs(&mut self, ctx: &egui::Context, pal: &Palette) {
+        self.reload();
         self.confirm_dialog(ctx, pal);
         self.import_dialog(ctx, pal);
         self.structure_dialogs(ctx, pal);
@@ -123,7 +124,7 @@ impl DbPanel {
                                         String::new(),
                                         tr!("нет, подключаться напрямую"),
                                     );
-                                    for host in store.iter::<Profile>() {
+                                    for host in self.store.iter::<Profile>() {
                                         if host.protocol == remote::Protocol::Sftp {
                                             ui.selectable_value(
                                                 &mut p.tunnel,
@@ -203,7 +204,8 @@ impl DbPanel {
                                 .color(pal.subtext),
                         );
                     } else {
-                        let sftp_hosts = store
+                        let sftp_hosts = self
+                            .store
                             .iter::<Profile>()
                             .filter(|h| h.protocol == remote::Protocol::Sftp)
                             .count();
@@ -250,7 +252,7 @@ impl DbPanel {
         if test {
             let profile = editor.drafts.get(editor.index).cloned().unwrap_or_default();
             let ssh = (!profile.tunnel.is_empty() && profile.kind != DbKind::Sqlite)
-                .then(|| store.host_with_key(&profile.tunnel))
+                .then(|| self.store.host_with_key(&profile.tunnel))
                 .flatten();
             let (tx, rx) = channel();
             let ctx = ctx.clone();
@@ -265,8 +267,8 @@ impl DbPanel {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if save && let Some(editor) = self.editor.take() {
-            let saved = store.replace(editor.drafts);
-            self.selected = editor.index.min(store.count::<DbProfile>().saturating_sub(1));
+            let saved = self.store.replace(editor.drafts);
+            self.selected = editor.index.min(self.store.count::<DbProfile>().saturating_sub(1));
             if let Err(e) = saved {
                 self.status = tf!("Не удалось сохранить профили: {e}", "Could not save profiles: {e}");
                 self.error = true;

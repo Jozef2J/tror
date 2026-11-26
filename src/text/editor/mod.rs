@@ -852,15 +852,11 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             );
         }
         if search.open {
-            let from = search.matches.partition_point(|mt| mt.1 <= line_start);
-            for mt in &search.matches[from..] {
-                if mt.0 > line_end {
-                    break;
-                }
+            for mt in search.matches_on(line_start, line_end) {
                 let a = mt.0.max(line_start) - line_start;
                 let b = mt.1.min(line_end) - line_start;
                 if b > a {
-                    let color = if *mt == sorted {
+                    let color = if mt == sorted {
                         pal.match_current
                     } else {
                         pal.match_bg

@@ -9,12 +9,12 @@ impl TrorApp {
                 };
                 if let Some(panel) = self.remotes.get_mut(index) {
                     let events = panel.dialogs(ctx, pal);
-                    self.remote_events(ctx, events);
+                    self.remote_events(ctx, index, events);
                 }
             }
             Pane::Console => self.console.dialogs(ctx, pal),
             Pane::Project => self.project.dialogs(ctx, pal),
-            Pane::Db => self.db.dialogs(ctx, pal, &mut self.remotes[0].store),
+            Pane::Db => self.db.dialogs(ctx, pal),
             _ => {}
         }
     }
@@ -39,32 +39,31 @@ impl TrorApp {
         self.settings.hosts = self.remotes.len();
     }
 
-    pub(super) fn transfers(&mut self) {
-        let count = self.remotes.len();
-        for from in 0..count {
-            if let Some((target, files)) = self.remotes[from].outgoing.take()
-                && let Some(dir) = self
-                    .remotes
-                    .get(target as usize)
-                    .filter(|p| p.peer_label().is_some())
-                    .map(|p| p.cwd().to_owned())
-            {
-                self.remotes[from].relay(files, target, &dir);
-            }
-            if let Some(dragged) = self.remotes[from].incoming.take() {
-                let dir = self.remotes[from].cwd().to_owned();
-                if let Some(source) = self.remotes.get_mut(dragged.panel as usize) {
-                    source.relay(dragged.paths, from as u8, &dir);
-                }
-            }
-        }
-    }
-
-    pub(super) fn remote_events(&mut self, ctx: &egui::Context, events: Vec<PanelEvent>) {
+    pub(super) fn remote_events(&mut self, ctx: &egui::Context, from: usize, events: Vec<PanelEvent>) {
         let now = ctx.input(|i| i.time);
         for event in events {
             match event {
                 PanelEvent::Tree(tree) => self.settings.remote_tree = tree,
+                PanelEvent::FindFiles => self.queued.push(Action::SearchServer(from)),
+                PanelEvent::Send { target, files } => {
+                    if let Some(dir) = self
+                        .remotes
+                        .get(target as usize)
+                        .filter(|p| p.peer_label().is_some())
+                        .map(|p| p.cwd().to_owned())
+                        && let Some(panel) = self.remotes.get_mut(from)
+                    {
+                        panel.relay(files, target, &dir);
+                    }
+                }
+                PanelEvent::Receive(dragged) => {
+                    let Some(dir) = self.remotes.get(from).map(|p| p.cwd().to_owned()) else {
+                        continue;
+                    };
+                    if let Some(source) = self.remotes.get_mut(dragged.panel as usize) {
+                        source.relay(dragged.paths, from as u8, &dir);
+                    }
+                }
                 PanelEvent::Relay { target, path, data } => {
                     match self
                         .remotes

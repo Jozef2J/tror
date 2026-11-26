@@ -70,10 +70,11 @@ impl eframe::App for TrorApp {
             self.recovery.last = f64::INFINITY;
         }
         let detached = self.settings.detached.clone();
+        let labels: Vec<Option<String>> = self.remotes.iter().map(|r| r.peer_label()).collect();
         for (index, panel) in self.remotes.iter_mut().enumerate() {
             let pane = Pane::hosts(index);
-            panel.visible = dock::has(&self.dock, pane) || detached.contains(&pane);
-            panel.tree = self.settings.remote_tree;
+            let shown = dock::has(&self.dock, pane) || detached.contains(&pane);
+            panel.arrange(shown, self.settings.remote_tree, &labels, index);
         }
         self.project.tree = self.settings.project_tree;
         self.project.upload_target = self.remotes.iter().find_map(|r| r.peer_label());
@@ -116,11 +117,11 @@ impl eframe::App for TrorApp {
             None
         };
         for (i, panel) in self.remotes.iter_mut().enumerate() {
-            panel.external_hover = target
+            let hovered = target
                 .as_ref()
                 .filter(|(t, _)| hovering && *t == i)
-                .or(inner.as_ref().filter(|(t, _)| *t == i))
-                .map(|(_, dir)| dir.clone());
+                .or(inner.as_ref().filter(|(t, _)| *t == i));
+            panel.hover_drop(hovered, i);
         }
         let outside = window_left(&ctx);
         if outside {
@@ -134,9 +135,7 @@ impl eframe::App for TrorApp {
                 continue;
             };
             if outside {
-                if cfg!(any(target_os = "windows", target_os = "macos"))
-                    && self.remotes[index].out_drag.is_none()
-                {
+                if cfg!(any(target_os = "windows", target_os = "macos")) {
                     self.remotes[index].prepare_drag_out(items);
                 }
                 continue;
@@ -167,14 +166,7 @@ impl eframe::App for TrorApp {
             }
         }
         for panel in &mut self.remotes {
-            if panel.out_drag.is_some() && !held && panel.drag_out_ready().is_none() {
-                panel.abandon_drag_out();
-                continue;
-            }
-            if panel.out_drag.is_some()
-                && let Some(paths) = panel.drag_out_ready()
-            {
-                panel.out_drag = None;
+            if let Some(paths) = panel.finish_drag_out(held) {
                 let done = panel.drag_done.clone();
                 if held {
                     let ctx = ctx.clone();
@@ -260,14 +252,6 @@ impl eframe::App for TrorApp {
             || self.console.modal_open()
             || self.project.modal_open()
             || self.db.modal_open();
-        if let Some(index) = self
-            .remotes
-            .iter_mut()
-            .position(|r| std::mem::take(&mut r.want_search))
-        {
-            self.run(Action::FindFiles, &ctx);
-            self.find.scope = 2 + index;
-        }
         self.log.extend(crate::trace::take());
         if self.log.len() > 5000 {
             self.log.drain(..1000);
@@ -279,18 +263,8 @@ impl eframe::App for TrorApp {
         self.popups.retain(|(_, _, at)| now - at < 6.0);
         for index in 0..self.remotes.len() {
             let events = self.remotes[index].poll();
-            self.remote_events(&ctx, events);
+            self.remote_events(&ctx, index, events);
         }
-        let labels: Vec<Option<String>> = self.remotes.iter().map(|r| r.peer_label()).collect();
-        for (index, panel) in self.remotes.iter_mut().enumerate() {
-            panel.peers = labels
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i != index)
-                .filter_map(|(i, label)| Some((i as u8, label.clone()?)))
-                .collect();
-        }
-        self.transfers();
         self.db.poll();
         self.plugin_results(now);
         self.plugin_finished(now);
@@ -780,6 +754,7 @@ impl eframe::App for TrorApp {
         }
         self.show_popups(&ctx, &pal);
 
+        actions.append(&mut self.queued);
         for action in actions {
             self.run(action, &ctx);
         }

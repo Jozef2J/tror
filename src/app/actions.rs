@@ -338,6 +338,10 @@ impl TrorApp {
                 self.search.show_files(true);
                 self.find_files.show();
             }
+            Action::SearchServer(index) => {
+                self.run(Action::FindFiles, ctx);
+                self.find.scope = 2 + index;
+            }
             Action::MacroRecord => {
                 if self.macros.recording {
                     self.macros.recording = false;

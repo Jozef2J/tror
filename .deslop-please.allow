@@ -58,15 +58,6 @@ field-leak trorpad::prefs::Settings::tab_colors
 field-leak trorpad::prefs::Settings::updates
 field-leak trorpad::prefs::Settings::views
 field-leak trorpad::prefs::Settings::wrap
-field-leak trorpad::remote::panel::RemotePanel::external_hover
-field-leak trorpad::remote::panel::RemotePanel::incoming
-field-leak trorpad::remote::panel::RemotePanel::out_drag
-field-leak trorpad::remote::panel::RemotePanel::outgoing
-field-leak trorpad::remote::panel::RemotePanel::peers
-field-leak trorpad::remote::panel::RemotePanel::store
-field-leak trorpad::remote::panel::RemotePanel::tree
-field-leak trorpad::remote::panel::RemotePanel::visible
-field-leak trorpad::remote::panel::RemotePanel::want_search
 field-leak trorpad::text::complete::Completion::hint
 field-leak trorpad::text::complete::Completion::items
 field-leak trorpad::text::complete::Completion::selected

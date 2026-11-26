@@ -311,7 +311,7 @@ impl Visual {
                 changed = self.find(search, doc.version);
             }
             Some(search) => {
-                search.visual = None;
+                search.leave_visual();
                 self.hits.clear();
                 self.hits_key = None;
             }

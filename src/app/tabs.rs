@@ -597,7 +597,7 @@ impl TabViewer for Viewer<'_> {
                     actions.push(Action::Goto(id, line));
                 }
             }
-            Pane::Db => app.db.ui(ui, &pal, &mut app.remotes[0].store, font_size),
+            Pane::Db => app.db.ui(ui, &pal, font_size),
             Pane::Preview => {}
             Pane::Plugin(key) => app.plugin_pane(ui, key, &pal),
         };

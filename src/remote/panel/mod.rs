@@ -40,6 +40,12 @@ pub enum PanelEvent {
     },
     Toast(String),
     Tree(bool),
+    FindFiles,
+    Send {
+        target: u8,
+        files: Vec<(String, bool)>,
+    },
+    Receive(Dragged),
     Compare {
         profile: String,
         path: String,
@@ -201,12 +207,10 @@ struct Row {
 }
 
 pub struct RemotePanel {
-    pub visible: bool,
+    visible: bool,
     pub id: u8,
-    pub tree: bool,
-    pub peers: Vec<(u8, String)>,
-    pub outgoing: Option<(u8, Vec<(String, bool)>)>,
-    pub incoming: Option<Dragged>,
+    tree: bool,
+    peers: Vec<(u8, String)>,
     relay: HashMap<String, (u8, String)>,
     sort: crate::widgets::Sort,
     area: Rect,
@@ -245,7 +249,7 @@ pub struct RemotePanel {
     save_to: HashMap<String, PathBuf>,
     compare: HashSet<String>,
     batch: Option<Batch>,
-    pub out_drag: Option<(PathBuf, Vec<PathBuf>)>,
+    out_drag: Option<(PathBuf, Vec<PathBuf>)>,
     pub drag_done: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
     notice: Option<String>,
     batch_height: f32,
@@ -254,8 +258,7 @@ pub struct RemotePanel {
     batch_title: Option<&'static str>,
     drop_zone: Option<Rect>,
     drop_dirs: Vec<(Rect, String)>,
-    pub external_hover: Option<String>,
-    pub want_search: bool,
+    external_hover: Option<String>,
     search_query: String,
     search_root: String,
     search_content: bool,
@@ -280,8 +283,6 @@ impl RemotePanel {
             id,
             tree: false,
             peers: Vec::new(),
-            outgoing: None,
-            incoming: None,
             relay: HashMap::new(),
             sort: Default::default(),
             area: Rect::NOTHING,
@@ -292,7 +293,6 @@ impl RemotePanel {
             pending: 0,
             progress: None,
             store_seen: Store::generation(),
-            want_search: false,
             search_query: String::new(),
             search_root: String::new(),
             search_content: true,
@@ -409,6 +409,33 @@ impl RemotePanel {
         self.connected
     }
 
+    pub fn arrange(&mut self, shown: bool, tree: bool, labels: &[Option<String>], index: usize) {
+        self.visible = shown;
+        self.tree = tree;
+        self.peers = labels
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index)
+            .filter_map(|(i, label)| Some((i as u8, label.clone()?)))
+            .collect();
+    }
+
+    pub fn hover_drop(&mut self, hovered: Option<&(usize, String)>, index: usize) {
+        self.external_hover = hovered.filter(|(i, _)| *i == index).map(|(_, dir)| dir.clone());
+    }
+
+    pub fn finish_drag_out(&mut self, held: bool) -> Option<Vec<PathBuf>> {
+        self.out_drag.as_ref()?;
+        let Some(paths) = self.drag_out_ready() else {
+            if !held {
+                self.abandon_drag_out();
+            }
+            return None;
+        };
+        self.out_drag = None;
+        Some(paths)
+    }
+
     pub fn adopt_window(&mut self, adopt: impl Fn(&str) -> bool) {
         if let Some(title) = self.batch_title.take()
             && !self.batch_owned
@@ -497,6 +524,9 @@ impl RemotePanel {
     }
 
     pub fn prepare_drag_out(&mut self, items: Vec<(String, bool)>) {
+        if self.out_drag.is_some() {
+            return;
+        }
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -1647,7 +1677,7 @@ impl RemotePanel {
                     .show(|ui| {
                     ui.set_min_width(230.0);
                     if ui.button(tr!("Поиск на сервере…")).clicked() {
-                        self.want_search = true;
+                        self.notes.push(PanelEvent::FindFiles);
                         ui.close();
                     }
                     ui.separator();
