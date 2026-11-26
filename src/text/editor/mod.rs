@@ -703,7 +703,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         pal,
     );
     doc.scroll_y = scrolled_y;
-    if search.open && !search.matches.is_empty() {
+    if search.showing_matches() {
         let top = full.top();
         let height = text_rect.bottom() - top;
         let total = doc.line_count();
@@ -719,8 +719,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
             } else {
                 doc.rope.line_to_char(last)
             };
-            let at = search.matches.partition_point(|m| m.0 < from);
-            if search.matches.get(at).is_some_and(|m| m.0 < to) {
+            if search.matches_between(from, to) {
                 let y = top + height * slot as f32 / slots as f32;
                 painter.rect_filled(
                     Rect::from_min_size(

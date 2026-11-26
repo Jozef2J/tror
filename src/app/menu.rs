@@ -237,7 +237,7 @@ impl TrorApp {
                 if item(ui, tr!("Заменить…"), &key("replace"), has_doc) {
                     actions.push(Action::Replace);
                 }
-                let queried = has_doc && !self.search.query.is_empty();
+                let queried = has_doc && self.search.has_query();
                 if item(ui, tr!("Найти далее"), "F3", queried) {
                     actions.push(Action::FindNext);
                 }

@@ -175,10 +175,8 @@ impl Visual {
     }
 
     fn find(&mut self, search: &mut SearchState, version: u64) -> Option<EditKind> {
-        if search.query.is_empty() {
-            search.pending = None;
-            search.error = None;
-            search.visual = Some((None, 0));
+        if !search.has_query() {
+            search.visual_failed(None);
             self.hits.clear();
             self.hits_key = None;
             return None;
@@ -186,17 +184,16 @@ impl Visual {
         let re = match search.pattern() {
             Ok(re) => re,
             Err(e) => {
-                search.pending = None;
-                search.error = Some(e);
-                search.visual = Some((None, 0));
+                search.visual_failed(Some(e));
                 self.hits.clear();
                 return None;
             }
         };
-        search.error = None;
+        let pending = search.visual_start();
         self.scan(search, &re, version);
         let mut edited = None;
-        if let Some(pending) = search.pending.take() {
+        let mut replaced = None;
+        if let Some(pending) = pending {
             let (a, b) = self.ordered();
             let current = self.hits.iter().position(|h| *h == (a, b));
             match pending {
@@ -226,8 +223,7 @@ impl Visual {
                         self.insert_text(&text);
                         self.pending = None;
                     }
-                    search.last_replaced = Some(hits.len());
-                    search.deleted = delete;
+                    replaced = Some((hits.len(), delete));
                     if !hits.is_empty() {
                         edited = Some(EditKind::Other);
                     }
@@ -239,12 +235,13 @@ impl Visual {
         }
         let (a, b) = self.ordered();
         let current = self.hits.iter().position(|h| *h == (a, b));
-        search.visual = Some((current, self.hits.len()));
+        search.visual_found(current, self.hits.len(), replaced);
         edited
     }
 
     fn scan(&mut self, search: &SearchState, re: &regex::Regex, version: u64) {
-        let key = (search.query.clone(), search.case, search.word, search.regex, search.extended, version);
+        let (query, case, word, regex, extended) = search.key();
+        let key = (query, case, word, regex, extended, version);
         if self.hits_key.as_ref() == Some(&key) {
             return;
         }

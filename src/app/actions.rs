@@ -2,28 +2,16 @@ use super::*;
 
 impl TrorApp {
     pub(super) fn open_search(&mut self, replace: bool) {
-        self.search.open = true;
-        self.search.files = false;
         self.find.focus = true;
-        self.search.replace_mode = replace;
-        self.search.focus_query = true;
-        self.search.last_replaced = None;
-        if let Some(doc) = self.docs.get(self.active) {
+        let picked = self.docs.get(self.active).and_then(|doc| {
             let visual = self.visual.get(&doc.id).map(|v| v.selection_text());
             let range = doc.selection();
-            let picked = match visual {
+            match visual {
                 Some(text) => (!text.is_empty() && text.chars().count() < 200).then_some(text),
                 None => (!range.is_empty() && range.len() < 200).then(|| doc.selected_text()),
-            };
-            if let Some(selected) = picked {
-                if !selected.contains(['\n', '\r', '\t']) {
-                    self.search.query = selected;
-                } else if !self.search.regex {
-                    self.search.query = crate::text::search::escape(&selected);
-                    self.search.extended = true;
-                }
             }
-        }
+        });
+        self.search.open(replace, picked);
     }
 
     pub(super) fn run(&mut self, action: Action, ctx: &egui::Context) {
@@ -201,21 +189,15 @@ impl TrorApp {
             Action::Find => self.open_search(false),
             Action::Replace => self.open_search(true),
             Action::FindNext => {
-                if self.search.query.is_empty() {
+                if !self.search.step(Pending::Next) {
                     self.open_search(false);
-                } else {
-                    self.search.open = true;
-                    self.search.pending = Some(Pending::Next);
                 }
             }
             Action::FindPrev => {
-                if !self.search.query.is_empty() {
-                    self.search.open = true;
-                    self.search.pending = Some(Pending::Prev);
-                }
+                self.search.step(Pending::Prev);
             }
             Action::CloseSearch => {
-                self.search.open = false;
+                self.search.close();
                 self.find_files.close();
                 self.focus_editor = true;
             }
@@ -353,7 +335,7 @@ impl TrorApp {
             }
             Action::FindFiles => {
                 self.open_search(false);
-                self.search.files = true;
+                self.search.show_files(true);
                 self.find_files.show();
             }
             Action::MacroRecord => {

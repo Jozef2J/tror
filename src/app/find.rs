@@ -157,12 +157,10 @@ impl TrorApp {
                 &[(false, tr!("В документе")), (true, tr!("В файлах"))],
                 104.0,
             ) {
-                self.search.files = files;
+                self.search.show_files(files);
                 self.find.focus = true;
                 if files {
                     self.find_files.show();
-                } else {
-                    self.search.focus_query = true;
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

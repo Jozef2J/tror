@@ -171,7 +171,7 @@ impl TrorApp {
             self.visual.remove(&id);
         }
         if active {
-            self.search.visual = None;
+            self.search.leave_visual();
         }
         let pane = ui.available_rect_before_wrap();
         let look = &self.settings.look;
