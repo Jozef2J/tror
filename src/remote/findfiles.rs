@@ -124,7 +124,7 @@ pub enum Out {
 #[derive(Default)]
 pub struct FindFiles {
     pub focus: bool,
-    pub dirty: Vec<PathBuf>,
+    dirty: Vec<PathBuf>,
     dir: String,
     query: String,
     replace: String,
@@ -291,6 +291,12 @@ pub fn replace_file(path: &Path, re: &Regex, with: &str, literal: bool) -> Resul
 }
 
 impl FindFiles {
+    pub fn note_unsaved(&mut self, paths: &[PathBuf]) {
+        if self.dirty != paths {
+            self.dirty = paths.to_vec();
+        }
+    }
+
     pub fn show(&mut self) {
         self.focus = true;
     }

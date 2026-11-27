@@ -1,12 +1,11 @@
-use super::tabs::Viewer;
 use super::*;
 use crate::files::ProjectEvent;
 
 impl eframe::App for TrorApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        crate::instance::release();
+        crate::system::instance::release();
         if let Some(path) = self.update.setup.take() {
-            let _ = crate::update::run_setup(&path);
+            let _ = crate::system::update::run_setup(&path);
         }
     }
 
@@ -21,7 +20,7 @@ impl eframe::App for TrorApp {
         if scale != self.scale {
             if self.scale > 0.0 {
                 let size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
-                crate::trace::line(
+                crate::system::trace::line(
                     tf!(
                         "[UI] масштаб экрана {} → {scale}, окно {size:?}",
                         "[UI] screen scale {} → {scale}, window {size:?}",
@@ -55,7 +54,7 @@ impl eframe::App for TrorApp {
                     now,
                 );
             }
-            self.recovery.last = f64::INFINITY;
+            self.recovery.stop();
         } else if ctx.input(|i| i.viewport().close_requested())
             && !self.allow_close
             && self.docs.iter().any(|d| d.dirty())
@@ -67,7 +66,7 @@ impl eframe::App for TrorApp {
         {
             crate::text::recover::clear(&dir);
             self.recovery = Default::default();
-            self.recovery.last = f64::INFINITY;
+            self.recovery.stop();
         }
         let labels: Vec<Option<String>> = self.remotes.iter().map(|r| r.peer_label()).collect();
         for (index, panel) in self.remotes.iter_mut().enumerate() {
@@ -75,8 +74,12 @@ impl eframe::App for TrorApp {
             let shown = dock::has(&self.dock, pane) || self.settings.is_detached(pane);
             panel.arrange(shown, self.settings.remote_tree, &labels, index);
         }
-        self.project.tree = self.settings.project_tree;
-        self.project.upload_target = self.remotes.iter().find_map(|r| r.peer_label());
+        self.project.arrange(
+            self.settings.project_tree,
+            &labels,
+            self.settings.project_size,
+            self.settings.project_date,
+        );
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -126,8 +129,8 @@ impl eframe::App for TrorApp {
             self.project.start_drag_out();
             self.project2.start_drag_out();
         }
-        self.project.external_hover = None;
-        self.project2.external_hover = None;
+        self.project.clear_hover();
+        self.project2.clear_hover();
         for index in 0..self.remotes.len() {
             let Some(items) = self.remotes[index].dragging(&ctx) else {
                 continue;
@@ -158,7 +161,7 @@ impl eframe::App for TrorApp {
                         now,
                     );
                 } else {
-                    panel.external_hover = Some(dir);
+                    panel.mark_hover(pos);
                 }
                 break;
             }
@@ -239,22 +242,13 @@ impl eframe::App for TrorApp {
             self.notify(text, now);
         }
         self.check_missing(&ctx);
-        let modal_open = self.goto.is_some()
-            || self.jump.open
-            || self.plugin_dialog.is_some()
-            || self.macro_dialog.is_some()
-            || self.rename.is_some()
-            || self.confirm.is_some()
-            || self.remotes.iter().any(|r| r.modal_open())
-            || self.console.modal_open()
-            || self.project.modal_open()
-            || self.db.modal_open();
-        self.log.extend(crate::trace::take());
+        let modal_open = self.modal_open();
+        self.log.extend(crate::system::trace::take());
         if self.log.len() > 5000 {
             self.log.drain(..1000);
         }
         let now = ctx.input(|i| i.time);
-        for (text, ok) in crate::trace::take_popups() {
+        for (text, ok) in crate::system::trace::take_popups() {
             self.popups.push((text, ok, now));
         }
         self.popups.retain(|(_, _, at)| now - at < 6.0);
@@ -266,28 +260,26 @@ impl eframe::App for TrorApp {
         self.plugin_results(now);
         self.plugin_finished(now);
         self.plugin_watch(now);
-        self.console.cwd = self.project.root.clone();
+        self.console.follow(self.project.root());
         for note in self.console.poll() {
             self.notify(note, now);
         }
         for second in [false, true] {
-            let events = if second {
-                self.project2.take_events()
+            let events: Vec<ProjectEvent> = if second {
+                self.project2.events().collect()
             } else {
-                self.project.take_events()
+                self.project.events().collect()
             };
             for event in events {
                 self.project_event(event, second, now, &mut actions);
             }
         }
-        if self.project.root.is_none() {
+        if self.project.root().is_none() {
             self.settings.forget_project(false);
         }
-        if self.project2.root.is_none() {
+        if self.project2.root().is_none() {
             self.settings.forget_project(true);
         }
-        self.project.show_size = self.settings.project_size;
-        self.project.show_date = self.settings.project_date;
         self.settings.remember_widths();
         self.settings.apply_editing();
         crate::console::terminal::SCROLLBACK.store(
@@ -308,10 +300,10 @@ impl eframe::App for TrorApp {
             .filter(|d| d.dirty())
             .filter_map(|d| d.path.clone())
             .collect();
-        self.find_files.dirty = unsaved.clone();
+        self.find_files.note_unsaved(&unsaved);
         let found = self.find_files.poll().or(self.find_out.take());
         match found {
-            Some(crate::findfiles::Out::Open(path, line)) => {
+            Some(crate::remote::findfiles::Out::Open(path, line)) => {
                 self.open_path(&path, now);
                 if let Some(doc) = self.docs.get_mut(self.active)
                     && doc.path.as_deref() == Some(path.as_path())
@@ -319,14 +311,14 @@ impl eframe::App for TrorApp {
                     doc.goto_line(line);
                 }
             }
-            Some(crate::findfiles::Out::OpenDoc(id, line)) => {
+            Some(crate::remote::findfiles::Out::OpenDoc(id, line)) => {
                 if let Some(index) = self.docs.iter().position(|d| d.id == id) {
                     self.active = index;
                     self.settings.show(&mut self.dock, Pane::Doc(id));
                     self.docs[index].goto_line(line);
                 }
             }
-            Some(crate::findfiles::Out::ReplaceTabs(re, with, literal)) => {
+            Some(crate::remote::findfiles::Out::ReplaceTabs(re, with, literal)) => {
                 let mut total = 0;
                 for doc in &mut self.docs {
                     let text = doc.text();
@@ -348,7 +340,7 @@ impl eframe::App for TrorApp {
                     now,
                 );
             }
-            Some(crate::findfiles::Out::Changed) => {
+            Some(crate::remote::findfiles::Out::Changed) => {
                 for doc in self
                     .docs
                     .iter_mut()
@@ -362,14 +354,12 @@ impl eframe::App for TrorApp {
         self.update_ui(&ctx, &pal, now);
         if let Some(paths) = self
             .project
-            .drag_out
-            .take()
-            .or_else(|| self.project2.drag_out.take())
+            .take_drag_out()
+            .or_else(|| self.project2.take_drag_out())
         {
             drag_out(frame, paths, |_| {});
         }
-        if self.settings.autosave && now - self.recovery.last > 10.0 {
-            self.recovery.last = now;
+        if self.settings.autosave && self.recovery.due(now) {
             if let Some(dir) = crate::text::recover::dir() {
                 let _ = self.recovery.snapshot(&dir, &self.docs);
             }
@@ -418,12 +408,6 @@ impl eframe::App for TrorApp {
         self.console_shown = false;
         self.settings_shown = false;
         CentralPanel::no_frame().show(ui, |ui| {
-            let mut viewer = Viewer {
-                app: self,
-                pal,
-                actions: &mut actions,
-                modal_open,
-            };
             DockArea::new(&mut dock)
                 .painter(&dock::TAB_PAINTER)
                 .style(style)
@@ -431,8 +415,9 @@ impl eframe::App for TrorApp {
                 .show_leaf_collapse_buttons(false)
                 .leaf_min_size(&|tabs: &[Pane]| dock::leaf_min(tabs) - egui::vec2(0.0, 34.0))
                 .leaf_rigid_size(&dock::leaf_rigid)
-                .show_inside(ui, &mut viewer);
+                .show_inside(ui, self);
         });
+        actions.append(&mut self.queued);
         for panel in &mut self.remotes {
             panel.adopt_window(owner::adopt);
         }
@@ -586,14 +571,9 @@ impl eframe::App for TrorApp {
                             {
                                 closed = true;
                             }
-                            let mut viewer = Viewer {
-                                app: self,
-                                pal,
-                                actions: &mut actions,
-                                modal_open,
-                            };
                             let mut tab = pane;
-                            viewer.ui(ui, &mut tab);
+                            TabViewer::ui(self, ui, &mut tab);
+                            actions.append(&mut self.queued);
                             for (edge, dir) in [
                                 (
                                     Rect::from_min_max(
@@ -848,7 +828,7 @@ impl TrorApp {
                 } else {
                     &self.project2
                 };
-                if other.root.is_some() && other.area.contains(pos) {
+                if other.contains(pos) {
                     self.move_between_projects(paths, second, true, now);
                 } else if let Some(panel) = self
                     .remotes
@@ -971,7 +951,7 @@ fn drag_out(frame: &eframe::Frame, paths: Vec<PathBuf>, done: impl Fn(bool) + Se
         move |result, _| done(matches!(result, drag::DragResult::Dropped)),
         drag::Options::default(),
     ) {
-        crate::trace::popup(
+        crate::system::trace::popup(
             tf!(
                 "Не удалось начать перетаскивание: {e}",
                 "Could not start dragging: {e}"

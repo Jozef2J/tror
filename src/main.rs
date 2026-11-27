@@ -4,25 +4,17 @@
 mod i18n;
 mod app;
 mod text;
-mod bench;
 mod console;
-mod crash;
 mod db;
 mod plugins;
-mod instance;
 mod remote;
-mod trace;
-mod update;
 mod visual;
+mod system;
 mod widgets;
 mod theme;
 mod dock;
 mod prefs;
-mod keys;
-mod preview;
-mod diff;
 mod files;
-mod findfiles;
 
 use eframe::egui;
 
@@ -35,18 +27,18 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     if std::env::args().nth(1).as_deref() == Some("--bench") {
-        std::process::exit(bench::run());
+        std::process::exit(visual::bench::run());
     }
     if std::env::args().nth(1).as_deref() == Some("--forget-passwords") {
         remote::vault::clear();
         return Ok(());
     }
-    crash::install();
+    system::crash::install();
     #[cfg(debug_assertions)]
     if std::env::var_os("TROR_TEST_PANIC").is_some() {
         std::thread::spawn(|| panic!("test panic")).join().ok();
     }
-    if !instance::restarted() && instance::forward(&instance::args()) {
+    if !system::instance::restarted() && system::instance::forward(&system::instance::args()) {
         return Ok(());
     }
     let options = eframe::NativeOptions {

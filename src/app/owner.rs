@@ -86,7 +86,7 @@ mod imp {
                 let result = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
                 let keep = moving || storm;
                 place(hwnd, if keep { &before } else { &suggested });
-                crate::trace::line(
+                crate::system::trace::line(
                     tf!(
                         "[DPI] {} dpi, {}: окно {}×{} в ({}, {})",
                         "[DPI] {} dpi, {}: window {}×{} at ({}, {})",

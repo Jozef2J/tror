@@ -3,7 +3,7 @@ use crate::widgets::Lit;
 
 impl TrorApp {
     pub(super) fn update_ui(&mut self, ctx: &egui::Context, pal: &Palette, now: f64) {
-        use crate::update::{Event, Kind};
+        use crate::system::update::{Event, Kind};
         let events: Vec<Event> = self
             .update
             .rx
@@ -40,7 +40,7 @@ impl TrorApp {
                         .as_ref()
                         .map(|r| r.version.clone())
                         .unwrap_or_default();
-                    match crate::update::apply(&path, &version) {
+                    match crate::system::update::apply(&path, &version) {
                         Ok(()) => self.update.swapped = true,
                         Err(e) => self
                             .notify(tf!("Обновление не удалось: {e}", "Update failed: {e}"), now),
@@ -51,9 +51,9 @@ impl TrorApp {
         let Some(release) = self.update.found.clone() else {
             return;
         };
-        let kind = crate::update::kind();
+        let kind = crate::system::update::kind();
         let mut close = false;
-        let notes = crate::update::notes(&release.notes);
+        let notes = crate::system::update::notes(&release.notes);
         egui::Window::new(tr!("Доступно обновление"))
             .title_bar(false)
             .collapsible(false)
@@ -128,7 +128,7 @@ impl TrorApp {
                             .lit(ui)
                             .clicked()
                         {
-                            match crate::update::restart() {
+                            match crate::system::update::restart() {
                                 Ok(()) => ctx.send_viewport_cmd(ViewportCommand::Close),
                                 Err(e) => self.update.error = e,
                             }
@@ -155,7 +155,7 @@ impl TrorApp {
                                 .clicked()
                         {
                             self.update.busy = true;
-                            self.update.rx = Some(crate::update::download(release.clone()));
+                            self.update.rx = Some(crate::system::update::download(release.clone()));
                         }
                         if ui
                             .add(crate::widgets::secondary(
@@ -164,7 +164,7 @@ impl TrorApp {
                             ))
                             .clicked()
                         {
-                            let _ = preview::open_url(crate::update::PAGE);
+                            let _ = preview::open_url(crate::system::update::PAGE);
                         }
                         close = ui
                             .add(crate::widgets::secondary(tr!("Позже"), pal))
@@ -590,8 +590,7 @@ impl TrorApp {
                 );
                 let local = self.docs[index].id;
                 let id = server.id;
-                self.diff.left = Some(id);
-                self.diff.right = Some(local);
+                self.diff.show_pair(id, local);
                 self.docs.push(server);
                 self.settings.show(&mut self.dock, Pane::Doc(id));
                 self.settings.show(&mut self.dock, Pane::Diff);

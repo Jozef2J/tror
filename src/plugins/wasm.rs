@@ -223,7 +223,7 @@ fn inside(root: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-pub fn settings_of(dir: &Path, manifest: &Manifest) -> serde_json::Map<String, Value> {
+fn settings_of(dir: &Path, manifest: &Manifest) -> serde_json::Map<String, Value> {
     let saved = storage_load(&dir.join("settings.json"));
     manifest
         .settings
@@ -238,7 +238,7 @@ pub fn settings_of(dir: &Path, manifest: &Manifest) -> serde_json::Map<String, V
         .collect()
 }
 
-pub fn save_settings(dir: &Path, values: &serde_json::Map<String, Value>) -> Result<(), String> {
+fn save_settings(dir: &Path, values: &serde_json::Map<String, Value>) -> Result<(), String> {
     let text = serde_json::to_string_pretty(values).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("settings.json"), text).map_err(|e| e.to_string())
 }
@@ -708,15 +708,19 @@ pub struct Done {
 }
 
 pub struct Worker {
-    pub manifest: Manifest,
-    pub dir: PathBuf,
-    pub broken: Option<String>,
-    pub busy: usize,
+    manifest: Manifest,
+    dir: PathBuf,
+    broken: Option<String>,
+    busy: usize,
     tx: std::sync::mpsc::Sender<Job>,
 }
 
 impl Worker {
-    pub fn spawn(plugin: usize, mut loaded: Loaded, done: std::sync::mpsc::Sender<Done>) -> Self {
+    pub(super) fn spawn(
+        plugin: usize,
+        mut loaded: Loaded,
+        done: std::sync::mpsc::Sender<Done>,
+    ) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<Job>();
         let manifest = loaded.manifest.clone();
         let dir = loaded.dir.clone();
@@ -745,7 +749,7 @@ impl Worker {
         }
     }
 
-    pub fn run(&mut self, job: Job) {
+    pub(super) fn run(&mut self, job: Job) {
         if self.tx.send(job).is_ok() {
             self.busy += 1;
         }
@@ -753,6 +757,56 @@ impl Worker {
 
     pub fn wants(&self, event: &str) -> bool {
         self.manifest.events.iter().any(|e| e == event)
+    }
+
+    pub(super) fn finish(&mut self, outcome: &Outcome) {
+        self.busy = self.busy.saturating_sub(1);
+        if outcome.broken {
+            self.broken = outcome.error.clone();
+        }
+    }
+
+    pub(super) fn is_busy(&self) -> bool {
+        self.busy > 0
+    }
+
+    pub fn broken(&self) -> Option<&str> {
+        self.broken.as_deref()
+    }
+
+    pub fn name(&self) -> &str {
+        &self.manifest.name
+    }
+
+    pub fn id(&self) -> &str {
+        &self.manifest.id
+    }
+
+    pub(super) fn describe(&self) -> String {
+        format!(
+            "{} {} ({})",
+            self.manifest.name, self.manifest.version, self.manifest.id
+        )
+    }
+
+    pub fn commands(&self) -> &[CommandDef] {
+        &self.manifest.commands
+    }
+
+    pub fn panels(&self) -> &[PanelDef] {
+        &self.manifest.panels
+    }
+
+    pub fn setting_defs(&self) -> &[SettingDef] {
+        &self.manifest.settings
+    }
+
+    pub fn settings(&self) -> serde_json::Map<String, Value> {
+        settings_of(&self.dir, &self.manifest)
+    }
+
+    pub fn save_settings(&self, values: &serde_json::Map<String, Value>) -> Result<(), String> {
+        save_settings(&self.dir, values)
     }
 }
 
@@ -778,11 +832,11 @@ pub fn manifests(dir: &Path) -> Vec<(PathBuf, Result<Manifest, String>)> {
         .collect()
 }
 
-pub fn load_all(dir: &Path) -> (Vec<Loaded>, Vec<String>) {
+pub(super) fn load_all(dir: &Path) -> (Vec<Loaded>, Vec<String>) {
     load_enabled(dir, &[])
 }
 
-pub fn load_enabled(dir: &Path, off: &[String]) -> (Vec<Loaded>, Vec<String>) {
+pub(super) fn load_enabled(dir: &Path, off: &[String]) -> (Vec<Loaded>, Vec<String>) {
     let mut loaded = Vec::new();
     let mut errors = Vec::new();
     let dirs: Vec<PathBuf> = manifests(dir)

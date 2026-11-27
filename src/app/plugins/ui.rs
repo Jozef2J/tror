@@ -365,9 +365,9 @@ impl TrorApp {
     pub(in crate::app) fn sync_plugin_panels(&mut self) {
         let mut panels = std::collections::HashMap::new();
         let mut titles = Vec::new();
-        for (plugin, worker) in self.plugins.wasm.iter().enumerate() {
-            for def in &worker.manifest.panels {
-                let key = dock::plugin_key(&worker.manifest.id, &def.id);
+        for (plugin, worker) in self.plugins.workers() {
+            for def in worker.panels() {
+                let key = dock::plugin_key(worker.id(), &def.id);
                 titles.push((key, def.title.clone(), def.dock.clone()));
                 panels.insert(
                     key,
@@ -406,13 +406,13 @@ impl TrorApp {
     }
 
     pub(in crate::app) fn open_plugin_panel(&mut self, plugin: usize, panel: usize) {
-        let Some(worker) = self.plugins.wasm.get(plugin) else {
+        let Some(worker) = self.plugins.worker(plugin) else {
             return;
         };
-        let Some(def) = worker.manifest.panels.get(panel) else {
+        let Some(def) = worker.panels().get(panel) else {
             return;
         };
-        let key = dock::plugin_key(&worker.manifest.id, &def.id);
+        let key = dock::plugin_key(worker.id(), &def.id);
         let pane = Pane::Plugin(key);
         let shown = dock::has(&self.dock, pane);
         self.settings.show(&mut self.dock, pane);
@@ -422,15 +422,12 @@ impl TrorApp {
     }
 
     pub(in crate::app) fn open_plugin_settings(&mut self, plugin: usize) {
-        if let Some(worker) = self.plugins.wasm.get(plugin) {
+        if let Some(worker) = self.plugins.worker(plugin) {
             self.plugin_dialog = Some(PluginDialog {
                 plugin,
                 id: String::new(),
-                title: tf!("Настройки: {}", "Settings: {}", worker.manifest.name),
-                ask: Ask::Settings(crate::plugins::wasm::settings_of(
-                    &worker.dir,
-                    &worker.manifest,
-                )),
+                title: tf!("Настройки: {}", "Settings: {}", worker.name()),
+                ask: Ask::Settings(worker.settings()),
             });
         }
     }
@@ -470,10 +467,10 @@ impl TrorApp {
         effect: crate::plugins::wasm::Effect,
     ) {
         use crate::plugins::wasm::Effect;
-        let Some(worker) = self.plugins.wasm.get(plugin) else {
+        let Some(worker) = self.plugins.worker(plugin) else {
             return;
         };
-        let plugin_id = worker.manifest.id.clone();
+        let plugin_id = worker.id().to_owned();
         match effect {
             Effect::Prompt(id, title, value) => {
                 self.plugin_dialog = Some(PluginDialog {
@@ -515,9 +512,8 @@ impl TrorApp {
         let mut answer = None;
         let settings = self
             .plugins
-            .wasm
-            .get(dialog.plugin)
-            .map(|w| w.manifest.settings.clone())
+            .worker(dialog.plugin)
+            .map(|w| w.setting_defs().to_vec())
             .unwrap_or_default();
         let modal =
             super::super::dialog(("tror_plugin_dialog", dialog.plugin), pal).show(ctx, |ui| {
@@ -671,10 +667,8 @@ impl TrorApp {
         match answer {
             Some(values) if matches!(dialog.ask, Ask::Settings(_)) => {
                 let now = ctx.input(|i| i.time);
-                let saved = match (&values, self.plugins.wasm.get(dialog.plugin)) {
-                    (Value::Object(map), Some(worker)) => {
-                        crate::plugins::wasm::save_settings(&worker.dir, map)
-                    }
+                let saved = match (&values, self.plugins.worker(dialog.plugin)) {
+                    (Value::Object(map), Some(worker)) => worker.save_settings(map),
                     _ => Err(tr!("плагин не загружен").into()),
                 };
                 match saved {

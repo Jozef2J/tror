@@ -9,7 +9,7 @@ use ocb3::aead::{AeadInOut, KeyInit};
 use ocb3::{Nonce, Ocb3, consts::U12};
 
 use crate::remote::{Profile, Shell, ShellCmd, ShellEvent, TermProfile};
-use crate::trace;
+use crate::system::trace;
 
 const PROTOCOL_VERSION: u64 = 2;
 const DIRECTION: u64 = 1 << 63;

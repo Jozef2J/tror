@@ -167,6 +167,18 @@ fn build(old: &[String], new: &[String]) -> Vec<Row> {
 }
 
 impl DiffPanel {
+    pub fn pair(&mut self, left: u64, next: Option<u64>) {
+        self.left = Some(left);
+        if self.right.is_none() || self.right == self.left {
+            self.right = next;
+        }
+    }
+
+    pub fn show_pair(&mut self, left: u64, right: u64) {
+        self.left = Some(left);
+        self.right = (right != left).then_some(right);
+    }
+
     fn refresh(&mut self, docs: &[Document]) {
         let find = |id: Option<u64>| id.and_then(|id| docs.iter().find(|d| d.id == id));
         let (Some(a), Some(b)) = (find(self.left), find(self.right)) else {

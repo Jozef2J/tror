@@ -23,7 +23,7 @@ pub fn install() {
                 stamp,
                 thread.name().unwrap_or("?"),
                 std::backtrace::Backtrace::force_capture(),
-                crate::trace::recent().join("\n"),
+                crate::system::trace::recent().join("\n"),
             );
             let _ = std::fs::write(dir.join(format!("crash-{stamp}.txt")), text);
         }

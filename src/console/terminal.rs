@@ -244,6 +244,14 @@ pub struct Screen {
 }
 
 impl Screen {
+    pub fn blur(&mut self) {
+        self.focused = false;
+    }
+
+    pub fn ask_focus(&mut self) {
+        self.grab_focus = true;
+    }
+
     pub fn new() -> Self {
         Self {
             parser: new_parser(80, 24),

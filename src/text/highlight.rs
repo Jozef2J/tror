@@ -44,6 +44,30 @@ pub struct Syntaxes {
 }
 
 impl Syntaxes {
+    fn foreground(&self) -> Color32 {
+        let c = self
+            .theme
+            .settings
+            .foreground
+            .unwrap_or(syntect::highlighting::Color::WHITE);
+        Color32::from_rgb(c.r, c.g, c.b)
+    }
+
+    fn styler(&self) -> Styler<'_> {
+        Styler::new(&self.theme)
+    }
+
+    fn highlight_line(
+        &self,
+        rope: &Rope,
+        line: usize,
+        state: &mut State,
+        styler: &Styler<'_>,
+        scratch: &mut Scratch,
+    ) -> Vec<Span> {
+        highlight_line(rope, line, state, &self.set, styler, scratch)
+    }
+
     pub fn print_html(&self, text: &str, syntax: &str, title: &str) -> String {
         let theme = self.themes.get(EmbeddedThemeName::InspiredGithub);
         let syntax = self.syntax(syntax);
@@ -388,13 +412,8 @@ impl Highlighter {
         visible: Range<usize>,
         budget: Option<Duration>,
     ) -> bool {
-        let theme = &syn.theme;
         let generation = syn.generation;
-        let c = theme
-            .settings
-            .foreground
-            .unwrap_or(syntect::highlighting::Color::WHITE);
-        self.default_color = Color32::from_rgb(c.r, c.g, c.b);
+        self.default_color = syn.foreground();
         let full = rope.len_bytes() <= FULL_LIMIT;
         let lines = rope.len_lines();
         let stale = !matches!(&self.style, Some((s, g, f)) if s == syntax && *g == generation && *f == full)
@@ -416,7 +435,7 @@ impl Highlighter {
         if syntax == "Plain Text" {
             return false;
         }
-        let styler = Styler::new(theme);
+        let styler = syn.styler();
         let deadline = budget.map(|b| Instant::now() + b);
         if full {
             let mut busy = false;
@@ -483,8 +502,7 @@ impl Highlighter {
                 self.dirty = Some((i, to));
                 return true;
             }
-            self.entries[i].spans =
-                highlight_line(rope, i, &mut state, &syn.set, styler, &mut self.buf);
+            self.entries[i].spans = syn.highlight_line(rope, i, &mut state, styler, &mut self.buf);
             i += 1;
         }
     }
@@ -541,14 +559,8 @@ impl Highlighter {
             if done > CHECKPOINT && deadline.is_some_and(|d| Instant::now() > d) {
                 return true;
             }
-            b.entries.push(highlight_line(
-                rope,
-                line,
-                &mut b.state,
-                &syn.set,
-                styler,
-                &mut self.buf,
-            ));
+            b.entries
+                .push(syn.highlight_line(rope, line, &mut b.state, styler, &mut self.buf));
             done += 1;
         }
         let b = self.building.take().unwrap();

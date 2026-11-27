@@ -1,4 +1,5 @@
 pub mod model;
+pub mod bench;
 pub mod docx;
 mod ops;
 mod paste;
@@ -98,6 +99,10 @@ pub fn supports(doc: &Document) -> bool {
 }
 
 impl Visual {
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take().filter(|text| !text.is_empty())
+    }
+
     pub fn new(doc: &Document) -> Visual {
         let text = doc.text();
         let html = parse(&text);

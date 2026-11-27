@@ -55,7 +55,7 @@ impl TrorApp {
                 self.compare_server(now);
             }
             Action::Jump(prefix) => {
-                let root = self.project.root.clone();
+                let root = self.project.root().map(std::path::Path::to_path_buf);
                 self.jump.show(prefix, root);
             }
             Action::Print => {
@@ -69,7 +69,7 @@ impl TrorApp {
                 let file = std::env::temp_dir().join(format!("trorpad-print-{}.html", doc.id));
                 let result = std::fs::write(&file, html)
                     .map_err(|e| e.to_string())
-                    .and_then(|_| crate::preview::open_url(&file.display().to_string()));
+                    .and_then(|_| crate::text::preview::open_url(&file.display().to_string()));
                 let text = match result {
                     Ok(()) => tr!("Открыто для печати в браузере").to_owned(),
                     Err(e) => tf!(
@@ -318,7 +318,7 @@ impl TrorApp {
             }
             Action::CheckUpdates => {
                 self.update.manual = true;
-                self.update.rx = Some(crate::update::check());
+                self.update.rx = Some(crate::system::update::check());
                 self.notify(tr!("Проверяю обновления…"), now);
             }
             Action::FindFiles => {
@@ -388,17 +388,15 @@ impl TrorApp {
             }
             Action::Compare => {
                 if let Some(doc) = self.docs.get(self.active) {
-                    self.diff.left = Some(doc.id);
-                    if self.diff.right.is_none() || self.diff.right == self.diff.left {
-                        self.diff.right = self
-                            .docs
-                            .iter()
-                            .cycle()
-                            .skip(self.active + 1)
-                            .take(self.docs.len().saturating_sub(1))
-                            .next()
-                            .map(|d| d.id);
-                    }
+                    let next = self
+                        .docs
+                        .iter()
+                        .cycle()
+                        .skip(self.active + 1)
+                        .take(self.docs.len().saturating_sub(1))
+                        .next()
+                        .map(|d| d.id);
+                    self.diff.pair(doc.id, next);
                 }
                 self.settings.show(&mut self.dock, Pane::Diff);
             }
@@ -427,15 +425,8 @@ impl TrorApp {
                 self.plugin_active = None;
                 self.sync_plugin_panels();
                 let errors = self.plugins.errors.clone();
-                for plugin in &self.plugins.wasm {
-                    let m = &plugin.manifest;
-                    crate::trace::line(
-                        format!("[plugin] {} {} ({})", m.name, m.version, m.id),
-                        false,
-                    );
-                }
                 for error in &errors {
-                    crate::trace::line(format!("[plugin] {error}"), true);
+                    crate::system::trace::line(format!("[plugin] {error}"), true);
                 }
                 self.notify(
                     if errors.is_empty() {

@@ -240,11 +240,11 @@ pub struct Finished {
 
 pub struct Plugins {
     pub dir: Option<PathBuf>,
-    pub list: Vec<Plugin>,
-    pub wasm: Vec<crate::plugins::wasm::Worker>,
+    list: Vec<Plugin>,
+    wasm: Vec<crate::plugins::wasm::Worker>,
     done: Receiver<crate::plugins::wasm::Done>,
     pub errors: Vec<String>,
-    pub off: Vec<String>,
+    off: Vec<String>,
     pub running: usize,
     tx: Sender<Finished>,
     rx: Receiver<Finished>,
@@ -288,7 +288,7 @@ pub fn load(dir: &Path) -> (Vec<Plugin>, Vec<String>) {
 }
 
 pub fn peek_manifest(archive: &Path) -> Result<crate::plugins::wasm::Manifest, String> {
-    let files = unzip(archive)?;
+    let files = crate::files::unzip(archive)?;
     let json = files
         .iter()
         .filter(|(name, _)| name == "plugin.json" || name.ends_with("/plugin.json"))
@@ -296,80 +296,6 @@ pub fn peek_manifest(archive: &Path) -> Result<crate::plugins::wasm::Manifest, S
         .map(|(_, data)| data.clone())
         .ok_or(tr!("в архиве нет plugin.json"))?;
     serde_json::from_slice(&json).map_err(|e| format!("plugin.json: {e}"))
-}
-
-pub(crate) fn unzip(archive: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
-    use std::io::Read;
-    let data = std::fs::read(archive).map_err(|e| e.to_string())?;
-    if data.len() > 64 << 20 {
-        return Err(tr!("архив больше 64 МБ").into());
-    }
-    let u16_at = |i: usize| -> Result<usize, String> {
-        data.get(i..i + 2)
-            .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize)
-            .ok_or_else(|| tr!("повреждённый архив").to_owned())
-    };
-    let u32_at = |i: usize| -> Result<usize, String> {
-        data.get(i..i + 4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
-            .ok_or_else(|| tr!("повреждённый архив").to_owned())
-    };
-    let end = (0..data.len().saturating_sub(21))
-        .rev()
-        .find(|&i| data[i..].starts_with(&[0x50, 0x4b, 0x05, 0x06]))
-        .ok_or(tr!("это не zip-архив"))?;
-    let count = u16_at(end + 10)?;
-    let mut at = u32_at(end + 16)?;
-    let mut out = Vec::new();
-    let mut total = 0usize;
-    for _ in 0..count {
-        if u32_at(at)? != 0x0201_4b50 {
-            return Err(tr!("повреждённый архив").into());
-        }
-        let method = u16_at(at + 10)?;
-        let packed = u32_at(at + 20)?;
-        let size = u32_at(at + 24)?;
-        let name_len = u16_at(at + 28)?;
-        let extra = u16_at(at + 30)?;
-        let comment = u16_at(at + 32)?;
-        let local = u32_at(at + 42)?;
-        let name = String::from_utf8_lossy(
-            data.get(at + 46..at + 46 + name_len)
-                .ok_or(tr!("повреждённый архив"))?,
-        )
-        .replace('\\', "/");
-        at += 46 + name_len + extra + comment;
-        if name.ends_with('/') {
-            continue;
-        }
-        total += size;
-        if total > 256 << 20 {
-            return Err(tr!("распакованный архив больше 256 МБ").into());
-        }
-        let start = local + 30 + u16_at(local + 26)? + u16_at(local + 28)?;
-        let raw = data
-            .get(start..start + packed)
-            .ok_or(tr!("повреждённый архив"))?;
-        let bytes = match method {
-            0 => raw.to_vec(),
-            8 => {
-                let mut buf = Vec::with_capacity(size);
-                flate2::read::DeflateDecoder::new(raw)
-                    .take(size as u64 + 1)
-                    .read_to_end(&mut buf)
-                    .map_err(|e| e.to_string())?;
-                buf
-            }
-            other => {
-                return Err(tf!(
-                    "{name}: неподдерживаемое сжатие {other}",
-                    "{name}: unsupported compression {other}"
-                ));
-            }
-        };
-        out.push((name, bytes));
-    }
-    Ok(out)
 }
 
 #[cfg(windows)]
@@ -510,16 +436,16 @@ impl Plugins {
             .collect();
         self.done = done_rx;
         self.errors = errors;
+        for worker in &self.wasm {
+            crate::system::trace::line(format!("[plugin] {}", worker.describe()), false);
+        }
     }
 
     pub fn finished(&mut self) -> Vec<crate::plugins::wasm::Done> {
         let done: Vec<crate::plugins::wasm::Done> = self.done.try_iter().collect();
         for item in &done {
             if let Some(worker) = self.wasm.get_mut(item.plugin) {
-                worker.busy = worker.busy.saturating_sub(1);
-                if item.outcome.broken {
-                    worker.broken = item.outcome.error.clone();
-                }
+                worker.finish(&item.outcome);
             }
         }
         done
@@ -527,7 +453,7 @@ impl Plugins {
 
     pub fn install(&mut self, archive: &Path) -> Result<crate::plugins::wasm::Manifest, String> {
         let dir = self.dir.clone().ok_or(tr!("нет папки данных программы"))?;
-        let files = unzip(archive)?;
+        let files = crate::files::unzip(archive)?;
         let (prefix, json) = files
             .iter()
             .filter(|(name, _)| name == "plugin.json" || name.ends_with("/plugin.json"))
@@ -603,10 +529,34 @@ impl Plugins {
     }
 
     pub fn busy(&self) -> Option<&str> {
-        self.wasm
-            .iter()
-            .find(|w| w.busy > 0)
-            .map(|w| w.manifest.name.as_str())
+        self.wasm.iter().find(|w| w.is_busy()).map(|w| w.name())
+    }
+
+    pub fn external(&self) -> impl Iterator<Item = (usize, &Plugin)> {
+        self.list.iter().enumerate()
+    }
+
+    pub fn workers(&self) -> impl Iterator<Item = (usize, &crate::plugins::wasm::Worker)> {
+        self.wasm.iter().enumerate()
+    }
+
+    pub fn worker(&self, index: usize) -> Option<&crate::plugins::wasm::Worker> {
+        self.wasm.get(index)
+    }
+
+    pub fn send(&mut self, index: usize, job: crate::plugins::wasm::Job) {
+        if let Some(worker) = self.wasm.get_mut(index) {
+            worker.run(job);
+        }
+    }
+
+    pub fn enabled(&self, id: &str) -> bool {
+        !self.off.iter().any(|off| off == id)
+    }
+
+    pub fn reload_with(&mut self, off: Vec<String>) {
+        self.off = off;
+        self.reload();
     }
 
     pub fn count(&self) -> usize {
@@ -781,7 +731,7 @@ mod tests {
             (plugin.input, plugin.output),
             (Input::None, Output::Message)
         );
-        assert!(crate::keys::parse(&plugin.shortcut).is_some());
+        assert!(crate::prefs::parse_shortcut(&plugin.shortcut).is_some());
         assert!(serde_json::from_str::<Plugin>(r#"{"name":"x"}"#).is_err());
     }
 

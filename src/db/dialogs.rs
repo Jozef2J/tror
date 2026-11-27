@@ -15,7 +15,7 @@ impl DbPanel {
         if let Some(rx) = &editor.probe
             && let Ok(result) = rx.try_recv()
         {
-            crate::trace::popup(
+            crate::system::trace::popup(
                 match &result {
                     Ok(text) => tf!("Подключение работает: {text}", "Connection works: {text}"),
                     Err(e) => tf!("Не удалось подключиться: {e}", "Could not connect: {e}"),

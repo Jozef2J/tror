@@ -77,7 +77,7 @@ impl Jump {
                 let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
                     let stop = std::sync::atomic::AtomicBool::new(false);
-                    let _ = tx.send(crate::findfiles::all_files(&root, &stop));
+                    let _ = tx.send(crate::remote::findfiles::all_files(&root, &stop));
                 });
                 self.rx = Some(rx);
             }
@@ -91,7 +91,7 @@ impl TrorApp {
         let mut rows = Vec::new();
         if let Some(command) = query.strip_prefix('>') {
             let keys = self.settings.shortcuts();
-            for (index, (_, label, _, _)) in crate::keys::COMMANDS.iter().enumerate() {
+            for (index, (_, label, _, _)) in crate::prefs::COMMANDS.iter().enumerate() {
                 let name = tr!(label).to_owned();
                 if let Some((score, hits)) = score(command.trim(), &name) {
                     rows.push(Row {
@@ -99,7 +99,7 @@ impl TrorApp {
                         name,
                         hits,
                         detail: String::new(),
-                        key: keys.label(crate::keys::COMMANDS[index].0),
+                        key: keys.label(crate::prefs::COMMANDS[index].0),
                         remote: false,
                         score,
                     });
@@ -381,7 +381,7 @@ impl TrorApp {
                     }
                 }
                 Item::Command(index) => {
-                    let id = crate::keys::COMMANDS[index].0;
+                    let id = crate::prefs::COMMANDS[index].0;
                     actions.push(self.command(id));
                     self.jump.open = false;
                     self.focus_editor = true;

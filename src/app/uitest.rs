@@ -464,7 +464,7 @@ fn ui_log_selection_survives_wheel_scroll() {
     harness.key_press(egui::Key::Enter);
     harness.run_steps(3);
     harness.state_mut().log = (0..400)
-        .map(|i| (format!("10:00:00  line {i:03}"), crate::trace::Kind::Info))
+        .map(|i| (format!("10:00:00  line {i:03}"), crate::system::trace::Kind::Info))
         .collect();
     harness.run_steps(3);
     let top = harness.get_by_label_contains("Сырой обмен").rect();

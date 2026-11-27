@@ -7,6 +7,7 @@ pub mod vault;
 
 mod backend;
 mod database;
+pub mod findfiles;
 pub mod masked;
 mod search;
 mod ssh;
@@ -29,7 +30,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::trace;
+use crate::system::trace;
 
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
 const IO_TIMEOUT_MS: u32 = 20_000;

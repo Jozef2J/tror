@@ -6,21 +6,21 @@ impl TrorApp {
             return;
         }
         let keys = self.settings.shortcuts();
-        let weight = crate::keys::weight;
+        let weight = crate::prefs::shortcut_weight;
         let mut extra: Vec<(egui::KeyboardShortcut, Action)> = Vec::new();
-        for (index, plugin) in self.plugins.list.iter().enumerate() {
-            if let Some(shortcut) = crate::keys::parse(&plugin.shortcut) {
+        for (index, plugin) in self.plugins.external() {
+            if let Some(shortcut) = crate::prefs::parse_shortcut(&plugin.shortcut) {
                 extra.push((shortcut, Action::Plugin(index)));
             }
         }
-        for (index, plugin) in self.plugins.wasm.iter().enumerate() {
-            for (command, def) in plugin.manifest.commands.iter().enumerate() {
-                if let Some(shortcut) = crate::keys::parse(&def.key) {
+        for (index, plugin) in self.plugins.workers() {
+            for (command, def) in plugin.commands().iter().enumerate() {
+                if let Some(shortcut) = crate::prefs::parse_shortcut(&def.key) {
                     extra.push((shortcut, Action::PluginCommand(index, command)));
                 }
             }
         }
-        extra.retain(|(shortcut, _)| crate::keys::usable(shortcut));
+        extra.retain(|(shortcut, _)| crate::prefs::usable_shortcut(shortcut));
         extra.sort_by_key(|(shortcut, _)| std::cmp::Reverse(weight(shortcut)));
         let mut extra = extra.into_iter().peekable();
         for (index, shortcut) in keys.bound() {
@@ -28,16 +28,16 @@ impl TrorApp {
                 && weight(next) > weight(shortcut)
             {
                 if let Some((next, action)) = extra.next()
-                    && ctx.input_mut(|i| crate::keys::consume(i, &next))
+                    && ctx.input_mut(|i| crate::prefs::consume_shortcut(i, &next))
                 {
                     actions.push(action);
                 }
             }
-            let (id, _, _, editing) = crate::keys::COMMANDS[*index];
+            let (id, _, _, editing) = crate::prefs::COMMANDS[*index];
             if self.console.focused() && editing {
                 continue;
             }
-            if !ctx.input_mut(|i| crate::keys::consume(i, shortcut)) {
+            if !ctx.input_mut(|i| crate::prefs::consume_shortcut(i, shortcut)) {
                 continue;
             }
             if shortcut.modifiers.alt {
@@ -46,7 +46,7 @@ impl TrorApp {
             actions.push(self.command(id));
         }
         for (shortcut, action) in extra {
-            if ctx.input_mut(|i| crate::keys::consume(i, &shortcut)) {
+            if ctx.input_mut(|i| crate::prefs::consume_shortcut(i, &shortcut)) {
                 actions.push(action);
             }
         }
