@@ -28,7 +28,12 @@ jobs:
             exit 0
           }
           $version = (Select-String -Path packaging/winget/Jozef2J.TrorPad.yaml -Pattern '^PackageVersion: (.+)$').Matches[0].Groups[1].Value
-          $known = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/j/Jozef2J/TrorPad" -Headers @{ Authorization = "Bearer $env:WINGET_TOKEN" } -ErrorAction SilentlyContinue
+          $known = $null
+          try {
+            $known = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/j/Jozef2J/TrorPad" -Headers @{ Authorization = "Bearer $env:WINGET_TOKEN" }
+          } catch {
+            if ($_.Exception.Response.StatusCode.value__ -ne 404) { throw }
+          }
           if ($known | Where-Object { $_.name -eq $version }) {
             Write-Output "Jozef2J.TrorPad $version is already in winget-pkgs"
             exit 0
