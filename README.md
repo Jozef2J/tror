@@ -84,6 +84,10 @@ at your option. Unless you explicitly state otherwise, any contribution you subm
 
 The name "TrorPad" and the logo are not covered by these licenses.
 
+## Code signing policy
+
+Windows releases are being prepared for free code signing by [SignPath.io](https://about.signpath.io/) with a certificate by [SignPath Foundation](https://signpath.org/). Team roles and rules: [CODE_SIGNING.md](CODE_SIGNING.md).
+
 ## Privacy
 
 TrorPad is free software that works on your computer. It does not collect, send or sell any personal data. The full text is in [PRIVACY.md](PRIVACY.md).
