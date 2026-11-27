@@ -603,12 +603,12 @@ impl RemotePanel {
     }
 
     fn push_log(&mut self, text: String, error: bool) {
-        crate::trace::line(text, error);
+        crate::system::trace::line(text, error);
     }
 
     pub fn site_url(&self, profile: &str, path: &str) -> Option<String> {
         let profile = self.store.find::<Profile>(profile)?;
-        crate::preview::remote_url(&profile.url, &profile.directory, path)
+        crate::text::preview::remote_url(&profile.url, &profile.directory, path)
     }
 
     fn sftp(&self) -> bool {

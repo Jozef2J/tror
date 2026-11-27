@@ -398,14 +398,14 @@ pub fn restart() -> Result<(), String> {
             .arg("-n")
             .arg(app)
             .arg("--args")
-            .arg(crate::instance::RESTART)
+            .arg(crate::system::instance::RESTART)
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     std::process::Command::new(exe)
-        .arg(crate::instance::RESTART)
+        .arg(crate::system::instance::RESTART)
         .spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())

@@ -24,7 +24,7 @@ pub struct Entry {
 pub struct Recovery {
     written: HashMap<u64, u64>,
     listed: Vec<Entry>,
-    pub last: f64,
+    last: f64,
 }
 
 pub fn fits(doc: &Document) -> bool {
@@ -36,6 +36,18 @@ pub fn dir() -> Option<PathBuf> {
 }
 
 impl Recovery {
+    pub fn stop(&mut self) {
+        self.last = f64::INFINITY;
+    }
+
+    pub fn due(&mut self, now: f64) -> bool {
+        if now - self.last <= 10.0 {
+            return false;
+        }
+        self.last = now;
+        true
+    }
+
     pub fn snapshot(&mut self, dir: &Path, docs: &[Document]) -> Result<(), String> {
         let dirty: Vec<&Document> = docs
             .iter()

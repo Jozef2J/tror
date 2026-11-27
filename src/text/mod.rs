@@ -8,3 +8,5 @@ pub mod complete;
 pub mod recover;
 pub mod view;
 pub mod file;
+pub mod diff;
+pub mod preview;

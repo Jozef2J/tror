@@ -77,7 +77,7 @@ impl TrorApp {
                 let backups = crate::remote::backups_dir().filter(|d| d.is_dir());
                 if item(ui, tr!("Резервные копии с серверов"), "", backups.is_some())
                     && let Some(dir) = backups
-                    && let Err(e) = crate::preview::open_folder(&dir)
+                    && let Err(e) = crate::text::preview::open_folder(&dir)
                 {
                     let now = ui.input(|i| i.time);
                     self.notify(
@@ -472,44 +472,43 @@ impl TrorApp {
             }
             ui.menu_button(tr!("Плагины"), |ui| {
                 ui.set_min_width(260.0);
-                for (index, plugin) in self.plugins.list.iter().enumerate() {
-                    let shortcut = crate::keys::parse(&plugin.shortcut)
-                        .map(|s| crate::keys::format(&s))
+                for (index, plugin) in self.plugins.external() {
+                    let shortcut = crate::prefs::parse_shortcut(&plugin.shortcut)
+                        .map(|s| crate::prefs::format_shortcut(&s))
                         .unwrap_or_default();
                     if item(ui, &plugin.name, &shortcut, true) {
                         actions.push(Action::Plugin(index));
                     }
                 }
-                for (index, plugin) in self.plugins.wasm.iter().enumerate() {
-                    let enabled = plugin.broken.is_none();
-                    let manifest = &plugin.manifest;
+                for (index, plugin) in self.plugins.workers() {
+                    let enabled = plugin.broken().is_none();
                     let mut entries = |ui: &mut Ui| {
-                        for (command, def) in manifest.commands.iter().enumerate() {
-                            let shortcut = crate::keys::parse(&def.key)
-                                .map(|s| crate::keys::format(&s))
+                        for (command, def) in plugin.commands().iter().enumerate() {
+                            let shortcut = crate::prefs::parse_shortcut(&def.key)
+                                .map(|s| crate::prefs::format_shortcut(&s))
                                 .unwrap_or_default();
                             if item(ui, &def.title, &shortcut, enabled) {
                                 actions.push(Action::PluginCommand(index, command));
                             }
                         }
-                        for (panel, def) in manifest.panels.iter().enumerate() {
+                        for (panel, def) in plugin.panels().iter().enumerate() {
                             if item(ui, &def.title, "", enabled) {
                                 actions.push(Action::PluginPanel(index, panel));
                             }
                         }
-                        if !manifest.settings.is_empty() && item(ui, tr!("Настройки…"), "", true)
+                        if !plugin.setting_defs().is_empty() && item(ui, tr!("Настройки…"), "", true)
                         {
                             actions.push(Action::PluginSettings(index));
                         }
                     };
-                    let count = manifest.commands.len()
-                        + manifest.panels.len()
-                        + usize::from(!manifest.settings.is_empty());
+                    let count = plugin.commands().len()
+                        + plugin.panels().len()
+                        + usize::from(!plugin.setting_defs().is_empty());
                     match count {
                         0 => {}
-                        1 if manifest.settings.is_empty() => entries(ui),
+                        1 if plugin.setting_defs().is_empty() => entries(ui),
                         _ => {
-                            ui.menu_button(&manifest.name, |ui| {
+                            ui.menu_button(plugin.name(), |ui| {
                                 ui.set_min_width(240.0);
                                 entries(ui);
                             });

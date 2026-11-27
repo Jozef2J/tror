@@ -6,7 +6,12 @@ impl TrorApp {
     pub(in crate::app) fn run_plugin(&mut self, index: usize, ctx: &egui::Context) {
         use crate::plugins::{Context, Input};
         let now = ctx.input(|i| i.time);
-        let Some(plugin) = self.plugins.list.get(index).cloned() else {
+        let Some(plugin) = self
+            .plugins
+            .external()
+            .find(|(i, _)| *i == index)
+            .map(|(_, p)| p.clone())
+        else {
             return;
         };
         let doc = self.docs.get(self.active);
@@ -67,12 +72,12 @@ impl TrorApp {
         for done in self.plugins.poll() {
             let name = done.plugin.name.clone();
             for line in done.stderr.lines() {
-                crate::trace::line(format!("[plugin {name}] {line}"), done.result.is_err());
+                crate::system::trace::line(format!("[plugin {name}] {line}"), done.result.is_err());
             }
             let text = match done.result {
                 Ok(text) => text,
                 Err(e) => {
-                    crate::trace::line(format!("[plugin {name}] {e}"), true);
+                    crate::system::trace::line(format!("[plugin {name}] {e}"), true);
                     self.notify(tf!("Плагин «{name}»: {e}", "Plugin \"{name}\": {e}"), now);
                     continue;
                 }
@@ -82,7 +87,7 @@ impl TrorApp {
                 (Output::None, _) => {}
                 (Output::Message, _) => {
                     for line in text.lines() {
-                        crate::trace::line(format!("[plugin {name}] {line}"), false);
+                        crate::system::trace::line(format!("[plugin {name}] {line}"), false);
                     }
                     let first = text.lines().next().unwrap_or(tr!("готово")).to_owned();
                     self.notify(format!("{name}: {first}"), now);
@@ -121,9 +126,8 @@ impl TrorApp {
     pub(in crate::app) fn plugin_command(&mut self, plugin: usize, command: usize) {
         let Some(id) = self
             .plugins
-            .wasm
-            .get(plugin)
-            .and_then(|p| p.manifest.commands.get(command))
+            .worker(plugin)
+            .and_then(|p| p.commands().get(command))
             .map(|c| c.id.clone())
         else {
             return;
@@ -141,16 +145,19 @@ impl TrorApp {
             return;
         };
         let message = json!({"method": "event", "params": {"name": event, "path": doc.location()}});
-        for plugin in 0..self.plugins.wasm.len() {
-            let wasm = &self.plugins.wasm[plugin];
-            if wasm.broken.is_none() && wasm.wants(event) {
-                self.plugin_send(plugin, message.clone(), Some(index));
-            }
+        let targets: Vec<usize> = self
+            .plugins
+            .workers()
+            .filter(|(_, w)| w.broken().is_none() && w.wants(event))
+            .map(|(i, _)| i)
+            .collect();
+        for plugin in targets {
+            self.plugin_send(plugin, message.clone(), Some(index));
         }
     }
 
     pub(in crate::app) fn plugin_watch(&mut self, now: f64) {
-        if self.plugins.wasm.is_empty() {
+        if self.plugins.workers().next().is_none() {
             return;
         }
         let Some(doc) = self.docs.get(self.active) else {
@@ -180,9 +187,8 @@ impl TrorApp {
         for done in self.plugins.finished() {
             let Some(name) = self
                 .plugins
-                .wasm
-                .get(done.plugin)
-                .map(|w| w.manifest.name.clone())
+                .worker(done.plugin)
+                .map(|w| w.name().to_owned())
             else {
                 continue;
             };
@@ -198,7 +204,7 @@ impl TrorApp {
                     Effect::Select(..) => moved = true,
                     Effect::Notify(text) => self.notify(format!("{name}: {text}"), now),
                     Effect::Log(text, error) => {
-                        crate::trace::line(format!("[plugin {name}] {text}"), error)
+                        crate::system::trace::line(format!("[plugin {name}] {text}"), error)
                     }
                     Effect::Prompt(..)
                     | Effect::Pick(..)
@@ -245,7 +251,7 @@ impl TrorApp {
                 }
             }
             if let Some(error) = outcome.error {
-                crate::trace::line(format!("[plugin {name}] {error}"), true);
+                crate::system::trace::line(format!("[plugin {name}] {error}"), true);
                 self.notify(
                     tf!("Плагин «{name}»: {error}", "Plugin \"{name}\": {error}"),
                     now,

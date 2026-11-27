@@ -177,7 +177,7 @@ impl TrorApp {
 
     fn files_search(&mut self, ui: &mut Ui, pal: &Palette) {
         let mut scopes: Vec<(usize, String)> = vec![(0, tr!("Проект").to_owned())];
-        if self.project2.root.is_some() {
+        if self.project2.root().is_some() {
             scopes.push((1, tr!("Проект 2").to_owned()));
         }
         for (index, remote) in self.remotes.iter().enumerate() {
@@ -211,9 +211,9 @@ impl TrorApp {
         match self.find.scope {
             0 | 1 => {
                 let root = if self.find.scope == 0 {
-                    self.project.root.clone()
+                    self.project.root().map(Path::to_path_buf)
                 } else {
-                    self.project2.root.clone()
+                    self.project2.root().map(Path::to_path_buf)
                 };
                 if let Some(out) = self.find_files.body(ui, pal, root.as_deref(), &self.docs) {
                     self.find_out = Some(out);

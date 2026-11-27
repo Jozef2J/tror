@@ -19,7 +19,7 @@ impl TrorApp {
         target: Option<usize>,
     ) {
         use crate::plugins::wasm::{Job, Snapshot};
-        let root = self.project.root.clone();
+        let root = self.project.root().map(std::path::Path::to_path_buf);
         let doc = target.and_then(|i| self.docs.get(i));
         let snap = match doc {
             Some(doc) => Some(Snapshot {
@@ -39,13 +39,14 @@ impl TrorApp {
         };
         let doc = doc.map(|d| (d.id, d.version));
         let ctx = self.ctx.clone();
-        if let Some(worker) = self.plugins.wasm.get_mut(plugin) {
-            worker.run(Job {
+        self.plugins.send(
+            plugin,
+            Job {
                 message,
                 snap,
                 doc,
                 wake: Box::new(move || ctx.request_repaint()),
-            });
-        }
+            },
+        );
     }
 }

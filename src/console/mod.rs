@@ -154,6 +154,12 @@ fn split_icon(ui: &mut Ui, pal: &Palette, split: Split, hint: &str) -> egui::Res
 }
 
 impl ConsolePanel {
+    pub fn follow(&mut self, root: Option<&std::path::Path>) {
+        if self.cwd.as_deref() != root {
+            self.cwd = root.map(|r| r.to_path_buf());
+        }
+    }
+
     pub fn new() -> Self {
         let path = eframe::storage_dir("Tror").map(|dir| dir.join("connections.json"));
         Self {
@@ -178,7 +184,7 @@ impl ConsolePanel {
     pub fn unfocus(&mut self) {
         self.focused = false;
         for session in &mut self.sessions {
-            session.screen.focused = false;
+            session.screen.blur();
         }
     }
 
@@ -299,7 +305,7 @@ impl ConsolePanel {
                     } => session.host_key = Some((fingerprint, changed)),
                     ShellEvent::Connected { fingerprint } => {
                         session.connected = true;
-                        session.screen.grab_focus = true;
+                        session.screen.ask_focus();
                         session.status.clear();
                         if let Some(fingerprint) = fingerprint {
                             trusted.push((session.profile.address(), fingerprint));
@@ -840,7 +846,7 @@ impl ConsolePanel {
             Ok(false) => {}
             Ok(true) => self.store_seen = Store::generation(),
             Err(e) => {
-                crate::trace::popup(tf!("Оформление не сохранено: {e}", "Appearance not saved: {e}"), false);
+                crate::system::trace::popup(tf!("Оформление не сохранено: {e}", "Appearance not saved: {e}"), false);
                 self.store_seen = Store::generation();
             }
         }
@@ -848,7 +854,7 @@ impl ConsolePanel {
 
     fn focus_active(&mut self) {
         if let Some(session) = self.sessions.get_mut(self.active) {
-            session.screen.grab_focus = true;
+            session.screen.ask_focus();
         }
     }
 
@@ -1219,7 +1225,7 @@ impl ConsolePanel {
                     .drafts
                     .retain(|p| !p.host.trim().is_empty() || store.iter::<TermProfile>().any(|q| q == p));
                 if let Err(e) = self.store.replace(editor.drafts) {
-                    crate::trace::popup(tf!("Подключения не сохранены: {e}", "Connections not saved: {e}"), false);
+                    crate::system::trace::popup(tf!("Подключения не сохранены: {e}", "Connections not saved: {e}"), false);
                 }
                 if connect && let Some(profile) = chosen {
                     self.open(profile, ctx);
@@ -1286,7 +1292,7 @@ pub fn test_terminal(profile: &TermProfile, known: Option<String>) -> Result<Str
     use std::io::Read;
     use std::net::ToSocketAddrs;
     let started = std::time::Instant::now();
-    crate::trace::client(format!(
+    crate::system::trace::client(format!(
         "[TEST] {} {} as {}",
         profile.protocol.label(),
         profile.address(),

@@ -109,21 +109,21 @@ struct Attrs {
 }
 
 pub struct ProjectPanel {
-    pub root: Option<PathBuf>,
-    pub tree: bool,
-    pub upload_target: Option<String>,
-    pub show_size: bool,
-    pub show_date: bool,
+    root: Option<PathBuf>,
+    tree: bool,
+    upload_target: Option<String>,
+    show_size: bool,
+    show_date: bool,
     sort: crate::widgets::Sort,
     cwd: PathBuf,
     cache: HashMap<PathBuf, Vec<LocalEntry>>,
     scanned: HashMap<PathBuf, Instant>,
     expanded: BTreeSet<PathBuf>,
     marked: BTreeSet<PathBuf>,
-    pub drag_out: Option<Vec<PathBuf>>,
-    pub peer: Option<String>,
-    pub area: egui::Rect,
-    pub external_hover: Option<PathBuf>,
+    drag_out: Option<Vec<PathBuf>>,
+    peer: Option<String>,
+    area: egui::Rect,
+    external_hover: Option<PathBuf>,
     drop_dirs: Vec<(Rect, PathBuf)>,
     drop_dir: PathBuf,
     dragging: Option<Vec<PathBuf>>,
@@ -301,8 +301,49 @@ impl ProjectPanel {
         self.scanned.clear();
     }
 
-    pub fn take_events(&mut self) -> Vec<ProjectEvent> {
-        std::mem::take(&mut self.out)
+    pub fn events(&mut self) -> impl Iterator<Item = ProjectEvent> + '_ {
+        self.out.drain(..)
+    }
+
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    pub fn contains(&self, pos: egui::Pos2) -> bool {
+        self.root.is_some() && self.area.contains(pos)
+    }
+
+    pub fn arrange(&mut self, tree: bool, labels: &[Option<String>], size: bool, date: bool) {
+        self.tree = tree;
+        self.upload_target = labels.iter().flatten().next().cloned();
+        self.show_size = size;
+        self.show_date = date;
+    }
+
+    pub fn pair_with(&mut self, other: &ProjectPanel, size: bool, date: bool) {
+        self.peer = other
+            .root
+            .as_ref()
+            .and_then(|r| r.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        self.show_size = size;
+        self.show_date = date;
+    }
+
+    pub fn columns(&self) -> (bool, bool) {
+        (self.show_size, self.show_date)
+    }
+
+    pub fn clear_hover(&mut self) {
+        self.external_hover = None;
+    }
+
+    pub fn mark_hover(&mut self, pos: egui::Pos2) {
+        self.external_hover = self.drop_target(pos);
+    }
+
+    pub fn take_drag_out(&mut self) -> Option<Vec<PathBuf>> {
+        self.drag_out.take().filter(|paths| !paths.is_empty())
     }
 
     fn entries(&mut self, dir: &Path) -> Vec<LocalEntry> {
@@ -534,7 +575,7 @@ impl ProjectPanel {
                 let dir = if self.tree { root.clone() } else { self.cwd.clone() };
                 self.create_items(ui, &dir);
                 if ui.button(tr!("Показать в файловом менеджере")).clicked() {
-                    let _ = crate::preview::open_folder(&dir);
+                    let _ = crate::text::preview::open_folder(&dir);
                     ui.close();
                 }
                 ui.separator();
@@ -856,7 +897,7 @@ impl ProjectPanel {
                                 } else {
                                     path.parent().map(Path::to_path_buf).unwrap_or_default()
                                 };
-                                let _ = crate::preview::open_folder(&dir);
+                                let _ = crate::text::preview::open_folder(&dir);
                             }
                             if chosen.len() == 1 && ui.button(tr!("Права и атрибуты…")).clicked()
                                 && let Ok(meta) = std::fs::metadata(&path)
@@ -1013,7 +1054,7 @@ impl ProjectPanel {
                 ui.close();
             }
             if ui.button(tr!("Показать в файловом менеджере")).clicked() {
-                let _ = crate::preview::open_folder(&dir);
+                let _ = crate::text::preview::open_folder(&dir);
                 ui.close();
             }
         });
@@ -1290,4 +1331,78 @@ mod tests {
         );
         std::fs::remove_dir_all(dir).ok();
     }
+}
+
+pub fn unzip(archive: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    use std::io::Read;
+    let data = std::fs::read(archive).map_err(|e| e.to_string())?;
+    if data.len() > 64 << 20 {
+        return Err(tr!("архив больше 64 МБ").into());
+    }
+    let u16_at = |i: usize| -> Result<usize, String> {
+        data.get(i..i + 2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize)
+            .ok_or_else(|| tr!("повреждённый архив").to_owned())
+    };
+    let u32_at = |i: usize| -> Result<usize, String> {
+        data.get(i..i + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+            .ok_or_else(|| tr!("повреждённый архив").to_owned())
+    };
+    let end = (0..data.len().saturating_sub(21))
+        .rev()
+        .find(|&i| data[i..].starts_with(&[0x50, 0x4b, 0x05, 0x06]))
+        .ok_or(tr!("это не zip-архив"))?;
+    let count = u16_at(end + 10)?;
+    let mut at = u32_at(end + 16)?;
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    for _ in 0..count {
+        if u32_at(at)? != 0x0201_4b50 {
+            return Err(tr!("повреждённый архив").into());
+        }
+        let method = u16_at(at + 10)?;
+        let packed = u32_at(at + 20)?;
+        let size = u32_at(at + 24)?;
+        let name_len = u16_at(at + 28)?;
+        let extra = u16_at(at + 30)?;
+        let comment = u16_at(at + 32)?;
+        let local = u32_at(at + 42)?;
+        let name = String::from_utf8_lossy(
+            data.get(at + 46..at + 46 + name_len)
+                .ok_or(tr!("повреждённый архив"))?,
+        )
+        .replace('\\', "/");
+        at += 46 + name_len + extra + comment;
+        if name.ends_with('/') {
+            continue;
+        }
+        total += size;
+        if total > 256 << 20 {
+            return Err(tr!("распакованный архив больше 256 МБ").into());
+        }
+        let start = local + 30 + u16_at(local + 26)? + u16_at(local + 28)?;
+        let raw = data
+            .get(start..start + packed)
+            .ok_or(tr!("повреждённый архив"))?;
+        let bytes = match method {
+            0 => raw.to_vec(),
+            8 => {
+                let mut buf = Vec::with_capacity(size);
+                flate2::read::DeflateDecoder::new(raw)
+                    .take(size as u64 + 1)
+                    .read_to_end(&mut buf)
+                    .map_err(|e| e.to_string())?;
+                buf
+            }
+            other => {
+                return Err(tf!(
+                    "{name}: неподдерживаемое сжатие {other}",
+                    "{name}: unsupported compression {other}"
+                ));
+            }
+        };
+        out.push((name, bytes));
+    }
+    Ok(out)
 }

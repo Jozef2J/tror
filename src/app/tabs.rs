@@ -146,7 +146,7 @@ impl TrorApp {
                 let size = self.settings.look.font_size;
                 let search = active.then_some(&mut self.search);
                 editor.ui(ui, &mut self.docs[index], pal, size, focus, search);
-                if let Some(text) = editor.notice.take() {
+                if let Some(text) = editor.take_notice() {
                     let now = ui.input(|i| i.time);
                     self.notify(text, now);
                 }
@@ -263,10 +263,10 @@ impl TrorApp {
         let mut job = egui::text::LayoutJob::default();
         for (index, (text, kind)) in self.log.iter().enumerate() {
             let color = match kind {
-                crate::trace::Kind::Server => server,
-                crate::trace::Kind::Client => client,
-                crate::trace::Kind::Error => error,
-                crate::trace::Kind::Info => info,
+                crate::system::trace::Kind::Server => server,
+                crate::system::trace::Kind::Client => client,
+                crate::system::trace::Kind::Error => error,
+                crate::system::trace::Kind::Info => info,
             };
             let (stamp, body) = text.split_at(text.find("  ").unwrap_or(0));
             job.append("  ", 0.0, egui::TextFormat::simple(font.clone(), pal.faint));
@@ -308,29 +308,22 @@ impl TrorApp {
     }
 }
 
-pub(super) struct Viewer<'a> {
-    pub(super) app: &'a mut TrorApp,
-    pub(super) pal: Palette,
-    pub(super) actions: &'a mut Vec<Action>,
-    pub(super) modal_open: bool,
-}
-
-impl Viewer<'_> {
+impl TrorApp {
     fn tab_menu(&mut self, ui: &mut Ui, id: u64) {
-        let Some(doc) = self.app.docs.iter().find(|d| d.id == id) else {
+        let Some(doc) = self.docs.iter().find(|d| d.id == id) else {
             return;
         };
         ui.set_min_width(250.0);
-        let keys = self.app.settings.shortcuts();
+        let keys = self.settings.shortcuts();
         let key = |name: &str| keys.label(name);
-        let order = self.app.leaf_docs(id);
+        let order = self.leaf_docs(id);
         let at = order.iter().position(|d| *d == id).unwrap_or(0);
         let location = doc.location();
         let path = doc.path.clone();
         let remote = doc.remote.clone();
         let color = location
             .as_ref()
-            .and_then(|k| self.app.settings.tab_color(k));
+            .and_then(|k| self.settings.tab_color(k));
         let pinned = doc.pinned;
         let mut cmd = None;
         let row = |ui: &mut Ui, text: &str, shortcut: String, enabled: bool| {
@@ -470,13 +463,13 @@ impl Viewer<'_> {
             }
         });
         if let Some(cmd) = cmd {
-            self.actions.push(Action::TabCmd(id, cmd));
+            self.queued.push(Action::TabCmd(id, cmd));
             ui.close();
         }
     }
 }
 
-impl TabViewer for Viewer<'_> {
+impl TabViewer for TrorApp {
     type Tab = Pane;
 
     fn id(&mut self, tab: &mut Pane) -> egui::Id {
@@ -488,12 +481,12 @@ impl TabViewer for Viewer<'_> {
         let Pane::Doc(id) = *tab else {
             return tab.title().into();
         };
-        let Some(index) = self.app.docs.iter().position(|d| d.id == id) else {
+        let Some(index) = self.docs.iter().position(|d| d.id == id) else {
             return "".into();
         };
-        let doc = &self.app.docs[index];
-        let pal = &self.pal;
-        let active = index == self.app.active;
+        let doc = &self.docs[index];
+        let pal = &self.palette();
+        let active = index == self.active;
         dock::set_mark(dock::Mark {
             dirty: doc.dirty(),
             pinned: doc.pinned,
@@ -511,7 +504,7 @@ impl TabViewer for Viewer<'_> {
         } else {
             egui::FontFamily::Proportional
         };
-        let size = self.app.settings.look.ui_size - 0.5;
+        let size = self.settings.look.ui_size - 0.5;
         let mut job = egui::text::LayoutJob::default();
         job.append(
             &doc.title(),
@@ -532,14 +525,15 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Pane) {
-        let pal = self.pal;
-        let app = &mut *self.app;
+        let pal = self.palette();
+        let modal_open = self.modal_open();
+        let mut queue = Vec::new();
+        let app = &mut *self;
         let look = app.settings.look();
         let (dark, font_size) = (look.dark, look.font_size);
         let side = Frame::new().inner_margin(Margin::symmetric(8, 0));
         let pane = *tab;
-        let actions = &mut *self.actions;
-        let modal_open = self.modal_open;
+        let actions = &mut queue;
         let mut body = |ui: &mut Ui| match pane {
             Pane::Welcome => app.welcome(ui, &pal, actions),
             Pane::Doc(id) => app.doc_pane(ui, id, &pal, actions, modal_open),
@@ -557,15 +551,10 @@ impl TabViewer for Viewer<'_> {
                 } else {
                     (&mut app.project, &app.project2)
                 };
-                panel.peer = other
-                    .root
-                    .as_ref()
-                    .and_then(|r| r.file_name())
-                    .map(|n| n.to_string_lossy().into_owned());
-                panel.show_size = app.settings.project_size;
-                panel.show_date = app.settings.project_date;
+                panel.pair_with(other, app.settings.project_size, app.settings.project_date);
                 side.show(ui, |ui| panel.ui(ui, &pal, &recent));
-                app.settings.remember_project_columns(panel.show_size, panel.show_date);
+                let (size, date) = panel.columns();
+                app.settings.remember_project_columns(size, date);
             }
             Pane::Console => {
                 app.console_shown = true;
@@ -613,6 +602,7 @@ impl TabViewer for Viewer<'_> {
         } else {
             body(ui);
         }
+        self.queued.append(&mut queue);
     }
 
     fn context_menu(&mut self, ui: &mut Ui, tab: &mut Pane, _path: egui_stack::TabPath) {
@@ -625,24 +615,24 @@ impl TabViewer for Viewer<'_> {
         let Pane::Doc(id) = *tab else {
             return;
         };
-        let Some(index) = self.app.docs.iter().position(|d| d.id == id) else {
+        let Some(index) = self.docs.iter().position(|d| d.id == id) else {
             return;
         };
-        if response.middle_clicked() && !self.app.docs[index].pinned {
-            self.actions.push(Action::CloseTab(index));
+        if response.middle_clicked() && !self.docs[index].pinned {
+            self.queued.push(Action::CloseTab(index));
         }
-        if let Some(location) = self.app.docs[index].location() {
+        if let Some(location) = self.docs[index].location() {
             response.clone().on_hover_text(location);
         }
     }
 
     fn on_close(&mut self, tab: &mut Pane) -> egui_stack::tab_viewer::OnCloseResponse {
         if let Pane::Doc(id) = *tab {
-            if let Some(index) = self.app.docs.iter().position(|d| d.id == id) {
-                if self.app.docs[index].pinned {
-                    self.actions.push(Action::TabCmd(id, TabCmd::Pin));
+            if let Some(index) = self.docs.iter().position(|d| d.id == id) {
+                if self.docs[index].pinned {
+                    self.queued.push(Action::TabCmd(id, TabCmd::Pin));
                 } else {
-                    self.actions.push(Action::CloseTab(index));
+                    self.queued.push(Action::CloseTab(index));
                 }
             }
             return egui_stack::tab_viewer::OnCloseResponse::Ignore;
@@ -658,12 +648,12 @@ impl TabViewer for Viewer<'_> {
         let Pane::Doc(id) = *tab else {
             return None;
         };
-        let doc = self.app.docs.iter().find(|d| d.id == id)?;
-        let color = self.app.doc_color(doc)?;
+        let doc = self.docs.iter().find(|d| d.id == id)?;
+        let color = self.doc_color(doc)?;
         let mut style = global.clone();
         let mix = |base: Color32, amount: f32| theme::blend(base, color, amount);
-        style.inactive.bg_fill = mix(self.pal.mantle, 0.16);
-        style.hovered.bg_fill = mix(self.pal.crust, 0.24);
+        style.inactive.bg_fill = mix(self.palette().mantle, 0.16);
+        style.hovered.bg_fill = mix(self.palette().crust, 0.24);
         style.inactive_with_kb_focus.bg_fill = style.inactive.bg_fill;
         for state in [
             &mut style.active,
@@ -679,7 +669,7 @@ impl TabViewer for Viewer<'_> {
 
     fn tab_group(&self, tab: &Pane) -> u8 {
         match tab {
-            Pane::Doc(id) => self.app.docs.iter().any(|d| d.id == *id && d.pinned) as u8,
+            Pane::Doc(id) => self.docs.iter().any(|d| d.id == *id && d.pinned) as u8,
             _ => 0,
         }
     }

@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(zip, root.join("site.zip"));
         let again = create(std::slice::from_ref(&folder), Format::Zip).unwrap();
         assert_eq!(again, root.join("site (2).zip"));
-        let files = crate::plugins::unzip(&zip).unwrap();
+        let files = crate::files::unzip(&zip).unwrap();
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert!(
             names.contains(&"site/index.php") && names.contains(&"site/inner/пример.txt"),

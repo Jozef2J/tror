@@ -1,4 +1,4 @@
-use crate::trace;
+use crate::system::trace;
 use std::time::{Duration, Instant};
 
 use mysql::prelude::Queryable;

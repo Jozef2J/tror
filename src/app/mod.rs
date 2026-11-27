@@ -11,11 +11,11 @@ use encoding_rs::Encoding;
 
 use crate::console::ConsolePanel;
 use crate::db::DbPanel;
-use crate::diff::DiffPanel;
+use crate::text::diff::DiffPanel;
 use crate::dock::{self, Pane};
 use crate::files::ProjectPanel;
 use crate::prefs::{Look, Settings};
-use crate::preview::{self, Preview};
+use crate::text::preview::{self, Preview};
 use crate::remote::panel::{PanelEvent, RemotePanel};
 use crate::text::complete::Completion;
 use crate::text::document::{Document, Eol};
@@ -127,8 +127,8 @@ enum Action {
 
 #[derive(Default)]
 struct Updater {
-    rx: Option<std::sync::mpsc::Receiver<crate::update::Event>>,
-    found: Option<crate::update::Release>,
+    rx: Option<std::sync::mpsc::Receiver<crate::system::update::Event>>,
+    found: Option<crate::system::update::Release>,
     manual: bool,
     busy: bool,
     swapped: bool,
@@ -253,7 +253,7 @@ pub struct TrorApp {
     project2: ProjectPanel,
     sizes: dock::Sizes,
     zoom_acc: f32,
-    log: Vec<(String, crate::trace::Kind)>,
+    log: Vec<(String, crate::system::trace::Kind)>,
     console: ConsolePanel,
     term_fonts: Option<Vec<PathBuf>>,
     popups: Vec<(String, bool, f64)>,
@@ -275,8 +275,8 @@ pub struct TrorApp {
     jump: jump::Jump,
     plugin_dialog: Option<plugins::PluginDialog>,
     plugin_panels: std::collections::HashMap<u64, plugins::PluginPanel>,
-    find_files: crate::findfiles::FindFiles,
-    find_out: Option<crate::findfiles::Out>,
+    find_files: crate::remote::findfiles::FindFiles,
+    find_out: Option<crate::remote::findfiles::Out>,
     update: Updater,
     macros: editor::Macro,
     macro_dialog: Option<MacroDialog>,
@@ -324,8 +324,8 @@ impl TrorApp {
         dock::translate(&mut dock);
         dock::hide(&mut dock, Pane::Preview);
         dock::hide(&mut dock, Pane::ServerSearch);
-        crate::preview::forget_webview();
-        crate::trace::install();
+        crate::text::preview::forget_webview();
+        crate::system::trace::install();
         let hosts = start
             .hosts
             .max(2)
@@ -431,20 +431,20 @@ impl TrorApp {
         }
         crate::widgets::set_columns(app.settings.columns);
         app.recover();
-        crate::update::cleanup();
+        crate::system::update::cleanup();
         if app.settings.updates {
-            app.update.rx = Some(crate::update::check());
+            app.update.rx = Some(crate::system::update::check());
         }
         app.next_id = app.next_id.max(top);
         if active < app.docs.len() {
             app.active = active;
         }
-        for path in crate::instance::args() {
+        for path in crate::system::instance::args() {
             app.open_arg(path);
         }
-        app.instance = crate::instance::listen(cc.egui_ctx.clone());
+        app.instance = crate::system::instance::listen(cc.egui_ctx.clone());
         app.sync_plugin_panels();
-        if let Some(report) = crate::crash::pending() {
+        if let Some(report) = crate::system::crash::pending() {
             app.open_path(&report, 0.0);
             app.toast = Some((
                 tr!("В прошлый раз TrorPad завершился с ошибкой. Отчёт открыт во вкладке — приложите его к сообщению на GitHub.").to_owned(),
@@ -528,5 +528,18 @@ impl TrorApp {
 
     fn palette(&self) -> Palette {
         self.settings.palette()
+    }
+
+    fn modal_open(&self) -> bool {
+        self.goto.is_some()
+            || self.jump.open
+            || self.plugin_dialog.is_some()
+            || self.macro_dialog.is_some()
+            || self.rename.is_some()
+            || self.confirm.is_some()
+            || self.remotes.iter().any(|r| r.modal_open())
+            || self.console.modal_open()
+            || self.project.modal_open()
+            || self.db.modal_open()
     }
 }

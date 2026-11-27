@@ -623,7 +623,7 @@ fn render(blocks: &[Block], ctx: &Ctx, cell: bool) -> String {
 }
 
 pub fn to_html(path: &Path) -> Result<String, String> {
-    let files = crate::plugins::unzip(path)?;
+    let files = crate::files::unzip(path)?;
     let text = |name: &str| {
         files
             .iter()

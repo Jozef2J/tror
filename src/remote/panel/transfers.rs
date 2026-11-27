@@ -350,7 +350,7 @@ impl RemotePanel {
             }
             Some(4) => {
                 if let Some(folder) = &folder {
-                    let _ = crate::preview::open_folder(folder);
+                    let _ = crate::text::preview::open_folder(folder);
                 } else if let Some(dir) = remote_dir {
                     self.list(dir);
                 }

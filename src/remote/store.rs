@@ -140,7 +140,7 @@ impl Store {
                 store.locked = true;
                 static REPORTED: AtomicBool = AtomicBool::new(false);
                 if !REPORTED.swap(true, Ordering::Relaxed) {
-                    crate::trace::line(tf!("[Пароли] системное хранилище недоступно: {e}", "[Passwords] the system store is not available: {e}"), true);
+                    crate::system::trace::line(tf!("[Пароли] системное хранилище недоступно: {e}", "[Passwords] the system store is not available: {e}"), true);
                 }
             }
         }

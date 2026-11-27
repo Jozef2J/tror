@@ -136,7 +136,7 @@ impl TrorApp {
                 ui.add_space(8.0);
             }
             egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
-                if installed.is_empty() && self.plugins.list.is_empty() {
+                if installed.is_empty() && self.plugins.count() == 0 {
                     ui.label(RichText::new(tr!("Плагинов пока нет.")).color(pal.subtext));
                 }
                 for (folder, manifest) in &installed {
@@ -153,8 +153,8 @@ impl TrorApp {
                                     ui.label(RichText::new(e).color(pal.warn));
                                 }
                                 Ok(m) => {
-                                    let enabled = !self.plugins.off.contains(&m.id);
-                                    let worker = self.plugins.wasm.iter().find(|w| w.manifest.id == m.id);
+                                    let enabled = self.plugins.enabled(&m.id);
+                                    let worker = self.plugins.workers().map(|(_, w)| w).find(|w| w.id() == m.id);
                                     ui.horizontal(|ui| {
                                         let mut on = enabled;
                                         if ui.checkbox(&mut on, "").on_hover_text(tr!("Включён")).changed() {
@@ -177,7 +177,7 @@ impl TrorApp {
                                     });
                                     let status = match (enabled, worker) {
                                         (false, _) => RichText::new(tr!("Выключен")).color(pal.subtext),
-                                        (true, Some(w)) => match &w.broken {
+                                        (true, Some(w)) => match w.broken() {
                                             Some(reason) => RichText::new(tf!("Остановлен: {reason}", "Stopped: {reason}")).color(pal.warn),
                                             None => RichText::new(tr!("Работает")).color(crate::widgets::ok_color(ui)),
                                         },
@@ -204,10 +204,10 @@ impl TrorApp {
                         });
                     ui.add_space(6.0);
                 }
-                if !self.plugins.list.is_empty() {
+                if self.plugins.external().next().is_some() {
                     ui.add_space(4.0);
                     ui.label(RichText::new(tr!("Внешние программы (.json)")).small().color(pal.subtext));
-                    for plugin in &self.plugins.list {
+                    for (_, plugin) in self.plugins.external() {
                         ui.label(format!("• {}", plugin.name));
                     }
                 }
@@ -237,7 +237,7 @@ impl TrorApp {
         }
         if let Some(path) = open_dir {
             let _ = std::fs::create_dir_all(&path);
-            let _ = crate::preview::open_folder(&path);
+            let _ = crate::text::preview::open_folder(&path);
         }
         let mut changed = false;
         if let Some(yes) = do_install
@@ -247,7 +247,7 @@ impl TrorApp {
             match self.plugins.install(&file) {
                 Ok(m) => {
                     manager.error = None;
-                    crate::trace::line(
+                    crate::system::trace::line(
                         tf!(
                             "[plugin {}] установлен {}",
                             "[plugin {}] installed {}",
@@ -270,7 +270,7 @@ impl TrorApp {
         {
             match self.plugins.remove(&folder) {
                 Ok(()) => {
-                    crate::trace::line(
+                    crate::system::trace::line(
                         tf!("[plugin {name}] удалён", "[plugin {name}] removed"),
                         false,
                     );
@@ -282,10 +282,10 @@ impl TrorApp {
             }
         }
         if let Some((id, on)) = toggle {
-            self.plugins.off = self.settings.switch_plugin(id, on);
-            reload = true;
-        }
-        if reload {
+            self.plugins
+                .reload_with(self.settings.switch_plugin(id, on));
+            changed = true;
+        } else if reload {
             self.plugins.reload();
             changed = true;
         }

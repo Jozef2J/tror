@@ -383,8 +383,8 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 if i.consume_key(egui::Modifiers::NONE, Key::Escape) {
                     complete.close();
                 }
-            } else if complete.hint.is_some() && i.consume_key(egui::Modifiers::NONE, Key::Escape) {
-                complete.hint = None;
+            } else if complete.hinting() && i.consume_key(egui::Modifiers::NONE, Key::Escape) {
+                complete.hide_hint();
             }
         });
         if complete.open
@@ -399,7 +399,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         let typed = handle_events(ui, doc, &m, macros);
         if doc.multi() {
             complete.close();
-            complete.hint = None;
+            complete.hide_hint();
         } else if manual {
             complete.refresh(doc, true);
         } else if typed == Typed::Text || (typed == Typed::Backspace && stepped) {
@@ -416,7 +416,7 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         }
     } else {
         complete.close();
-        complete.hint = None;
+        complete.hide_hint();
     }
     if ui.rect_contains_pointer(full) {
         let delta = ui.input(|i| i.smooth_scroll_delta);
@@ -485,8 +485,8 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
     {
         let pos = char_at(ui, doc, p);
         if let Some(url) = url_at(doc, pos) {
-            if let Err(e) = crate::preview::open_url(&url) {
-                crate::trace::popup(tf!("Не удалось открыть ссылку: {e}", "Could not open the link: {e}"), false);
+            if let Err(e) = crate::text::preview::open_url(&url) {
+                crate::system::trace::popup(tf!("Не удалось открыть ссылку: {e}", "Could not open the link: {e}"), false);
             }
         } else {
             doc.add_cursor(pos);
@@ -1277,25 +1277,16 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
         });
     }
     if !edit.hints {
-        complete.hint = None;
+        complete.hide_hint();
     }
     if complete.open
         && let Some(rect) = cursor_rect
     {
         const ROW: f32 = 22.0;
         const VISIBLE: usize = 9;
-        let count = complete.items.len().min(VISIBLE);
-        let top = complete
-            .selected
-            .saturating_sub(VISIBLE - 1)
-            .min(complete.items.len() - count);
-        let longest = complete
-            .items
-            .iter()
-            .map(|item| item.text.chars().count())
-            .max()
-            .unwrap_or(0)
-            .min(60);
+        let (top, shown) = complete.window(VISIBLE);
+        let count = shown.len();
+        let longest = complete.longest(60);
         let width = (longest as f32 * char_w + 110.0).max(220.0);
         let height = count as f32 * ROW + 8.0;
         let y = if rect.bottom() + height + 4.0 > full.bottom() {
@@ -1318,16 +1309,15 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                     Stroke::new(1.0, pal.border),
                     egui::StrokeKind::Outside,
                 );
-                for row in 0..count {
+                for (row, item) in shown.iter().enumerate() {
                     let index = top + row;
-                    let item = &complete.items[index];
                     let item_rect = Rect::from_min_size(
                         egui::pos2(area.left() + 4.0, area.top() + 4.0 + row as f32 * ROW),
                         egui::vec2(width - 8.0, ROW),
                     );
                     let response =
                         ui.interact(item_rect, id.with(("complete", row)), Sense::click());
-                    if index == complete.selected {
+                    if complete.is_selected(index) {
                         painter.rect_filled(item_rect, 5.0, pal.surface);
                     } else if response.hovered() {
                         painter.rect_filled(item_rect, 5.0, pal.crust);
@@ -1352,32 +1342,29 @@ pub fn show(ui: &mut Ui, doc: &mut Document, search: &mut SearchState, view: Vie
                 }
             });
         if let Some(index) = clicked {
-            complete.selected = index;
-            complete.accept(doc);
+            complete.pick(index, doc);
             ctx.request_repaint();
         }
     }
     if focused
-        && let (Some(hint), Some(rect)) = (&complete.hint, cursor_rect)
+        && let (Some((sigs, hint_active)), Some(rect)) = (complete.signatures(), cursor_rect)
     {
         let small = FontId::proportional(12.0);
         let code = FontId::monospace((font_size - 1.0).max(10.0));
         let mut jobs = Vec::new();
-        for sig in hint.sigs.iter().take(3) {
+        for sig in sigs.iter().take(3) {
             let mut job = LayoutJob::default();
             job.wrap.max_width = (full.width() - 40.0).clamp(200.0, 720.0);
             let plain = TextFormat::simple(code.clone(), pal.subtext);
             job.append(&sig.name, 0.0, TextFormat::simple(code.clone(), pal.text));
             job.append("(", 0.0, plain.clone());
-            let active = hint
-                .active
-                .min(sig.params.len().saturating_sub(1));
+            let active = hint_active.min(sig.params.len().saturating_sub(1));
             for (i, param) in sig.params.iter().enumerate() {
                 if i > 0 {
                     job.append(", ", 0.0, plain.clone());
                 }
                 let variadic = param.contains("...") || param.starts_with('*');
-                let current = i == active || (variadic && hint.active >= i);
+                let current = i == active || (variadic && hint_active >= i);
                 let mut format = TextFormat::simple(
                     code.clone(),
                     if current { pal.accent } else { pal.subtext },

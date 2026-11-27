@@ -441,6 +441,39 @@ impl Completion {
         self.items.clear();
     }
 
+    pub fn hide_hint(&mut self) {
+        self.hint = None;
+    }
+
+    pub fn hinting(&self) -> bool {
+        self.hint.is_some()
+    }
+
+    pub fn signatures(&self) -> Option<(&[Signature], usize)> {
+        self.hint.as_ref().map(|h| (h.sigs.as_slice(), h.active))
+    }
+
+    pub fn window(&self, rows: usize) -> (usize, &[Item]) {
+        let count = self.items.len().min(rows);
+        let top = self.selected.saturating_sub(rows.saturating_sub(1)).min(self.items.len() - count);
+        (top, &self.items[top..top + count])
+    }
+
+    pub fn longest(&self, limit: usize) -> usize {
+        self.items.iter().map(|item| item.text.chars().count()).max().unwrap_or(0).min(limit)
+    }
+
+    pub fn is_selected(&self, index: usize) -> bool {
+        index == self.selected
+    }
+
+    pub fn pick(&mut self, index: usize, doc: &mut Document) {
+        if index < self.items.len() {
+            self.selected = index;
+            self.accept(doc);
+        }
+    }
+
     pub fn refresh(&mut self, doc: &Document, manual: bool) {
         self.close();
         if doc.has_selection() {

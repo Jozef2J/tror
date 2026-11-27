@@ -4,7 +4,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use crate::remote::{Shell, ShellCmd, ShellEvent, TermProfile};
-use crate::trace;
+use crate::system::trace;
 
 const IAC: u8 = 255;
 const DONT: u8 = 254;

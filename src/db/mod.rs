@@ -11,7 +11,7 @@ use eframe::egui::{
 use crate::widgets::{dialog, dialog_button};
 use crate::remote::{self, Profile, Store};
 use crate::theme::Palette;
-use crate::trace;
+use crate::system::trace;
 
 mod dialogs;
 mod engine;
