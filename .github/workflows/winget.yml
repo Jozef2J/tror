@@ -1,0 +1,39 @@
+name: winget
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winget
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    timeout-minutes: 15
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - name: Submit to winget-pkgs
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if (-not $env:WINGET_TOKEN) {
+            Write-Output "::notice::WINGET_TOKEN is not set, nothing is submitted"
+            exit 0
+          }
+          $version = (Select-String -Path packaging/winget/Jozef2J.TrorPad.yaml -Pattern '^PackageVersion: (.+)$').Matches[0].Groups[1].Value
+          $known = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/j/Jozef2J/TrorPad" -Headers @{ Authorization = "Bearer $env:WINGET_TOKEN" } -ErrorAction SilentlyContinue
+          if ($known | Where-Object { $_.name -eq $version }) {
+            Write-Output "Jozef2J.TrorPad $version is already in winget-pkgs"
+            exit 0
+          }
+          $title = if ($known) { "New version: Jozef2J.TrorPad version $version" } else { "New package: Jozef2J.TrorPad version $version" }
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          .\wingetcreate.exe submit --prtitle $title --token $env:WINGET_TOKEN packaging/winget
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

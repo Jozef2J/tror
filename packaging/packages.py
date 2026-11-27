@@ -108,6 +108,7 @@ def winget(version, hashes):
         + f"""InstallerType: inno
 Scope: machine
 UpgradeBehavior: install
+ProductCode: '{{8F3B6C1E-5C0A-4E4B-9A55-7A6B1C0D2E11}}_is1'
 ReleaseDate: RELEASE_DATE
 Installers:
 - Architecture: x64
@@ -128,7 +129,7 @@ PackageUrl: {REPO}
 License: MIT OR Apache-2.0
 LicenseUrl: {REPO}/blob/main/LICENSE-MIT
 ShortDescription: {DESCRIPTION}
-Description: A Notepad++-style editor written in Rust with an SFTP/FTP/FTPS file manager, SSH console, MySQL/PostgreSQL/SQLite tools and WebAssembly plugins.
+Description: A tabbed code editor written in Rust with an SFTP/FTP/FTPS file manager, SSH console, MySQL/PostgreSQL/SQLite tools and WebAssembly plugins.
 Moniker: trorpad
 Tags:
 - editor

@@ -1701,7 +1701,7 @@ mod tests {
     }
 }
 
-pub const COMMANDS: [(&str, &str, &str, bool); 48] = [
+pub const COMMANDS: [(&str, &str, &str, bool); 49] = [
     ("new", "Новый файл", "Ctrl+N", true),
     ("open", "Открыть файл", "Ctrl+O", true),
     ("open_folder", "Открыть папку", "Ctrl+Shift+O", true),
@@ -1750,6 +1750,7 @@ pub const COMMANDS: [(&str, &str, &str, bool); 48] = [
     ("compare", "Сравнить файлы", "", false),
     ("compare_server", "Сравнить с версией на сервере", "", false),
     ("preview", "Предпросмотр в браузере", "F12", false),
+    ("help", "Справка TrorPad", "", false),
 ];
 
 pub fn parse_shortcut(text: &str) -> Option<KeyboardShortcut> {

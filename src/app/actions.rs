@@ -316,6 +316,16 @@ impl TrorApp {
                     Err(e) => self.notify(tf!("Предпросмотр: {e}", "Preview: {e}"), now),
                 }
             }
+            Action::Help(issue) => {
+                let url = match (issue, crate::i18n::english()) {
+                    (true, _) => crate::system::update::ISSUES,
+                    (false, true) => crate::system::update::HELP,
+                    (false, false) => crate::system::update::HELP_RU,
+                };
+                if let Err(e) = preview::open_url(url) {
+                    self.notify(tf!("Не удалось открыть {url}: {e}", "Could not open {url}: {e}"), now);
+                }
+            }
             Action::CheckUpdates => {
                 self.update.manual = true;
                 self.update.rx = Some(crate::system::update::check());

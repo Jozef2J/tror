@@ -10,18 +10,18 @@ impl RemotePanel {
             out.push(PanelEvent::Toast(text));
         }
         let dropped = self.drag_done.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(dropped) = dropped
-            && self.batch.as_ref().is_some_and(|b| b.drag)
-        {
-            self.batch = None;
-            out.push(PanelEvent::Toast(
-                if dropped {
-                    tr!("Файлы перенесены")
-                } else {
-                    tr!("Перетаскивание отменено")
+        match dropped {
+            Some(true) => {
+                if let Some(batch) = self.batch.as_mut().filter(|b| b.drag) {
+                    batch.drag = false;
+                    batch.target = tr!("в выбранную папку").to_owned();
                 }
-                .to_owned(),
-            ));
+            }
+            Some(false) => {
+                self.abandon_drag_out();
+                out.push(PanelEvent::Toast(tr!("Перетаскивание отменено").to_owned()));
+            }
+            None => {}
         }
         if self.batch.as_ref().is_some_and(|b| b.finished.is_some() && !b.open) {
             self.batch = None;

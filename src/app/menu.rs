@@ -529,6 +529,15 @@ impl TrorApp {
                     actions.push(Action::PluginsReload);
                 }
             });
+            ui.menu_button(tr!("Справка"), |ui| {
+                ui.set_min_width(220.0);
+                if item(ui, tr!("Справка TrorPad"), &key("help"), true) {
+                    actions.push(Action::Help(false));
+                }
+                if item(ui, tr!("Сообщить об ошибке"), "", true) {
+                    actions.push(Action::Help(true));
+                }
+            });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let theme_hint = if self.settings.look.dark {

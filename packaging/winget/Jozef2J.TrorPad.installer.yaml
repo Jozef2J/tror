@@ -5,6 +5,7 @@ PackageVersion: 0.30.7
 InstallerType: inno
 Scope: machine
 UpgradeBehavior: install
+ProductCode: '{8F3B6C1E-5C0A-4E4B-9A55-7A6B1C0D2E11}_is1'
 ReleaseDate: 2026-11-26
 Installers:
 - Architecture: x64

@@ -172,11 +172,6 @@ mod imp {
         unsafe { SetWindowLongPtrW(search.found, GWLP_HWNDPARENT, main) };
         true
     }
-
-    pub fn button_down() -> Option<bool> {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
-        Some(unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } as u16 & 0x8000 != 0)
-    }
 }
 
 #[cfg(not(windows))]
@@ -190,19 +185,9 @@ mod imp {
     pub fn adopt(_title: &str) -> bool {
         true
     }
-
-    #[cfg(target_os = "macos")]
-    pub fn button_down() -> Option<bool> {
-        Some(objc2_app_kit::NSEvent::pressedMouseButtons() & 1 != 0)
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    pub fn button_down() -> Option<bool> {
-        None
-    }
 }
 
 pub(crate) use imp::adopt;
-pub(crate) use imp::{button_down, cursor, remember_main};
+pub(crate) use imp::{cursor, remember_main};
 
 pub(crate) const OWNED: bool = cfg!(windows);

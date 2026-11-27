@@ -105,7 +105,6 @@ impl eframe::App for TrorApp {
         };
         let pointer = ctx.input(|i| i.pointer.latest_pos());
         let released = ctx.input(|i| i.pointer.any_released());
-        let held = owner::button_down().unwrap_or_else(|| ctx.input(|i| i.pointer.any_down()));
         let local_drag = self.project.dragging().is_some() || self.project2.dragging().is_some();
         let inner = if local_drag {
             pointer.and_then(|pos| {
@@ -136,9 +135,7 @@ impl eframe::App for TrorApp {
                 continue;
             };
             if outside {
-                if cfg!(any(target_os = "windows", target_os = "macos")) {
-                    self.remotes[index].prepare_drag_out(items);
-                }
+                promise_out(frame, &ctx, &mut self.remotes[index], items);
                 continue;
             }
             let Some(pos) = pointer else {
@@ -167,18 +164,7 @@ impl eframe::App for TrorApp {
             }
         }
         for panel in &mut self.remotes {
-            if let Some(paths) = panel.finish_drag_out(held) {
-                let done = panel.drag_done.clone();
-                if held {
-                    let ctx = ctx.clone();
-                    drag_out(frame, paths, move |dropped| {
-                        *done.lock().unwrap_or_else(|e| e.into_inner()) = Some(dropped);
-                        ctx.request_repaint();
-                    });
-                } else {
-                    *done.lock().unwrap_or_else(|e| e.into_inner()) = Some(false);
-                }
-            }
+            panel.feed_promise();
         }
         if hovering {
             ctx.request_repaint();
@@ -961,12 +947,43 @@ fn drag_out(frame: &eframe::Frame, paths: Vec<PathBuf>, done: impl Fn(bool) + Se
     }
 }
 
+fn promise_out(
+    frame: &eframe::Frame,
+    ctx: &egui::Context,
+    panel: &mut crate::remote::panel::RemotePanel,
+    items: Vec<(String, bool)>,
+) {
+    if !cfg!(any(target_os = "windows", target_os = "macos")) {
+        return;
+    }
+    let names: Vec<(String, bool)> = items
+        .iter()
+        .map(|(path, dir)| (crate::remote::file_name(path).to_owned(), *dir))
+        .collect();
+    let Some(promise) = panel.prepare_drag_out(items) else {
+        return;
+    };
+    egui::DragAndDrop::clear_payload(ctx);
+    let done = panel.drag_done.clone();
+    let repaint = ctx.clone();
+    let icon = drag_icon(names.len());
+    if let Err(e) = crate::system::promise::start(frame, names, promise, &icon, move |dropped| {
+        *done.lock().unwrap_or_else(|e| e.into_inner()) = Some(dropped);
+        repaint.request_repaint();
+    }) {
+        panel.abandon_drag_out();
+        crate::system::trace::popup(
+            tf!("Не удалось начать перетаскивание: {e}", "Could not start dragging: {e}"),
+            false,
+        );
+    }
+}
+
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn drag_out(_frame: &eframe::Frame, _paths: Vec<PathBuf>, done: impl Fn(bool) + Send + 'static) {
     done(false);
 }
 
-#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 fn drag_icon(count: usize) -> Vec<u8> {
     const W: usize = 52;
     const H: usize = 60;

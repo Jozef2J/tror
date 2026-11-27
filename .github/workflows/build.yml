@@ -132,6 +132,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -177,3 +178,4 @@ jobs:
               sleep 10
             done
           fi
+          gh workflow run winget.yml --ref main

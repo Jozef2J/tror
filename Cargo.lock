@@ -5294,13 +5294,14 @@ dependencies = [
 
 [[package]]
 name = "trorpad"
-version = "0.30.7"
+version = "0.31.0"
 dependencies = [
  "aes",
  "apple-native-keyring-store",
  "arboard",
  "argon2",
  "base64 0.23.1",
+ "block2 0.6.2",
  "chardetng",
  "chrono",
  "dbus-secret-service-keyring-store",
@@ -5323,6 +5324,7 @@ dependencies = [
  "portable-pty",
  "postgres",
  "postgres-native-tls",
+ "raw-window-handle",
  "regex",
  "rfd",
  "ron",
@@ -5341,6 +5343,7 @@ dependencies = [
  "vt100",
  "wasmi",
  "wat",
+ "windows 0.52.0",
  "windows-native-keyring-store",
  "windows-sys 0.61.2",
  "winresource",

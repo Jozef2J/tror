@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 const LATEST: &str = "https://api.github.com/repos/Jozef2J/tror/releases/latest";
 const DOWNLOADS: &str = "https://github.com/Jozef2J/tror/releases/download/";
 pub const PAGE: &str = "https://github.com/Jozef2J/tror/releases/latest";
+pub const HELP: &str = "https://jozef2j.github.io/tror/";
+pub const HELP_RU: &str = "https://jozef2j.github.io/tror/ru/";
+pub const ISSUES: &str = "https://github.com/Jozef2J/tror/issues/new/choose";
 const MAX_SIZE: u64 = 200 * 1024 * 1024;
 
 #[derive(Deserialize)]

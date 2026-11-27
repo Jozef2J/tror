@@ -250,6 +250,7 @@ pub struct RemotePanel {
     compare: HashSet<String>,
     batch: Option<Batch>,
     out_drag: Option<(PathBuf, Vec<PathBuf>)>,
+    promise: Option<std::sync::Arc<crate::system::promise::Promise>>,
     pub drag_done: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
     notice: Option<String>,
     batch_height: f32,
@@ -336,6 +337,7 @@ impl RemotePanel {
             save_to: HashMap::new(),
             batch: None,
             out_drag: None,
+            promise: None,
             drag_done: Default::default(),
             notice: None,
             batch_height: 0.0,
@@ -424,16 +426,16 @@ impl RemotePanel {
         self.external_hover = hovered.filter(|(i, _)| *i == index).map(|(_, dir)| dir.clone());
     }
 
-    pub fn finish_drag_out(&mut self, held: bool) -> Option<Vec<PathBuf>> {
-        self.out_drag.as_ref()?;
-        let Some(paths) = self.drag_out_ready() else {
-            if !held {
-                self.abandon_drag_out();
-            }
-            return None;
-        };
-        self.out_drag = None;
-        Some(paths)
+    pub fn feed_promise(&mut self) {
+        if self.promise.is_none() {
+            return;
+        }
+        if let Some(paths) = self.drag_out_ready()
+            && let Some(promise) = self.promise.take()
+        {
+            promise.fulfil(paths);
+            self.out_drag = None;
+        }
     }
 
     pub fn adopt_window(&mut self, adopt: impl Fn(&str) -> bool) {
@@ -523,9 +525,12 @@ impl RemotePanel {
             .map(|d| d.paths.clone())
     }
 
-    pub fn prepare_drag_out(&mut self, items: Vec<(String, bool)>) {
+    pub fn prepare_drag_out(
+        &mut self,
+        items: Vec<(String, bool)>,
+    ) -> Option<std::sync::Arc<crate::system::promise::Promise>> {
         if self.out_drag.is_some() {
-            return;
+            return None;
         }
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -547,7 +552,7 @@ impl RemotePanel {
         }
         let temp = root.join(stamp.to_string());
         if std::fs::create_dir_all(&temp).is_err() {
-            return;
+            return None;
         }
         let tops = items
             .iter()
@@ -561,9 +566,15 @@ impl RemotePanel {
         }
         *self.drag_done.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.out_drag = Some((temp, tops));
+        let promise = crate::system::promise::Promise::new();
+        self.promise = Some(promise.clone());
+        Some(promise)
     }
 
     pub fn abandon_drag_out(&mut self) {
+        if let Some(promise) = self.promise.take() {
+            promise.fail();
+        }
         if self.out_drag.take().is_none() {
             return;
         }
@@ -571,11 +582,6 @@ impl RemotePanel {
             self.cancel_batch();
             self.batch = None;
         }
-        *self.drag_done.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        self.notice = Some(
-            tr!("Перетаскивание отменено: кнопку мыши отпустили раньше, чем файлы скачались. Держите её, пока окно передачи не покажет «Готово», или используйте «Скачать в папку…».")
-                .to_owned(),
-        );
     }
 
     pub fn drag_out_ready(&self) -> Option<Vec<PathBuf>> {
