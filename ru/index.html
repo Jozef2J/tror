@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrorPad — справка</title>
+<meta name="description" content="TrorPad — быстрый редактор кода для тех, кто поддерживает сайты: файловый менеджер SFTP/FTP, SSH-консоль и работа с базами в одном окне. Установка и работа с программой.">
+<link rel="icon" href="../img/favicon.png">
+<link rel="alternate" hreflang="en" href="../">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="./"><img src="../img/logo.png" alt="">TrorPad</a>
+  <nav>
+    <a class="optional" href="https://github.com/Jozef2J/tror/releases/latest">Скачать</a>
+    <a class="optional" href="https://github.com/Jozef2J/tror">GitHub</a>
+    <a href="../" hreflang="en" lang="en">English</a>
+  </nav>
+</header>
+
+<div class="hero">
+  <h1>Сайт, его сервер и база данных — в одном окне.</h1>
+  <p>TrorPad — быстрый и компактный редактор кода на Rust. Рядом с файлами в нём файловый менеджер SFTP/FTP, SSH-консоль и клиент MySQL, PostgreSQL и SQLite — правка на живом сайте больше не требует четырёх программ.</p>
+  <div class="actions">
+    <a class="button" href="https://github.com/Jozef2J/tror/releases/latest">Скачать для Windows, macOS или Linux</a>
+    <a class="button quiet" href="#install">Как установить</a>
+  </div>
+  <div class="stage">
+    <img src="../img/main-ru.png" width="1280" height="780" alt="TrorPad: открыт PHP-файл, слева файлы сервера, внизу SSH-сеанс">
+    <span class="pin" style="left: 11%; top: 68%">Файлы на сервере</span>
+    <span class="pin" style="left: 62%; top: 30%">Редактор</span>
+    <span class="pin" style="left: 62%; top: 86%">SSH-консоль</span>
+  </div>
+</div>
+
+<div class="layout">
+  <aside class="toc">
+    <p>На этой странице</p>
+    <ol>
+      <li><a href="#install">Установка</a></li>
+      <li><a href="#start">Первые шаги</a></li>
+      <li><a href="#servers">Серверы</a></li>
+      <li><a href="#console">Консоль</a></li>
+      <li><a href="#databases">Базы данных</a></li>
+      <li><a href="#editor">Редактор</a></li>
+      <li><a href="#keys">Горячие клавиши</a></li>
+      <li><a href="#plugins">Плагины</a></li>
+      <li><a href="#data">Настройки, обновления и приватность</a></li>
+    </ol>
+  </aside>
+
+  <main>
+    <section id="install">
+      <h2>Установка</h2>
+      <p>Готовые файлы каждой версии — на <a href="https://github.com/Jozef2J/tror/releases/latest">странице выпусков</a>. TrorPad — это один файл программы, ему не нужны среды выполнения и дополнительные библиотеки.</p>
+      <div class="platforms">
+        <div>
+          <h3>Windows</h3>
+          <p><code>trorpad-setup.exe</code> устанавливает программу с ярлыком в меню «Пуск» и пунктом «Открыть в TrorPad» в меню файлов. <code>trorpad.exe</code> работает без установки.</p>
+          <p>Файлы пока не подписаны сертификатом, поэтому SmartScreen сначала спросит: нажмите «Подробнее», затем «Выполнить в любом случае».</p>
+        </div>
+        <div>
+          <h3>macOS</h3>
+          <p>Распакуйте <code>TrorPad-macos.zip</code> и перенесите <code>TrorPad.app</code> в «Программы».</p>
+          <p>При первом запуске щёлкните программу правой кнопкой и выберите «Открыть» или выполните <code>xattr -dr com.apple.quarantine /Applications/TrorPad.app</code>.</p>
+        </div>
+        <div>
+          <h3>Linux</h3>
+          <p>Скачайте <code>trorpad-linux-x86_64</code>, сделайте файл исполняемым и запустите:</p>
+          <pre><code>chmod +x trorpad-linux-x86_64
+./trorpad-linux-x86_64</code></pre>
+        </div>
+      </div>
+      <h3>Через менеджер пакетов</h3>
+      <p>Scoop в Windows:</p>
+      <pre><code>scoop bucket add trorpad https://github.com/Jozef2J/tror
+scoop install trorpad</code></pre>
+      <p>Homebrew в macOS (приложение) и в Linux (файл программы):</p>
+      <pre><code>brew tap jozef2j/tror https://github.com/Jozef2J/tror
+brew install --cask trorpad    # macOS
+brew install trorpad           # Linux</code></pre>
+      <p>При такой установке TrorPad не обновляет себя сам: используйте <code>scoop update trorpad</code> или <code>brew upgrade trorpad</code>.</p>
+    </section>
+
+    <section id="start">
+      <h2>Первые шаги</h2>
+      <p>Откройте папку сочетанием <kbd>Ctrl+Shift+O</kbd> (или перетащите её на окно) — она станет проектом слева. Файлы открываются двойным щелчком; файл, брошенный на окно, открывается в новой вкладке.</p>
+      <p>Искать файлы в дереве не обязательно. Нажмите <kbd>Ctrl+P</kbd> и наберите несколько букв имени: в списке открытые вкладки, файлы проекта и файлы подключённого сервера. Начните запрос с <code>&gt;</code>, чтобы выполнить любую команду по названию, или с <code>:</code>, чтобы перейти к строке. <kbd>F1</kbd> открывает то же окно сразу со списком команд.</p>
+      <figure class="wide">
+        <img src="../img/quick-ru.png" width="1280" height="780" loading="lazy" alt="Окно быстрого открытия над редактором: header.php найден по трём буквам">
+        <figcaption>Быстрое открытие: совпавшие буквы подсвечены, точкой отмечены файлы с сервера.</figcaption>
+      </figure>
+      <p>Панели перетаскиваются за вкладку, пристыковываются к любому краю, открепляются в отдельное окно или закрываются. <b>Вид → Сбросить расположение панелей</b> возвращает стандартную раскладку.</p>
+    </section>
+
+    <section id="servers">
+      <h2>Серверы</h2>
+      <p>Откройте <b>Удалённые хосты</b> клавишей <kbd>F8</kbd>, нажмите <b>+</b> и заполните профиль: протокол (SFTP, FTP или FTPS), адрес, пользователя, пароль или ключ и папку, которую открывать. Поддерживаются ключи OpenSSH и PuTTY (<code>.ppk</code>). Если сайты уже записаны в FileZilla или WinSCP, нажмите <b>Импорт…</b> в окне профилей.</p>
+      <figure class="wide">
+        <img src="../img/servers-ru.png" width="1280" height="780" loading="lazy" alt="Панель удалённых хостов, подключённая к example.com, с папкой сайта">
+        <figcaption>Подключённый сервер: двойной щелчок открывает файл для правки, файлы перетаскиваются в проект, на рабочий стол и обратно.</figcaption>
+      </figure>
+      <h3>Правка файлов на сервере</h3>
+      <p>Файл, открытый с сервера, сохраняется обратно по <kbd>Ctrl+S</kbd>. Перед записью TrorPad проверяет, не изменил ли кто-то файл на сервере после того, как вы его открыли, и если изменил — предлагает сравнить версии или перезаписать. Прежняя версия с сервера сохраняется локально (<b>Файл → Резервные копии с серверов</b>). Новая версия загружается под временным именем и затем переименовывается, поэтому обрыв связи не оставит на сервере недописанный файл.</p>
+      <h3>Передача файлов</h3>
+      <ul>
+        <li>Перетаскивайте файлы и папки между сервером, проектом и рабочим столом. Для больших передач открывается окно с ходом, паузой и отменой.</li>
+        <li>Правый щелчок по файлу: <b>Скачать в папку…</b>, <b>Скачать как…</b>, права доступа, переименование, архивы.</li>
+        <li><b>Сравнить с версией на сервере</b> (в меню вкладки) показывает, чем локальный файл отличается от файла на сервере.</li>
+        <li>Синхронизация папок загружает или скачивает только изменённое, с масками «включить» и «исключить».</li>
+      </ul>
+      <p class="note">Пароли хранятся в системном хранилище (диспетчер учётных данных Windows, связка ключей macOS, Secret Service в Linux), а не в файле настроек.</p>
+    </section>
+
+    <section id="console">
+      <h2>Консоль</h2>
+      <p><kbd>F9</kbd> открывает консоль. Профиль сервера из <b>Удалённых хостов</b> открывается как SSH-сеанс одним щелчком; профили Telnet и Mosh и локальный терминал (PowerShell, bash или zsh) — в меню <b>+</b>. Сеансы открываются во вкладках, цветовую схему и шрифт можно задать для каждого профиля.</p>
+    </section>
+
+    <section id="databases">
+      <h2>Базы данных</h2>
+      <p>Откройте <b>Вид → База данных</b>, создайте подключение (MySQL/MariaDB, PostgreSQL или файл SQLite) и нажмите <b>Подключить</b>. Подключение может идти через SSH-туннель профиля сервера и по TLS.</p>
+      <figure class="wide">
+        <img src="../img/db-ru.png" width="1280" height="780" loading="lazy" alt="Вкладка базы данных: таблица goods открыта в сетке">
+        <figcaption>Щелчок по таблице показывает её строки. Двойной щелчок по ячейке — правка; в базу ничего не пишется, пока вы не примените изменения.</figcaption>
+      </figure>
+      <ul>
+        <li><b>Запрос</b> выполняет SQL по <kbd>Ctrl+Enter</kbd>; выделенный фрагмент выполняется отдельно. Прошлые запросы — в <b>Истории</b>.</li>
+        <li><b>Поиск</b> находит значение во всех таблицах базы без SQL.</li>
+        <li><b>Структура</b> показывает столбцы, индексы, внешние ключи и SQL создания таблицы. Столбцы можно добавлять, менять и удалять: TrorPad показывает <code>ALTER TABLE</code>, который выполнит, и ждёт подтверждения.</li>
+        <li>Импорт дампов SQL и файлов CSV; экспорт результата в CSV, JSON и SQL.</li>
+      </ul>
+      <figure class="wide">
+        <img src="../img/structure-ru.png" width="1280" height="780" loading="lazy" alt="Вкладка «Структура» таблицы goods: столбцы с типами, NULL и значениями по умолчанию">
+        <figcaption>Вкладка «Структура». Ключом отмечен первичный ключ.</figcaption>
+      </figure>
+    </section>
+
+    <section id="editor">
+      <h2>Редактор</h2>
+      <ul>
+        <li>Открывает файлы от 50 МБ без задержек и подсвечивает около 200 языков.</li>
+        <li>Поиск и замена в файле (<kbd>Ctrl+F</kbd>, <kbd>Ctrl+H</kbd>) или по всему проекту (<kbd>Ctrl+Shift+F</kbd>), с регулярными выражениями. Перед заменой на диске TrorPad сохраняет копии, чтобы её можно было отменить.</li>
+        <li>Несколько курсоров: щелчок с <kbd>Ctrl</kbd>, <kbd>Ctrl+Alt+↓</kbd> или перетаскивание с <kbd>Alt</kbd> для выделения столбцом. <kbd>Tab</kbd> и <kbd>Shift+Tab</kbd> сдвигают все выделенные строки.</li>
+        <li>Сворачивание блоков, закладки (<kbd>Ctrl+F2</kbd>, <kbd>F2</kbd>), именованные макросы (<kbd>Ctrl+Shift+R</kbd>), сравнение файлов.</li>
+        <li>Визуальный редактор (<kbd>Ctrl+Shift+E</kbd>) правит страницы HTML, PHP и Twig как оформленный текст и не трогает блоки PHP и Twig. Текст из Word и Google Docs вставляется со структурой, но без цветов и шрифтов.</li>
+        <li>Несохранённая работа переживает сбой: при следующем запуске TrorPad восстановит вкладки.</li>
+      </ul>
+    </section>
+
+    <section id="keys">
+      <h2>Горячие клавиши</h2>
+      <p>Самые нужные. Все сочетания меняются в <b>Настройки → Горячие клавиши</b>; в macOS вместо <kbd>Ctrl</kbd> — <kbd>⌘</kbd>.</p>
+      <table>
+        <thead><tr><th>Клавиши</th><th>Действие</th></tr></thead>
+        <tbody>
+          <tr><td><kbd>Ctrl+P</kbd></td><td>Быстрое открытие файла</td></tr>
+          <tr><td><kbd>F1</kbd></td><td>Палитра команд</td></tr>
+          <tr><td><kbd>Ctrl+S</kbd></td><td>Сохранить (файлы с сервера — на сервер)</td></tr>
+          <tr><td><kbd>Ctrl+Shift+T</kbd></td><td>Открыть закрытую вкладку</td></tr>
+          <tr><td><kbd>Ctrl+F</kbd> / <kbd>Ctrl+H</kbd></td><td>Найти / заменить</td></tr>
+          <tr><td><kbd>Ctrl+Shift+F</kbd></td><td>Найти в файлах проекта</td></tr>
+          <tr><td><kbd>Ctrl+G</kbd></td><td>Перейти к строке</td></tr>
+          <tr><td><kbd>Ctrl+Shift+D</kbd> / <kbd>Ctrl+Shift+K</kbd></td><td>Дублировать / удалить строку</td></tr>
+          <tr><td><kbd>Alt+↑</kbd> / <kbd>Alt+↓</kbd></td><td>Переместить строку вверх / вниз</td></tr>
+          <tr><td><kbd>Alt+Z</kbd></td><td>Перенос строк</td></tr>
+          <tr><td><kbd>F7</kbd> / <kbd>F8</kbd> / <kbd>F9</kbd></td><td>Проект / удалённые хосты / консоль</td></tr>
+          <tr><td><kbd>F12</kbd></td><td>Предпросмотр в браузере</td></tr>
+          <tr><td><kbd>Ctrl++</kbd> / <kbd>Ctrl+−</kbd> / <kbd>Ctrl+0</kbd></td><td>Размер шрифта редактора</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="plugins">
+      <h2>Плагины</h2>
+      <p>Плагины пишутся на Rust и собираются в WebAssembly. Плагин работает в песочнице и получает только те разрешения, которые запросил и которые вы приняли при установке: файлы проекта, сеть, профили серверов или базы данных. Пароли плагинам не передаются никогда.</p>
+      <p>Установка — <b>Плагины → Управление плагинами… → Установить из zip…</b>. Чтобы написать свой, начните с <a href="https://github.com/Jozef2J/tror/blob/main/sdk/README.md">описания SDK</a> (на английском) и <a href="https://github.com/Jozef2J/tror/tree/main/sdk/examples/text-tools">примера text-tools</a>. Краткая справка на русском лежит в папке плагинов: <b>Плагины → Открыть папку плагинов</b>.</p>
+    </section>
+
+    <section id="data">
+      <h2>Настройки, обновления и приватность</h2>
+      <p>Настройки — в меню <b>Настройки</b> (<kbd>Ctrl+,</kbd>): тема, шрифты, цвета, горячие клавиши, язык (русский или английский) и другое.</p>
+      <p>TrorPad проверяет на GitHub, не вышла ли новая версия, и ставит её по кнопке; проверку можно выключить. Больше программа никуда ничего не отправляет: ни телеметрии, ни учётных записей. Подробности — в <a href="https://github.com/Jozef2J/tror/blob/main/PRIVACY.md#русский">политике конфиденциальности</a>.</p>
+      <p>Нашли ошибку или чего-то не хватает? <a href="https://github.com/Jozef2J/tror/issues">Напишите на GitHub</a>. Если TrorPad упал, при следующем запуске он откроет отчёт о сбое — приложите его к сообщению.</p>
+    </section>
+  </main>
+</div>
+
+<footer>
+  TrorPad — свободная программа с открытым кодом, лицензия MIT или Apache 2.0 на выбор. <a href="https://github.com/Jozef2J/tror">Исходный код</a>
+</footer>
+</body>
+</html>

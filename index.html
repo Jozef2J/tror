@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrorPad — help</title>
+<meta name="description" content="TrorPad is a fast code editor for people who maintain websites: SFTP/FTP file manager, SSH console and database tools in one window. Installation and how to use it.">
+<link rel="icon" href="img/favicon.png">
+<link rel="alternate" hreflang="ru" href="ru/">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="./"><img src="img/logo.png" alt="">TrorPad</a>
+  <nav>
+    <a class="optional" href="https://github.com/Jozef2J/tror/releases/latest">Download</a>
+    <a class="optional" href="https://github.com/Jozef2J/tror">GitHub</a>
+    <a href="ru/" hreflang="ru" lang="ru">Русский</a>
+  </nav>
+</header>
+
+<div class="hero">
+  <h1>Edit the site, its server and its database in one window.</h1>
+  <p>TrorPad is a fast, compact code editor written in Rust. Next to your files it keeps an SFTP/FTP file manager, an SSH console and a MySQL, PostgreSQL and SQLite client — so a fix on a live site does not take four programs.</p>
+  <div class="actions">
+    <a class="button" href="https://github.com/Jozef2J/tror/releases/latest">Download for Windows, macOS or Linux</a>
+    <a class="button quiet" href="#install">How to install</a>
+  </div>
+  <div class="stage">
+    <img src="img/main-en.png" width="1280" height="780" alt="TrorPad with a PHP file open, the server's files on the left and an SSH session at the bottom">
+    <span class="pin" style="left: 11%; top: 68%">Files on the server</span>
+    <span class="pin" style="left: 62%; top: 30%">Editor</span>
+    <span class="pin" style="left: 62%; top: 86%">SSH console</span>
+  </div>
+</div>
+
+<div class="layout">
+  <aside class="toc">
+    <p>On this page</p>
+    <ol>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#start">First steps</a></li>
+      <li><a href="#servers">Servers</a></li>
+      <li><a href="#console">Console</a></li>
+      <li><a href="#databases">Databases</a></li>
+      <li><a href="#editor">Editor</a></li>
+      <li><a href="#keys">Keyboard shortcuts</a></li>
+      <li><a href="#plugins">Plugins</a></li>
+      <li><a href="#data">Settings, updates and privacy</a></li>
+    </ol>
+  </aside>
+
+  <main>
+    <section id="install">
+      <h2>Install</h2>
+      <p>Every release has ready-made files on the <a href="https://github.com/Jozef2J/tror/releases/latest">releases page</a>. TrorPad is one program file; it does not need a runtime or extra libraries.</p>
+      <div class="platforms">
+        <div>
+          <h3>Windows</h3>
+          <p><code>trorpad-setup.exe</code> installs TrorPad with a Start menu shortcut and an “Open in TrorPad” item in the file menu. <code>trorpad.exe</code> runs without installation.</p>
+          <p>The files are not code-signed yet, so SmartScreen asks first: choose “More info”, then “Run anyway”.</p>
+        </div>
+        <div>
+          <h3>macOS</h3>
+          <p>Unpack <code>TrorPad-macos.zip</code> and move <code>TrorPad.app</code> to Applications.</p>
+          <p>On the first launch, right-click the app and choose “Open”, or run <code>xattr -dr com.apple.quarantine /Applications/TrorPad.app</code>.</p>
+        </div>
+        <div>
+          <h3>Linux</h3>
+          <p>Download <code>trorpad-linux-x86_64</code>, make it executable and run it:</p>
+          <pre><code>chmod +x trorpad-linux-x86_64
+./trorpad-linux-x86_64</code></pre>
+        </div>
+      </div>
+      <h3>With a package manager</h3>
+      <p>Scoop on Windows:</p>
+      <pre><code>scoop bucket add trorpad https://github.com/Jozef2J/tror
+scoop install trorpad</code></pre>
+      <p>Homebrew on macOS (the app) and on Linux (the program file):</p>
+      <pre><code>brew tap jozef2j/tror https://github.com/Jozef2J/tror
+brew install --cask trorpad    # macOS
+brew install trorpad           # Linux</code></pre>
+      <p>Installed this way, TrorPad does not update itself: use <code>scoop update trorpad</code> or <code>brew upgrade trorpad</code>.</p>
+    </section>
+
+    <section id="start">
+      <h2>First steps</h2>
+      <p>Open a folder with <kbd>Ctrl+Shift+O</kbd> (or drop it on the window): it becomes the project on the left. Files open with a double click; a file dropped on the window opens in a new tab.</p>
+      <p>You don’t have to look for files in the tree. Press <kbd>Ctrl+P</kbd> and type a few letters of the name: the list shows open tabs, project files and the files of a connected server. Start the query with <code>&gt;</code> to run any command by name, or with <code>:</code> to go to a line. <kbd>F1</kbd> opens the same window in command mode.</p>
+      <figure class="wide">
+        <img src="img/quick-en.png" width="1280" height="780" loading="lazy" alt="Quick open window above the editor with header.php found by three letters">
+        <figcaption>Quick open: matching letters are highlighted, a dot marks files from a server.</figcaption>
+      </figure>
+      <p>Panels can be dragged by their tab, docked to any edge, detached into their own window or closed. <b>View → Reset panel layout</b> brings the standard layout back.</p>
+    </section>
+
+    <section id="servers">
+      <h2>Servers</h2>
+      <p>Open <b>Remote hosts</b> with <kbd>F8</kbd>, press <b>+</b> and fill in the profile: protocol (SFTP, FTP or FTPS), address, user, password or key, and the folder to open. OpenSSH and PuTTY (<code>.ppk</code>) keys work. If you already keep sites in FileZilla or WinSCP, use <b>Import…</b> in the profile window.</p>
+      <figure class="wide">
+        <img src="img/servers-en.png" width="1280" height="780" loading="lazy" alt="Remote hosts panel connected to example.com showing the site folder">
+        <figcaption>A connected server: double-click a file to edit it, drag files to and from the project or your desktop.</figcaption>
+      </figure>
+      <h3>Editing files on the server</h3>
+      <p>A file opened from the server is saved back with <kbd>Ctrl+S</kbd>. Before saving, TrorPad checks whether someone changed the file on the server after you opened it; if so, it offers to compare the versions or overwrite. The previous server version is kept as a local backup (<b>File → Server backups</b>). The new version is uploaded under a temporary name and then renamed, so a dropped connection does not leave a half-written file.</p>
+      <h3>Transfers</h3>
+      <ul>
+        <li>Drag files and folders between the server, the project and the desktop. Large transfers show a window with progress, pause and cancel.</li>
+        <li>Right-click a file for <b>Download to folder…</b>, <b>Download as…</b>, permissions, renaming and archives.</li>
+        <li><b>Compare with the server version</b> (in the tab menu) shows what differs between your local file and the one on the server.</li>
+        <li>Folder sync uploads or downloads only what changed, with include and exclude masks.</li>
+      </ul>
+      <p class="note">Passwords are kept in the system credential store (Windows Credential Manager, macOS Keychain, Secret Service on Linux), not in the settings file.</p>
+    </section>
+
+    <section id="console">
+      <h2>Console</h2>
+      <p><kbd>F9</kbd> opens the console. A server profile from <b>Remote hosts</b> opens as an SSH session in one click; Telnet and Mosh profiles and a local terminal (PowerShell, bash or zsh) are in the <b>+</b> menu. Sessions open in tabs, and the color scheme and font can be set per profile.</p>
+    </section>
+
+    <section id="databases">
+      <h2>Databases</h2>
+      <p>Open <b>View → Database</b>, create a connection (MySQL/MariaDB, PostgreSQL or a SQLite file) and press <b>Connect</b>. A connection can go through the SSH tunnel of a server profile and over TLS.</p>
+      <figure class="wide">
+        <img src="img/db-en.png" width="1280" height="780" loading="lazy" alt="Database tab with the goods table open in a grid">
+        <figcaption>Click a table to see its rows. Double-click a cell to change it; nothing is written until you apply the changes.</figcaption>
+      </figure>
+      <ul>
+        <li><b>Query</b> runs SQL with <kbd>Ctrl+Enter</kbd>; a selected fragment runs on its own. Earlier queries are under <b>History</b>.</li>
+        <li><b>Search</b> finds a value in every table of a database without writing SQL.</li>
+        <li><b>Structure</b> shows the columns, indexes, foreign keys and the CREATE statement of a table. Columns can be added, changed and deleted: TrorPad shows the <code>ALTER TABLE</code> it will run and waits for you to confirm.</li>
+        <li>SQL dumps and CSV files can be imported; results export to CSV, JSON and SQL.</li>
+      </ul>
+      <figure class="wide">
+        <img src="img/structure-en.png" width="1280" height="780" loading="lazy" alt="Structure tab of the goods table: columns with types, NULL and defaults">
+        <figcaption>The Structure tab. The key marks the primary key.</figcaption>
+      </figure>
+    </section>
+
+    <section id="editor">
+      <h2>Editor</h2>
+      <ul>
+        <li>Opens files of 50 MB and more without delay and highlights about 200 languages.</li>
+        <li>Search and replace in a file (<kbd>Ctrl+F</kbd>, <kbd>Ctrl+H</kbd>) or across the project (<kbd>Ctrl+Shift+F</kbd>), with regular expressions. Before replacing on disk, TrorPad keeps copies so the change can be undone.</li>
+        <li>Several cursors: <kbd>Ctrl</kbd>-click, <kbd>Ctrl+Alt+↓</kbd>, or <kbd>Alt</kbd>-drag for a column. <kbd>Tab</kbd> and <kbd>Shift+Tab</kbd> indent every selected line.</li>
+        <li>Folding, bookmarks (<kbd>Ctrl+F2</kbd>, <kbd>F2</kbd>), named macros (<kbd>Ctrl+Shift+R</kbd>), file comparison.</li>
+        <li>The visual editor (<kbd>Ctrl+Shift+E</kbd>) edits HTML, PHP and Twig pages as formatted text and leaves PHP and Twig blocks untouched. Text pasted from Word or Google Docs keeps its structure and loses colors and fonts.</li>
+        <li>Unsaved work survives a crash: on the next start TrorPad restores the tabs.</li>
+      </ul>
+    </section>
+
+    <section id="keys">
+      <h2>Keyboard shortcuts</h2>
+      <p>The most used ones. All shortcuts can be changed in <b>Settings → Keyboard shortcuts</b>; on macOS <kbd>Ctrl</kbd> is <kbd>⌘</kbd>.</p>
+      <table>
+        <thead><tr><th>Keys</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr><td><kbd>Ctrl+P</kbd></td><td>Quick open a file</td></tr>
+          <tr><td><kbd>F1</kbd></td><td>Command palette</td></tr>
+          <tr><td><kbd>Ctrl+S</kbd></td><td>Save (to the server for server files)</td></tr>
+          <tr><td><kbd>Ctrl+Shift+T</kbd></td><td>Reopen a closed tab</td></tr>
+          <tr><td><kbd>Ctrl+F</kbd> / <kbd>Ctrl+H</kbd></td><td>Find / replace</td></tr>
+          <tr><td><kbd>Ctrl+Shift+F</kbd></td><td>Find in project files</td></tr>
+          <tr><td><kbd>Ctrl+G</kbd></td><td>Go to line</td></tr>
+          <tr><td><kbd>Ctrl+Shift+D</kbd> / <kbd>Ctrl+Shift+K</kbd></td><td>Duplicate / delete line</td></tr>
+          <tr><td><kbd>Alt+↑</kbd> / <kbd>Alt+↓</kbd></td><td>Move line up / down</td></tr>
+          <tr><td><kbd>Alt+Z</kbd></td><td>Word wrap</td></tr>
+          <tr><td><kbd>F7</kbd> / <kbd>F8</kbd> / <kbd>F9</kbd></td><td>Project / remote hosts / console</td></tr>
+          <tr><td><kbd>F12</kbd></td><td>Preview in the browser</td></tr>
+          <tr><td><kbd>Ctrl++</kbd> / <kbd>Ctrl+−</kbd> / <kbd>Ctrl+0</kbd></td><td>Editor font size</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="plugins">
+      <h2>Plugins</h2>
+      <p>Plugins are written in Rust and compiled to WebAssembly. A plugin runs in a sandbox and gets only the permissions it asks for and you accept at installation: files of the project, the network, server profiles or databases. Passwords are never passed to plugins.</p>
+      <p>Install a plugin with <b>Plugins → Manage plugins… → Install from zip…</b>. To write one, start with the <a href="https://github.com/Jozef2J/tror/blob/main/sdk/README.md">SDK guide</a> and the <a href="https://github.com/Jozef2J/tror/tree/main/sdk/examples/text-tools">text-tools example</a>.</p>
+    </section>
+
+    <section id="data">
+      <h2>Settings, updates and privacy</h2>
+      <p>Settings are under <b>Settings</b> (<kbd>Ctrl+,</kbd>): theme, fonts, colors, shortcuts, language (English or Russian) and more.</p>
+      <p>TrorPad checks GitHub for a new version and installs it with one click; the check can be turned off. It sends nothing else anywhere: no telemetry, no accounts. Details are in the <a href="https://github.com/Jozef2J/tror/blob/main/PRIVACY.md">privacy notice</a>.</p>
+      <p>Found a problem or missing something? <a href="https://github.com/Jozef2J/tror/issues">Open an issue on GitHub</a>. If TrorPad crashed, it opens the crash report on the next start — attach it to the issue.</p>
+    </section>
+  </main>
+</div>
+
+<footer>
+  TrorPad is free and open source under the MIT or Apache 2.0 license. <a href="https://github.com/Jozef2J/tror">Source code</a>
+</footer>
+</body>
+</html>
